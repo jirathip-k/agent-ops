@@ -18,6 +18,13 @@ on:
 
 jobs:
   triage:
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token, and repo defaults are
+    # read-only (omitting this causes an opaque startup_failure).
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     uses: YOUR-USERNAME/agent-ops/.github/workflows/triage-pipeline.yml@main
     with:
       target_repo: ${{ github.repository }}
