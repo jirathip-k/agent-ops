@@ -1,0 +1,31 @@
+# Copy this file into each managed repo at .github/workflows/project-sync.yml
+# Adds this repo's agent-ready issues to your user-level Projects v2 board.
+#
+# Why: GitHub's built-in "auto-add" workflow is limited to ONE per project on
+# the Free plan, so it can only watch one repo. This action-based sync has no
+# such limit — every repo carrying this stub feeds the same board.
+#
+# Requires (once, at user/org level):
+#   1. A classic PAT with the `project` scope (the default GITHUB_TOKEN
+#      cannot write to user-level projects):
+#      github.com → Settings → Developer settings → Tokens (classic)
+#   2. Save it as a secret available to your repos:
+#      gh secret set ADD_TO_PROJECT_PAT --repo OWNER/REPO
+#   3. Replace YOUR-USERNAME and PROJECT-NUMBER below (the number is in the
+#      board URL: github.com/users/YOUR-USERNAME/projects/<number>).
+
+name: Add to project board
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  add-to-project:
+    if: contains(github.event.issue.labels.*.name, 'agent-ready')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/users/YOUR-USERNAME/projects/PROJECT-NUMBER
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}

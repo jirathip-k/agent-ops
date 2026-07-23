@@ -74,10 +74,17 @@ Setup (once, in the GitHub UI):
 
 1. Create a user Project "Dev board" with a Status field:
    `Backlog → Ready (agent) → In progress → In review → Done`.
-2. Add each repo's issues via the project's built-in workflows:
-   **Auto-add to project** with filter `label:agent-ready`, plus
-   *Item closed → Done* and *Pull request merged → Done*.
-3. Optional CLI access needs an extra scope: `gh auth refresh -s project`,
+2. Enable the built-in workflows *Item closed → Done* and
+   *Pull request merged → Done*.
+3. Feed issues in from every repo. The built-in **Auto-add** workflow is
+   limited to ONE per project on the Free plan (it can watch only one repo),
+   so use it for your busiest repo and copy
+   `stubs/managed-repo-project-sync.yml` into each additional repo — an
+   `actions/add-to-project` workflow that adds `agent-ready` issues to the
+   board with no repo limit (needs a classic PAT with `project` scope; see
+   the stub's header). One-offs: `gh project item-add <number> --owner @me
+   --url <issue-url>`.
+4. Optional CLI access needs an extra scope: `gh auth refresh -s project`,
    then `gh project item-list <number> --owner @me`.
 
 Convention: moving a card to **Ready (agent)** means you add the
