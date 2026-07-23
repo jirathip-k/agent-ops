@@ -48,10 +48,20 @@ the groom comment when missing), and refreshes stale buckets. Run it when you
 sit down to work; every action lands as a labeled comment on the issue, so
 it's auditable and reversible (reopen / relabel).
 
-The label is the contract, but the human gate is **dispatch and merge** —
-nothing runs without `agent implement`, nothing lands without your merge.
-The CI lane's stricter equivalent is `approved-for-agent` (see
-`prompts/orchestrator.md`); that one stays human-only.
+Grooming also runs in CI (`stubs/managed-repo-groom.yml`, daily): the same
+`agent groom` code path executed in Actions, so verdicts can't drift between
+lanes. Know what that closes: since the CI triage lane treats `agent-ready`
+as its go-ahead, a CI groom promotion feeds the next triage tick — filed →
+groomed → implemented → auto-merged to staging, with no human touch until
+promotion. That's the intended autonomy level (decided 2026-07-23); the
+guardrails are the merge caps, blocked paths, the tester/reviewer gates, and
+humans owning `main`.
+
+In the local lane the human gate is still **dispatch and merge** — nothing
+runs without `agent implement`, nothing lands without your merge. In the CI
+lane the go-ahead label *is* dispatch, so the human gates are grooming
+oversight (relabel/reopen) and promotion. `approved-for-agent` remains a
+human-only label (see `prompts/orchestrator.md`).
 
 ## 3. Dispatch — run the loop
 

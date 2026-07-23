@@ -1,0 +1,87 @@
+# Reusable groom pipeline workflow.
+# Runs the real `agent groom` CLI against a managed repo — the same code path
+# as local grooming, so verdicts can't drift between lanes. Managed repos call
+# this via workflow_call (see stubs/managed-repo-groom.yml).
+#
+# Autonomy note (decided 2026-07-23): CI groom sets `agent-ready` directly.
+# Combined with the triage pipeline's go-ahead override this closes a fully
+# autonomous loop: filed → groomed ready → implemented → auto-merged to
+# staging. The guardrails are the merge caps, blocked paths, tester+reviewer
+# gates — and humans owning main via promotion.
+
+name: Agent Groom Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to groom"
+        required: true
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to groom"
+        required: true
+        type: string
+
+jobs:
+  groom:
+    runs-on: ubuntu-latest
+    # Deliberately the SAME group as the triage pipeline: groom and triage
+    # mutate the same labels, so a repo is never groomed and triaged at once.
+    concurrency:
+      group: agent-triage-${{ inputs.target_repo }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # Idle guard: no open issues → nothing to groom, skip the Claude session.
+      - name: Check for open issues
+        id: precheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list --repo "${{ inputs.target_repo }}" --state open \
+            --limit 1 --json number --jq 'length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Open issues: $COUNT"
+
+      - name: Checkout control repo (CLI + prompts)
+        if: steps.precheck.outputs.count != '0'
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        if: steps.precheck.outputs.count != '0'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Install uv
+        if: steps.precheck.outputs.count != '0'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code CLI
+        if: steps.precheck.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run groom
+        if: steps.precheck.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        working-directory: agent-ops
+        run: uv run agent groom -C "$GITHUB_WORKSPACE/target"
