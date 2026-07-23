@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_ops import worktree
 from agent_ops.config import load_project_config
 from agent_ops.prompts import render_task
 from agent_ops.utils import run
@@ -79,10 +80,20 @@ def run_triage(
     issues_text = "\n\n".join(
         f"### #{i['number']}: {i['title']}\n{i.get('body') or '(no description)'}" for i in issues
     )
-    runtime, request = role_request(
-        config, "planner", render_task("triage", issues=issues_text), project_root
+
+    # Classify against the WORKING branch (staging), not the local checkout —
+    # the checkout may sit on a stale main while merged work lives on staging.
+    run(["git", "fetch", "origin", config.base_branch], cwd=project_root)
+    triage_wt = worktree.create_detached(
+        project_root, config.worktree_dir, "triage-tmp", f"origin/{config.base_branch}"
     )
-    result = runtime.run(request)
+    try:
+        runtime, request = role_request(
+            config, "planner", render_task("triage", issues=issues_text), triage_wt
+        )
+        result = runtime.run(request)
+    finally:
+        worktree.remove(project_root, config.worktree_dir, "triage-tmp", force=True)
     if not result.ok:
         raise RuntimeError(f"Triage run failed: {result.text}")
 

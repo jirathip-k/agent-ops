@@ -24,6 +24,16 @@ def create(project_root: Path, worktree_dir: str, task_id: str, branch: str, bas
     return path
 
 
+def create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) -> Path:
+    """Read-only style worktree pinned to a ref (no branch) — e.g. for triage."""
+    path = project_root / worktree_dir / name
+    if path.exists():
+        raise FileExistsError(f"Worktree {path} already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "worktree", "add", "--detach", str(path), ref], cwd=project_root)
+    return path
+
+
 def list_worktrees(project_root: Path) -> list[Worktree]:
     proc = run(["git", "worktree", "list", "--porcelain"], cwd=project_root)
     trees: list[Worktree] = []
