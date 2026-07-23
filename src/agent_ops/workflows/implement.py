@@ -120,8 +120,7 @@ def run_implement(
             run(["sh", "-c", config.commands.setup], cwd=wt_path)
         except CommandError as exc:
             log(f"setup failed: {exc}")
-            worktree.remove(project_root, config.worktree_dir, task_id, force=True)
-            log("worktree removed (nothing was changed)")
+            _abort_cleanly(project_root, config, task_id, log)
             return False
 
     plan = NO_PLAN_TEXT
@@ -136,8 +135,8 @@ def run_implement(
             plan = make_plan(config, issue, wt_path, runtime_override=runtime_name)
         except RuntimeError as exc:
             log(str(exc))
-            worktree.remove(project_root, config.worktree_dir, task_id, force=True)
-            log("worktree removed (nothing was changed); issue needs a human decision")
+            _abort_cleanly(project_root, config, task_id, log)
+            log("issue needs a human decision")
             return False
         log(f"plan ready ({len(plan.splitlines())} lines)")
 
@@ -190,6 +189,21 @@ def run_implement(
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
     return True
+
+
+def _abort_cleanly(
+    project_root: Path,
+    config: ProjectConfig,
+    task_id: str,
+    log: Callable[[str], None],
+) -> None:
+    """Remove worktree AND its branch after an abort where nothing was committed.
+
+    Leaving the branch behind makes every re-run fail with
+    'a branch named fix/<task> already exists'.
+    """
+    worktree.remove(project_root, config.worktree_dir, task_id, force=True, delete_branch=True)
+    log("worktree and branch removed (nothing was changed)")
 
 
 def _labels(issue: dict[str, Any]) -> str:
