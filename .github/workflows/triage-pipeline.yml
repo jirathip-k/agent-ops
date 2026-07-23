@@ -96,6 +96,12 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Show the orchestrator's full session in the run log — needed to
+          # audit which tool calls get permission-denied (47 in the first
+          # working run) and to follow its triage reasoning while building
+          # trust. Managed-repo logs are visible to anyone with repo access;
+          # revisit if a managed repo's issues carry sensitive content.
+          show_full_output: true
           # base/workhorse model (orchestrator + implementer/tester subagents);
           # the orchestrator prompt requests fable for planner/reviewer subagents
           #
