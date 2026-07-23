@@ -74,6 +74,23 @@ When the user asks to set up a project for agents, do all of these:
 8. Leave the new files **uncommitted** in the project repo for the user to
    review, but commit the board.yml change in agent-ops.
 
+## Running implements in Herdr panes
+
+If `herdr` is on PATH and the user is in a Herdr session, start each
+implement run in its own tab instead of a plain background shell — Herdr
+then shows the run in its sidebar with live agent-status detection:
+
+```sh
+PANE=$(herdr tab create --cwd <project-path> --label "agent:issue-<N>" \
+  --no-focus | jq -r '.result.root_pane.pane_id')
+herdr pane run "$PANE" agent implement <N>
+```
+
+Check on runs with `herdr tab list` (agent_status: working/blocked/done) or
+`herdr pane read <pane_id>`. Background shells inside a Claude session are
+invisible to Herdr — only pane processes appear; at minimum give the user a
+tab tailing the run's output file.
+
 ## Configuration facts
 
 - Project config: `.agent/config.yaml` (merged over platform
