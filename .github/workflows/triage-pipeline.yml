@@ -54,15 +54,21 @@ jobs:
     steps:
       # Idle guard: skip the (token-costing) Claude session entirely when the
       # repo has no issue the orchestrator would act on. Runs in seconds, free.
+      # Actionable = untriaged (no skip labels), OR carrying a human go-ahead
+      # (agent-ready / approved-for-agent), which overrides triage:done and
+      # backlog — the post-triage approval flow. needs-human/blocked always win.
       - name: Check for actionable work
         id: precheck
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           COUNT=$(gh issue list --repo "${{ inputs.target_repo }}" --state open --limit 100 \
-            --json labels --jq '[.[] | select(
-              ([.labels[].name] | map(. == "triage:done" or . == "needs-human"
-                or . == "blocked" or . == "backlog") | any) | not
+            --json labels --jq '[.[] | [.labels[].name] as $l | select(
+              (($l | map(. == "needs-human" or . == "blocked") | any) | not)
+              and (
+                (($l | map(. == "triage:done" or . == "backlog") | any) | not)
+                or ($l | map(. == "agent-ready" or . == "approved-for-agent") | any)
+              )
             )] | length')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "Actionable issues: $COUNT"

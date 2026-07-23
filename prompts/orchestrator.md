@@ -24,6 +24,10 @@ than failing.
    `triage:done`, `needs-human`, `blocked`, or already assigned — and skip any
    issue that already has an open PR for it (a `fix/issue-<N>` branch or a PR
    whose body references it): the local lane may have picked it up.
+   Exception: `agent-ready` or `approved-for-agent` overrides `triage:done`
+   and `backlog` — that's the human's post-triage go-ahead, so the issue
+   re-enters the normal lane (Step 2A). It does NOT override `needs-human`,
+   `blocked`, or the open-PR skip.
    If triage exploration itself uncovers unrelated defects, file them per
    Step 5 (search for duplicates first, `found-by-audit` label, never fix).
 2. Classify each new issue and route it:
