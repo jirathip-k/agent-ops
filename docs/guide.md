@@ -96,6 +96,26 @@ cd ../.. && git worktree remove --force .worktrees/verify
 the worktree way just avoids moving your branch while you have work open.)
 Happy? Merge the promotion PR on GitHub. That's the release.
 
+## How to promote (merge staging into main)
+
+`agent promote --project <app>` opens (or reports) the promotion PR with a
+changelog — agents never merge it.
+
+Once you've verified staging (above), merge it yourself with a **merge
+commit**, not squash:
+
+```sh
+gh pr merge <N> --merge
+```
+
+Or on GitHub, use the green button with "Create a merge commit" selected.
+Squash would rewrite history and make staging and main diverge.
+
+Don't delete the staging branch when merging — keep it.
+
+After the merge, new agent work automatically starts from the promoted
+state (worktrees branch from `origin/staging`).
+
 ## The words that keep coming up
 
 - **staging** — the "try it first" branch. Agents may merge here (with rules).
