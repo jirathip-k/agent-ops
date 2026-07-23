@@ -92,7 +92,16 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # base/workhorse model (orchestrator + implementer/tester subagents);
           # the orchestrator prompt requests fable for planner/reviewer subagents
-          claude_args: --model claude-sonnet-5
+          #
+          # --allowedTools is required: headless runs have nobody to approve
+          # permission prompts, so any tool not listed here is silently denied
+          # (a run without it burns tokens and produces zero side effects).
+          # Bash is limited to the CLIs the pipeline actually needs — gh/git
+          # for state, the package/test runners for gates. Repos with other
+          # toolchains need their runner added here.
+          claude_args: >-
+            --model claude-sonnet-5
+            --allowedTools "Bash(gh:*),Bash(git:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(pnpm:*),Bash(yarn:*),Bash(uv:*),Bash(python:*),Bash(pytest:*),Read,Grep,Glob,Edit,Write,Task,TodoWrite"
           prompt: |
             TARGET_REPO: ${{ inputs.target_repo }}
             MAX_ISSUES: ${{ inputs.max_issues }}
