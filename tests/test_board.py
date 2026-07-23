@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from agent_ops.board import BoardConfig, load_board_config
+from agent_ops.board import EXAMPLE_BOARD_FILE, BoardConfig, load_board_config
 
 
-def test_platform_board_config_is_valid() -> None:
-    config = load_board_config()
+def test_example_board_config_is_valid() -> None:
+    config = load_board_config(EXAMPLE_BOARD_FILE)
     assert config.project.number > 0
-    assert "jirathip-k/agent-ops" in config.repos
+    assert config.repos
 
 
 def test_board_config_parses_label_filter(tmp_path: Path) -> None:

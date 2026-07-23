@@ -9,7 +9,10 @@ from pydantic import BaseModel, Field
 
 from agent_ops.utils import PLATFORM_ROOT, run
 
-BOARD_FILE = PLATFORM_ROOT / "config" / "board.yml"
+# Real registry is git-ignored (private repo names stay out of the public
+# repo); the committed .example file documents the shape.
+BOARD_FILE = PLATFORM_ROOT / "config" / "local" / "board.yml"
+EXAMPLE_BOARD_FILE = PLATFORM_ROOT / "config" / "board.example.yml"
 
 
 class BoardProject(BaseModel):
@@ -24,6 +27,10 @@ class BoardConfig(BaseModel):
 
 
 def load_board_config(path: Path = BOARD_FILE) -> BoardConfig:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found — copy {EXAMPLE_BOARD_FILE} there and fill in your repos"
+        )
     return BoardConfig.model_validate(yaml.safe_load(path.read_text()))
 
 

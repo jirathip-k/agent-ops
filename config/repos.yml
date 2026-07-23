@@ -1,0 +1,23 @@
+# CI-lane defaults read by the orchestrator prompt. The REGISTRY of managed
+# repos does not live here: each managed repo carries its own stub workflow
+# (stubs/managed-repo-triage.yml) and passes its settings as inputs, so no
+# private repo names appear in this public repo. Keep a personal reference
+# list in config/local/repos.yml (git-ignored) if you want one.
+
+defaults:
+  max_issues_per_run: 3
+  max_revision_rounds: 1
+  auto_merge:
+    max_changed_lines: 200
+    max_changed_files: 5
+    blocked_paths:         # changes here always block auto-merge
+      - ".github/**"
+      - "**/auth/**"
+      - "**/migrations/**"
+      - "package.json"
+      - "package-lock.json"
+      - "requirements*.txt"
+      - "Dockerfile"
+      - "*.tf"
+  soak_hours: 24
+  stale_staging_days: 7

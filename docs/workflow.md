@@ -64,6 +64,19 @@ The scheduled triage pipeline handles the long tail (triage, small fixes,
 audit issues) across repos registered in `config/repos.yml`. Check its run
 summaries and `needs-human` labels once a day; that's your ops inbox.
 
+## Public repo, private registries
+
+This repo is public; the names of the repos it manages are not. The split:
+
+- `config/local/` is **git-ignored** and holds the real registries — currently
+  `board.yml` (the Projects-board repo list). Copy the committed
+  `config/board.example.yml` there and fill it in on a new machine.
+- The CI lane has no central registry at all: each managed repo carries its
+  own stub workflow and passes its settings as workflow inputs, so managed
+  repo names only ever appear inside the managed repos themselves.
+- History was scrubbed (git-filter-repo) before the repo went public, so old
+  revisions of these files are gone from every branch.
+
 ## GitHub Projects (the board)
 
 Use one user-level Projects v2 board across all your repos as the human view;
