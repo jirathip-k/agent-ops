@@ -69,7 +69,10 @@ Faster, not looser — all four agents run, gates are stricter:
 ---
 
 ## Step 3 — Auto-merge to staging (normal lane only)
-Merge ONLY if ALL of the following hold:
+If AUTO_MERGE is false, run in REPORT-ONLY mode: perform every check below,
+but never merge — label qualifying PRs `ready-to-merge` and state in the run
+summary that they passed all gates. Otherwise, merge ONLY if ALL of the
+following hold:
 - Tester verdict PASS and Reviewer verdict APPROVE
 - All CI checks green (never merge on pending or failing checks)
 - Diff ≤ 200 changed lines and ≤ 5 files

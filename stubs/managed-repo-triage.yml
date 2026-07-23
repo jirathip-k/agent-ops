@@ -22,5 +22,6 @@ jobs:
     with:
       target_repo: ${{ github.repository }}
       max_issues: 3
+      auto_merge: false   # report-only; flip to true after a trusted week
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

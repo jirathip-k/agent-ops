@@ -16,6 +16,11 @@ on:
         required: false
         type: number
         default: 3
+      auto_merge:
+        description: "Allow auto-merge to staging (false = report-only)"
+        required: false
+        type: boolean
+        default: false
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -25,6 +30,11 @@ on:
         description: "owner/repo to operate on"
         required: true
         type: string
+      auto_merge:
+        description: "Allow auto-merge to staging (false = report-only)"
+        required: false
+        type: boolean
+        default: false
 
 # One pipeline run at a time — prevents overlapping hourly runs from
 # grabbing the same issues.
@@ -61,6 +71,7 @@ jobs:
           prompt: |
             TARGET_REPO: ${{ inputs.target_repo }}
             MAX_ISSUES: ${{ inputs.max_issues }}
+            AUTO_MERGE: ${{ inputs.auto_merge }}
             Working directory for the target repo: ./target
             Agent role files: ./agent-ops/prompts/agents/
 
