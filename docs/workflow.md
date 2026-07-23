@@ -27,15 +27,31 @@ issue, the agents can't see it.
 
 An issue is agent-ready when it has acceptance criteria, is small enough to
 verify (roughly ≤ half a day of human work), and touches no danger zone from
-`AGENTS.md`. Then:
+`AGENTS.md`. You can label by hand:
 
 ```sh
 gh issue edit 123 --add-label agent-ready
 ```
 
-The label is the contract. The CI lane's stricter equivalent is
-`approved-for-agent` (see `prompts/orchestrator.md`); locally you're the
-gate, so one label is enough.
+…but you don't have to. `agent triage` buckets new issues (and now re-checks
+issues the CI lane stamped `triage:done` without a bucket), and:
+
+```sh
+agent groom --project <app>
+```
+
+re-validates *every* open issue against the working branch: closes ones whose
+fix is already verifiably in the code (checked by file content, immune to the
+squash-promotion ancestry trap), closes duplicates/obsolete ones, promotes
+workable issues to `agent-ready` (writing a one-line acceptance criterion into
+the groom comment when missing), and refreshes stale buckets. Run it when you
+sit down to work; every action lands as a labeled comment on the issue, so
+it's auditable and reversible (reopen / relabel).
+
+The label is the contract, but the human gate is **dispatch and merge** —
+nothing runs without `agent implement`, nothing lands without your merge.
+The CI lane's stricter equivalent is `approved-for-agent` (see
+`prompts/orchestrator.md`); that one stays human-only.
 
 ## 3. Dispatch — run the loop
 

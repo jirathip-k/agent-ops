@@ -143,6 +143,22 @@ def triage(
 
 
 @app.command()
+def groom(project: ProjectOpt = Path(".")) -> None:
+    """Re-validate open issues: close fixed/invalid ones, promote workable ones to agent-ready."""
+    from agent_ops.workflows.groom import run_groom
+
+    try:
+        results = run_groom(project.resolve())
+    except (CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.verdict] = counts.get(r.verdict, 0) + 1
+    typer.echo(", ".join(f"{v}: {n}" for v, n in counts.items()) or "nothing to groom")
+
+
+@app.command()
 def merge(
     pr: Annotated[int, typer.Argument(help="PR number to merge into the working branch")],
     project: ProjectOpt = Path("."),

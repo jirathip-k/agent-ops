@@ -12,8 +12,10 @@ from agent_ops.prompts import render_task
 from agent_ops.utils import run
 from agent_ops.workflows.implement import role_request
 
-# Issues carrying any of these have been triaged (or decided) already.
-DONE_LABELS = {"agent-ready", "needs-human", "backlog", "triage:done"}
+# An issue is classified only when it carries a bucket label. The CI lane
+# stamps `triage:done` on everything it processes but (report-only) leaves
+# bugs bucketless — those must still be triaged here, or the queue starves.
+BUCKET_LABELS = {"agent-ready", "needs-human", "backlog"}
 
 LABEL_COLORS = {
     "agent-ready": "1d76db",
@@ -75,7 +77,7 @@ def run_triage(
     issues = [
         i
         for i in json.loads(proc.stdout)
-        if not DONE_LABELS & {lbl["name"] for lbl in i.get("labels", [])}
+        if not BUCKET_LABELS & {lbl["name"] for lbl in i.get("labels", [])}
     ]
     if not issues:
         log("nothing to triage — every open issue is already classified")
