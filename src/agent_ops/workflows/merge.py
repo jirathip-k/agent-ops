@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
@@ -101,6 +102,23 @@ def run_merge(
     return True
 
 
+def closable_issue_refs(commit_subjects: list[str], open_issues: set[int]) -> list[int]:
+    """Issue numbers the promotion PR should auto-close.
+
+    A subject's trailing "(#N)" refs name the issue that commit fixes (our
+    commit convention) — plural because GitHub squash merges append their own
+    "(#PR)" after the issue ref, as in "fix: thing (#111) (#116)". "(#N)"
+    anywhere else — "part of #N", "PR #N: …" — is only a reference. Filtering
+    against the repo's open issues drops PR numbers and already-closed issues.
+    """
+    refs: set[int] = set()
+    for subject in commit_subjects:
+        tail = re.search(r"((?:\s*\(#\d+\))+)$", subject)
+        if tail:
+            refs.update(int(n) for n in re.findall(r"#(\d+)", tail.group(1)))
+    return sorted(refs & open_issues)
+
+
 def run_promote(project_root: Path, *, log: Callable[[str], None] = print) -> str:
     """Open (or report) the human-verification PR: working branch → stable branch.
 
@@ -133,9 +151,26 @@ def run_promote(project_root: Path, *, log: Callable[[str], None] = print) -> st
         return urls[0]["url"]
 
     changelog = "\n".join(f"- {line}" for line in commits.splitlines())
+    # "Fixes #N" in PRs merged to the working branch never reaches GitHub's
+    # auto-close (it only fires on the default branch), so the promotion PR
+    # must carry the Closes lines itself.
+    open_issues_json = run(
+        ["gh", "issue", "list", "--state", "open", "--limit", "1000", "--json", "number"],
+        cwd=project_root,
+    )
+    open_issues = {item["number"] for item in json.loads(open_issues_json.stdout)}
+    closes = closable_issue_refs(commits.splitlines(), open_issues)
+    closes_section = (
+        "\n\n## Closes on merge\n\n"
+        + "\n".join(f"Closes #{n}" for n in closes)
+        + "\n\nPrune any line whose issue shouldn't auto-close (partial fixes, "
+        "device verification pending)."
+        if closes
+        else ""
+    )
     body = (
         f"Promotion of `{working}` into `{stable}` — human verification required.\n\n"
-        f"## Changes\n\n{changelog}\n\n"
+        f"## Changes\n\n{changelog}{closes_section}\n\n"
         "Verify on staging, then merge (do NOT let an agent merge this)."
     )
     proc = run(

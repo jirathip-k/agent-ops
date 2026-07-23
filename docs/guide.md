@@ -132,6 +132,13 @@ after merging: `gh release create v0.x.0 --generate-notes`.
 Or on GitHub, use the green button with "Create a merge commit" selected.
 Squash would rewrite history and make staging and main diverge.
 
+Before merging, check the PR body's **"Closes on merge"** section: `agent
+promote` pre-fills a `Closes #N` line for every issue fixed by a promoted
+commit, because "Fixes #N" in the staging-bound PRs never triggers GitHub's
+auto-close (that only fires on the default branch). Prune lines for issues
+that shouldn't close yet — partial fixes, or fixes awaiting device
+verification on a TestFlight build.
+
 Don't delete the staging branch when merging — keep it.
 
 After the merge, new agent work automatically starts from the promoted
