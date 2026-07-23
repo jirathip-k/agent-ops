@@ -11,6 +11,10 @@ Labels: {issue_labels}
 
 {issue_body}
 
+## Plan
+
+{plan}
+
 ## Ground rules
 
 1. If an `AGENTS.md` or `CLAUDE.md` exists in the repo root, read it first and

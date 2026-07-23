@@ -37,3 +37,7 @@ def pr_diff(number: int, cwd: Path) -> str:
 
 def comment_on_pr(number: int, body: str, cwd: Path) -> None:
     run(["gh", "pr", "comment", str(number), "--body", body], cwd=cwd)
+
+
+def comment_on_issue(number: int, body: str, cwd: Path) -> None:
+    run(["gh", "issue", "comment", str(number), "--body", body], cwd=cwd)

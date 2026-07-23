@@ -21,6 +21,7 @@ class Commands(BaseModel):
 class LoopConfig(BaseModel):
     max_attempts: int = 3
     gates: list[str] = Field(default_factory=lambda: ["test", "lint", "typecheck"])
+    plan: bool = True
     self_review: bool = True
 
 
@@ -31,13 +32,46 @@ class RuntimeConfig(BaseModel):
     max_turns: int | None = None
 
 
+class RoleConfig(BaseModel):
+    """Per-role overrides; unset fields fall back to the project's runtime config."""
+
+    runtime: str | None = None
+    model: str | None = None
+    permission_mode: str | None = None
+    max_turns: int | None = None
+
+
+class AgentsConfig(BaseModel):
+    planner: RoleConfig = Field(default_factory=RoleConfig)
+    implementer: RoleConfig = Field(default_factory=RoleConfig)
+    reviewer: RoleConfig = Field(default_factory=RoleConfig)
+
+
+class ResolvedRole(BaseModel):
+    runtime: str
+    model: str | None
+    permission_mode: str
+    max_turns: int | None
+
+
 class ProjectConfig(BaseModel):
     base_branch: str = "main"
     worktree_dir: str = ".worktrees"
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
+
+    def resolve_role(self, role_name: str) -> ResolvedRole:
+        """Merge a role's overrides over the base runtime config."""
+        role: RoleConfig = getattr(self.agents, role_name)
+        return ResolvedRole(
+            runtime=role.runtime or self.runtime.name,
+            model=role.model or self.runtime.model,
+            permission_mode=role.permission_mode or self.runtime.permission_mode,
+            max_turns=role.max_turns if role.max_turns is not None else self.runtime.max_turns,
+        )
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

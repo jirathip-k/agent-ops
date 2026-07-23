@@ -6,10 +6,14 @@ knowledge** (each managed repo's `AGENTS.md` + `.agent/`).
 ## Layers
 
 ```
-CLI (agent implement / review / init / doctor / worktree)
+CLI (agent plan / implement / review / queue / init / doctor / worktree)
  │
  ├─ config      platform defaults ⊕ project .agent/config.yaml
  ├─ workflows   implement, review        ← business logic lives here
+ │    │
+ │    ├─ roles      planner / implementer / reviewer — per-role model +
+ │    │             permission overrides (agents: in config); planner and
+ │    │             reviewer default to a stronger model, read-only
  │    │
  │    ├─ worktree   one isolated worktree + branch per task
  │    ├─ loop       execute → gates → retry (fresh context per retry)
@@ -28,8 +32,11 @@ Workflows and the loop depend only on the `Runtime` protocol
 ## Two lanes
 
 **Local lane** (`agent` CLI): interactive development on your machine, billed
-to your Claude/Codex subscription. Issue → worktree → implement loop →
-self-review → PR.
+to your Claude/Codex subscription. Issue → worktree → plan (smart model,
+read-only) → implement loop (workhorse model) → self-review (smart model,
+read-only) → PR. Each stage is a separate agent with fresh context; the plan
+is the only artifact handed forward, mirroring the CI lane's
+Planner → Implementer → Reviewer pipeline.
 
 **CI lane** (`.github/workflows/triage-pipeline.yml`): scheduled, unattended
 triage across managed repos via `claude-code-action` and the prompt pipeline

@@ -7,11 +7,12 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, worktree
+from agent_ops import __version__, github, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import run_implement, run_review
+from agent_ops.workflows.implement import make_plan
 
 app = typer.Typer(
     name="agent",
@@ -51,6 +52,28 @@ def implement(
         _err(str(exc))
         raise typer.Exit(1) from exc
     raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def plan(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number to plan")],
+    project: ProjectOpt = Path("."),
+    runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
+    post: Annotated[bool, typer.Option("--post", help="Post the plan as an issue comment")] = False,
+) -> None:
+    """Run only the planner role (smart model, read-only) and print the plan."""
+    root = project.resolve()
+    config = load_project_config(root)
+    try:
+        issue_data = github.get_issue(issue, cwd=root)
+        text = make_plan(config, issue_data, root, runtime_override=runtime)
+    except (CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(text)
+    if post:
+        github.comment_on_issue(issue, f"## Agent plan\n\n{text}", cwd=root)
+        typer.echo(f"posted plan on issue #{issue}")
 
 
 @app.command()
