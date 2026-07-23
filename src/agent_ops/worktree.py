@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops.utils import run
+from agent_ops.utils import CommandError, run
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,34 @@ def list_worktrees(project_root: Path) -> list[Worktree]:
     return trees
 
 
-def remove(project_root: Path, worktree_dir: str, task_id: str, *, force: bool = False) -> None:
+def remove(
+    project_root: Path,
+    worktree_dir: str,
+    task_id: str,
+    *,
+    force: bool = False,
+    delete_branch: bool = False,
+) -> None:
     path = project_root / worktree_dir / task_id
+    branch = None
+    if delete_branch:
+        for wt in list_worktrees(project_root):
+            if wt.path.resolve() == path.resolve():
+                branch = wt.branch
+                break
+
     cmd = ["git", "worktree", "remove", str(path)]
     if force:
         cmd.insert(3, "--force")
     run(cmd, cwd=project_root)
+
+    if branch is not None:
+        # Mirror the worktree removal's fail-safe-unless-forced behavior:
+        # -d refuses to delete a branch with unmerged commits.
+        try:
+            run(["git", "branch", "-D" if force else "-d", branch], cwd=project_root)
+        except CommandError as exc:
+            raise CommandError(
+                f"Worktree removed, but branch {branch!r} was kept: it has unmerged "
+                f"commits. Delete it with `git branch -D {branch}` if you are sure."
+            ) from exc
