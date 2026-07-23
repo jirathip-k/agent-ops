@@ -52,4 +52,14 @@ loop:
   plan: true               # planner agent runs first; ESCALATE stops the workflow
   self_review: true        # run a read-only review agent before committing
 
+# Agent merges go into base_branch (set it to `staging` per project to use
+# the promotion flow); merge.stable_branch is human-only — `agent promote`
+# opens the verification PR, a human merges it.
+merge:
+  stable_branch: main
+  max_changed_lines: 400
+  max_changed_files: 12
+  # blocked_paths defaults live in code (config.MergeConfig); override here
+  # per project if needed
+
 skills: [coding, testing]  # platform skills injected into implement prompts

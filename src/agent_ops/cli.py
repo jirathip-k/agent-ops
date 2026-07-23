@@ -14,6 +14,7 @@ from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import run_implement, run_review
 from agent_ops.workflows.implement import make_plan
+from agent_ops.workflows.merge import run_merge, run_promote
 
 app = typer.Typer(
     name="agent",
@@ -118,6 +119,33 @@ def review(
         _err(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(text)
+
+
+@app.command()
+def merge(
+    pr: Annotated[int, typer.Argument(help="PR number to merge into the working branch")],
+    project: ProjectOpt = Path("."),
+    override: Annotated[
+        bool, typer.Option("--override", help="Human override: merge despite rule violations")
+    ] = False,
+) -> None:
+    """Squash-merge a PR into the working branch (staging) if all merge rules pass."""
+    try:
+        ok = run_merge(project.resolve(), pr, override=override)
+    except CommandError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def promote(project: ProjectOpt = Path(".")) -> None:
+    """Open the staging → stable promotion PR for human verification (never merges)."""
+    try:
+        run_promote(project.resolve())
+    except CommandError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
 
 
 @app.command()

@@ -56,6 +56,28 @@ class ResolvedRole(BaseModel):
     max_turns: int | None
 
 
+class MergeConfig(BaseModel):
+    """Rules for agent merges into the working branch (never the stable one)."""
+
+    stable_branch: str = "main"  # promotion target; only humans merge into it
+    max_changed_lines: int = 400
+    max_changed_files: int = 12
+    blocked_paths: list[str] = Field(
+        default_factory=lambda: [
+            ".github/*",
+            "*auth*",
+            "*migration*",
+            "package.json",
+            "package-lock.json",
+            "requirements*.txt",
+            "pyproject.toml",
+            "uv.lock",
+            "Dockerfile",
+            "*.tf",
+        ]
+    )
+
+
 class ProjectConfig(BaseModel):
     base_branch: str = "main"
     worktree_dir: str = ".worktrees"
@@ -66,6 +88,7 @@ class ProjectConfig(BaseModel):
     # tiers ("smart") so upgrading every role is a one-line change, and
     # floating vendor aliases keep tiers pointing at the latest models.
     model_tiers: dict[str, dict[str, str]] = Field(default_factory=dict)
+    merge: MergeConfig = Field(default_factory=MergeConfig)
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
