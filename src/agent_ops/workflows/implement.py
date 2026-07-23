@@ -184,6 +184,13 @@ def run_implement(
         )
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         log(f"opened PR: {url}")
+        if config.loop.auto_merge:
+            from agent_ops.workflows.merge import run_merge
+
+            pr_number = int(url.rstrip("/").rsplit("/", 1)[-1])
+            log("auto-merge enabled — applying merge rules")
+            # never overrides: a blocked PR stays open for a human
+            run_merge(project_root, pr_number, log=log)
 
     if not keep_worktree:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)

@@ -122,6 +122,27 @@ def review(
 
 
 @app.command()
+def triage(
+    project: ProjectOpt = Path("."),
+    dispatch: Annotated[
+        bool, typer.Option("--dispatch", help="Spawn implement runs for agent-ready issues")
+    ] = False,
+) -> None:
+    """Classify untriaged open issues (agent-ready / needs-human / backlog) and label them."""
+    from agent_ops.workflows.triage import run_triage
+
+    try:
+        results = run_triage(project.resolve(), dispatch=dispatch)
+    except (CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.verdict] = counts.get(r.verdict, 0) + 1
+    typer.echo(", ".join(f"{v}: {n}" for v, n in counts.items()) or "nothing to triage")
+
+
+@app.command()
 def merge(
     pr: Annotated[int, typer.Argument(help="PR number to merge into the working branch")],
     project: ProjectOpt = Path("."),

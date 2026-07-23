@@ -24,6 +24,7 @@ class LoopConfig(BaseModel):
     gates: list[str] = Field(default_factory=lambda: ["test", "lint", "typecheck"])
     plan: bool = True
     self_review: bool = True
+    auto_merge: bool = False  # after opening a PR, merge it into staging if merge rules pass
 
 
 class RuntimeConfig(BaseModel):
