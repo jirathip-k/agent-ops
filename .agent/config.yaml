@@ -1,0 +1,10 @@
+# agent-ops managing itself (dogfood project).
+
+base_branch: main
+
+commands:
+  test: uv run pytest -q
+  lint: uv run ruff check . && uv run ruff format --check .
+  typecheck: uv run pyright
+
+skills: [coding, testing, documentation]

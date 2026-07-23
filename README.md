@@ -41,12 +41,19 @@ overwritten.
 
 ```sh
 agent queue                    # open issues labeled agent-ready, oldest first
-agent implement 123            # issue → worktree → agent loop → gates → self-review → PR
+agent plan 123 --post          # planner only (smart model, read-only) → issue comment
+agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
 agent review 45                # read-only review of PR #45 (add --post to comment)
 agent worktree list            # see in-flight task worktrees
 agent runtimes                 # claude_code / codex availability
 ```
+
+Stages fan out across roles: the **planner** and **reviewer** default to a
+stronger model (`opus`) in read-only mode, while the **implementer** runs on
+the workhorse default with write access. Override per project (or per role)
+under `agents:` in `.agent/config.yaml`; a planner `ESCALATE:` stops the
+workflow before anything is changed.
 
 The full loop — capture → groom (`agent-ready` label) → dispatch → review →
 merge — plus GitHub Projects board setup and running parallel agents under

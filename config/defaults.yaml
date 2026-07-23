@@ -11,6 +11,19 @@ runtime:
   permission_mode: acceptEdits
   max_turns: null
 
+# Per-role overrides (fan-out): unset fields inherit from `runtime` above.
+# Planning and review are cheap in tokens but high in leverage, so they get
+# the smartest model; implementation runs on the workhorse default.
+agents:
+  planner:
+    model: opus            # smarter model for root-cause analysis & plan
+    permission_mode: plan  # read-only
+  implementer:
+    model: null            # inherit (typically sonnet) — does the bulk work
+  reviewer:
+    model: opus            # smarter model to judge the diff
+    permission_mode: plan  # read-only
+
 commands:
   test: null               # e.g. "uv run pytest -q" / "npm test"
   lint: null               # e.g. "uv run ruff check ."
@@ -19,6 +32,7 @@ commands:
 loop:
   max_attempts: 3          # implement attempts before escalating to a human
   gates: [test, lint, typecheck]   # run in order; gates without a command are skipped
+  plan: true               # planner agent runs first; ESCALATE stops the workflow
   self_review: true        # run a read-only review agent before committing
 
 skills: [coding, testing]  # platform skills injected into implement prompts

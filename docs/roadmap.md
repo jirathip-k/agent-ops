@@ -12,11 +12,12 @@ the previous stage is boringly reliable.
 
 ## Next
 
-- [ ] `agent plan <issue>`: separate planner step that posts a plan comment
-      on the issue for human approval before `agent implement` runs.
+- [x] `agent plan <issue>` + in-workflow plan stage (planner role on a
+      stronger model, read-only; ESCALATE stops the run).
 - [ ] Structured run logs (`.agent-runs/<task-id>.jsonl`): attempts, gate
       results, cost — the audit trail for tuning prompts.
-- [ ] `agent implement --from-plan`: consume an approved plan comment.
+- [ ] `agent implement --from-plan`: consume an approved plan comment
+      instead of re-planning.
 - [ ] Codex adapter parity: JSONL event parsing, verdict extraction.
 - [ ] Batch mode: `agent triage` running the CI orchestrator logic locally.
 
