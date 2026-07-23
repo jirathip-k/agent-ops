@@ -20,7 +20,13 @@ def create(project_root: Path, worktree_dir: str, task_id: str, branch: str, bas
             f"Worktree {path} already exists. Remove it with `agent worktree remove {task_id}`."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "worktree", "add", "-b", branch, str(path), base], cwd=project_root)
+    # Branch from origin/<base> when it exists: always-fresh base, and it
+    # sidesteps a git DWIM trap — with a remote-only base, `worktree add -b`
+    # silently ignores -b and checks out a new local <base> branch instead.
+    base_ref = base
+    if run(["git", "fetch", "origin", base], cwd=project_root, check=False).returncode == 0:
+        base_ref = f"origin/{base}"
+    run(["git", "worktree", "add", "-b", branch, str(path), base_ref], cwd=project_root)
     return path
 
 

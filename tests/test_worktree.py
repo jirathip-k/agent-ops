@@ -29,6 +29,27 @@ def test_create_list_remove(repo: Path) -> None:
     assert not path.exists()
 
 
+def test_create_with_remote_only_base_stays_on_task_branch(tmp_path: Path) -> None:
+    """git DWIM regression: remote-only base must not hijack the -b branch."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    run(["git", "init", "-b", "main"], cwd=origin)
+    run(["git", "config", "user.email", "t@example.com"], cwd=origin)
+    run(["git", "config", "user.name", "t"], cwd=origin)
+    (origin / "f.txt").write_text("hi\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "init"], cwd=origin)
+    run(["git", "branch", "staging"], cwd=origin)
+
+    clone = tmp_path / "clone"
+    run(["git", "clone", str(origin), str(clone)], cwd=tmp_path)
+    # no local staging branch here — only origin/staging
+
+    path = worktree.create(clone, ".worktrees", "issue-9", "fix/issue-9", "staging")
+    proc = run(["git", "branch", "--show-current"], cwd=path)
+    assert proc.stdout.strip() == "fix/issue-9"
+
+
 def test_create_twice_fails(repo: Path) -> None:
     worktree.create(repo, ".worktrees", "issue-2", "fix/issue-2", "main")
     with pytest.raises(FileExistsError):
