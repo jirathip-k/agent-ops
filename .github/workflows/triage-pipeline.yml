@@ -42,12 +42,12 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout control repo (for prompts)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: agent-ops
 
       - name: Checkout target repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.target_repo }}
           token: ${{ secrets.GITHUB_TOKEN }}
