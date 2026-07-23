@@ -64,6 +64,26 @@ The scheduled triage pipeline handles the long tail (triage, small fixes,
 audit issues) across repos registered in `config/repos.yml`. Check its run
 summaries and `needs-human` labels once a day; that's your ops inbox.
 
+## Preview-environment standard (deployed frontends)
+
+Every managed repo that deploys a frontend should meet four rules:
+
+1. **PR previews exist** — promotion PRs build an ephemeral preview
+   (Azure SWA: `pull_request` trigger, auto-deleted by the close job when
+   the PR merges; Vercel: preview deployments).
+2. **Previews use the DEV backend, production uses prod** — via GitHub
+   environments (`preview` / `production`) selected by event type, or the
+   platform's native per-environment variables (Vercel). Clicking around a
+   preview must never touch production data.
+3. **Auth redirect allow-lists include the preview wildcard** — and note
+   the gotcha: apps redirecting to `window.location.origin` need the
+   **origin-only** pattern (no trailing `/**`); the `/**` variant only
+   matches URLs that have a path and never matches a bare origin.
+4. **Production deploys only from `main`** — never from staging or task
+   branches.
+
+When onboarding a repo, check these and file an issue for any gap.
+
 ## Public repo, private registries
 
 This repo is public; the names of the repos it manages are not. The split:

@@ -79,6 +79,10 @@ When the user asks to set up a project for agents, do all of these:
    then `agent board sync`.
 7. `agent doctor --project <path>` must pass; relay any skipped-gate warning
    to the user as a risk (no test gate = no safety net).
+7b. If the repo deploys a frontend, check the preview-environment standard
+   (docs/workflow.md): PR previews exist, previews use the DEV backend,
+   auth allow-list has the origin-only preview wildcard, prod deploys only
+   from main. File an issue for any gap instead of fixing inline.
 8. Leave the new files **uncommitted** in the project repo for the user to
    review, but commit the board.yml change in agent-ops.
 
