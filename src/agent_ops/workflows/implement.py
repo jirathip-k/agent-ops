@@ -34,6 +34,7 @@ def role_request(
         model=role.model,
         max_turns=role.max_turns,
         permission_mode=role.permission_mode,
+        stream=config.runtime.stream,
     )
     return runtime, request
 

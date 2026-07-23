@@ -30,6 +30,7 @@ class RuntimeConfig(BaseModel):
     model: str | None = None
     permission_mode: str = "acceptEdits"
     max_turns: int | None = None
+    stream: bool = True
 
 
 class RoleConfig(BaseModel):
@@ -59,16 +60,25 @@ class ProjectConfig(BaseModel):
     worktree_dir: str = ".worktrees"
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    # Per-runtime tier names → concrete models, e.g.
+    # {"claude_code": {"smart": "fable", "fast": "sonnet"}}. Roles reference
+    # tiers ("smart") so upgrading every role is a one-line change, and
+    # floating vendor aliases keep tiers pointing at the latest models.
+    model_tiers: dict[str, dict[str, str]] = Field(default_factory=dict)
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
 
     def resolve_role(self, role_name: str) -> ResolvedRole:
-        """Merge a role's overrides over the base runtime config."""
+        """Merge a role's overrides over the base runtime config, mapping model tiers."""
         role: RoleConfig = getattr(self.agents, role_name)
+        runtime = role.runtime or self.runtime.name
+        model = role.model or self.runtime.model
+        if model is not None:
+            model = self.model_tiers.get(runtime, {}).get(model, model)
         return ResolvedRole(
-            runtime=role.runtime or self.runtime.name,
-            model=role.model or self.runtime.model,
+            runtime=runtime,
+            model=model,
             permission_mode=role.permission_mode or self.runtime.permission_mode,
             max_turns=role.max_turns if role.max_turns is not None else self.runtime.max_turns,
         )

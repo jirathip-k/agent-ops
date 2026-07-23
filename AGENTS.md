@@ -30,6 +30,7 @@ triage pipeline. This repo manages itself with its own tooling.
   strong justification
 - pydantic models for config; dataclasses for plain value objects
 - Subprocesses go through `utils.run()` — never raw `subprocess.run`
+  (exception: runtime adapters may use `Popen` for streaming output)
 - Commit style: `component: imperative summary` (e.g. `cli: add plan command`)
 
 ## Commands

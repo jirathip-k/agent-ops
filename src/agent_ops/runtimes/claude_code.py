@@ -10,10 +10,13 @@ from agent_ops.utils import run
 
 
 class ClaudeCodeRuntime:
-    """Headless Claude Code via `claude -p --output-format json`.
+    """Headless Claude Code via `claude -p`.
 
     Uses subscription auth locally; in CI the claude-code-action provides the
-    OAuth token instead of this adapter.
+    OAuth token instead of this adapter. With `stream=True` the adapter uses
+    `--output-format stream-json` and prints agent activity (tool calls, text)
+    live — this is what makes a Herdr pane show real progress instead of
+    silence until the stage ends.
     """
 
     name = "claude_code"
@@ -22,14 +25,7 @@ class ClaudeCodeRuntime:
         return shutil.which("claude") is not None
 
     def run(self, request: RunRequest) -> RunResult:
-        cmd = [
-            "claude",
-            "-p",
-            "--output-format",
-            "json",
-            "--permission-mode",
-            request.permission_mode,
-        ]
+        cmd = ["claude", "-p", "--permission-mode", request.permission_mode]
         if request.system_prompt:
             cmd += ["--append-system-prompt", request.system_prompt]
         if request.model:
@@ -39,8 +35,87 @@ class ClaudeCodeRuntime:
         if request.resume_session:
             cmd += ["--resume", request.resume_session]
 
+        if request.stream:
+            # stream-json in print mode requires --verbose
+            cmd += ["--output-format", "stream-json", "--verbose"]
+            return self._run_streaming(cmd, request)
+
+        cmd += ["--output-format", "json"]
         proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False)
         return parse_result(proc)
+
+    def _run_streaming(self, cmd: list[str], request: RunRequest) -> RunResult:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=request.cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(request.prompt)
+        proc.stdin.close()
+
+        final: dict[str, Any] | None = None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                final = event
+                continue
+            summary = format_event(event)
+            if summary:
+                print(summary, flush=True)
+
+        returncode = proc.wait()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        if final is None:
+            return RunResult(ok=returncode == 0, text=stderr.strip())
+        return result_from_json(final, returncode)
+
+
+def format_event(event: dict[str, Any]) -> str | None:
+    """One compact line per assistant action; None for events not worth showing."""
+    if event.get("type") != "assistant":
+        return None
+    lines: list[str] = []
+    for block in event.get("message", {}).get("content", []):
+        kind = block.get("type")
+        if kind == "text" and block.get("text", "").strip():
+            lines.append(f"  │ {_clip(block['text'])}")
+        elif kind == "tool_use":
+            detail = _tool_detail(block.get("input") or {})
+            lines.append(f"  │ ⚙ {block.get('name', '?')}{': ' + detail if detail else ''}")
+    return "\n".join(lines) or None
+
+
+def _tool_detail(tool_input: dict[str, Any]) -> str:
+    for key in ("command", "file_path", "pattern", "description", "prompt", "query"):
+        value = tool_input.get(key)
+        if value:
+            return _clip(str(value))
+    return ""
+
+
+def _clip(text: str, limit: int = 160) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def result_from_json(data: dict[str, Any], returncode: int) -> RunResult:
+    return RunResult(
+        ok=returncode == 0 and not data.get("is_error", False),
+        text=str(data.get("result", "")),
+        session_id=data.get("session_id"),
+        cost_usd=data.get("total_cost_usd"),
+        raw=data,
+    )
 
 
 def parse_result(proc: subprocess.CompletedProcess[str]) -> RunResult:
@@ -49,11 +124,4 @@ def parse_result(proc: subprocess.CompletedProcess[str]) -> RunResult:
     except (json.JSONDecodeError, TypeError):
         text = proc.stdout.strip() or proc.stderr.strip()
         return RunResult(ok=proc.returncode == 0, text=text)
-
-    return RunResult(
-        ok=proc.returncode == 0 and not data.get("is_error", False),
-        text=str(data.get("result", "")),
-        session_id=data.get("session_id"),
-        cost_usd=data.get("total_cost_usd"),
-        raw=data,
-    )
+    return result_from_json(data, proc.returncode)

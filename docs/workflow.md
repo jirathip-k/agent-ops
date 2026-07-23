@@ -98,6 +98,11 @@ close the window. It pairs naturally with worktree-per-task:
 - **Panes 2+**: either `agent implement <N>` (headless, fire-and-check-back)
   or an interactive `claude` inside `.worktrees/issue-<N>` for tasks that
   need supervision. Worktrees guarantee the panes never trample each other.
+- `agent implement` streams the underlying agent's activity live — every
+  tool call (`⚙ Bash: uv run pytest -q`) and thought line — interleaved with
+  the stage log (planning → attempts → gates → verdict), so a pane always
+  shows what the agent is actually doing. Set `runtime.stream: false` in
+  config for quiet output.
 - Herdr's blocked-state detection is your signal to jump into a pane that's
   waiting on a permission prompt.
 - `agent worktree list` reconciles what's actually in flight if you lose

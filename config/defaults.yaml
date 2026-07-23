@@ -10,18 +10,29 @@ runtime:
   model: null              # runtime default
   permission_mode: acceptEdits
   max_turns: null
+  stream: true             # print agent activity (tool calls, text) live —
+                           # makes Herdr panes show real progress
+
+# Tier names → concrete models, per runtime. Roles below reference tiers, so
+# swapping the whole fleet to a new model is a one-line edit here — and since
+# these are floating vendor aliases (fable/sonnet always point at the latest
+# release), the tiers self-update as new models ship.
+model_tiers:
+  claude_code:
+    smart: fable           # planning & review: highest-leverage tokens
+    fast: sonnet           # implementation: the workhorse
 
 # Per-role overrides (fan-out): unset fields inherit from `runtime` above.
 # Planning and review are cheap in tokens but high in leverage, so they get
-# the smartest model; implementation runs on the workhorse default.
+# the smart tier; implementation runs on the fast tier.
 agents:
   planner:
-    model: opus            # smarter model for root-cause analysis & plan
+    model: smart
     permission_mode: plan  # read-only
   implementer:
-    model: null            # inherit (typically sonnet) — does the bulk work
+    model: fast            # does the bulk work, write access
   reviewer:
-    model: opus            # smarter model to judge the diff
+    model: smart
     permission_mode: plan  # read-only
 
 commands:

@@ -16,6 +16,7 @@ class RunRequest:
     max_turns: int | None = None
     permission_mode: str = "acceptEdits"
     resume_session: str | None = None
+    stream: bool = False
 
 
 @dataclass(frozen=True)

@@ -32,16 +32,37 @@ def test_platform_defaults_tier_models_by_role(tmp_path: Path) -> None:
     implementer = config.resolve_role("implementer")
     reviewer = config.resolve_role("reviewer")
 
-    # planner and reviewer get the smart model, read-only
-    assert planner.model == "opus"
+    # planner and reviewer get the smart tier (fable), read-only
+    assert planner.model == "fable"
     assert planner.permission_mode == "plan"
-    assert reviewer.model == "opus"
+    assert reviewer.model == "fable"
     assert reviewer.permission_mode == "plan"
-    # implementer inherits the base runtime (default model, write access)
-    assert implementer.model is None
+    # implementer runs the fast tier (sonnet) with write access
+    assert implementer.model == "sonnet"
     assert implementer.permission_mode == "acceptEdits"
     # all roles share the base runtime unless overridden
     assert {planner.runtime, implementer.runtime, reviewer.runtime} == {"claude_code"}
+
+
+def test_model_tiers_map_per_runtime(tmp_path: Path) -> None:
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir()
+    (agent_dir / "config.yaml").write_text(
+        "model_tiers:\n"
+        "  claude_code:\n"
+        "    smart: my-pinned-model\n"
+        "agents:\n"
+        "  implementer:\n"
+        "    runtime: codex\n"
+        "    model: smart\n"
+    )
+    config = load_project_config(tmp_path)
+    # project tier override wins for claude_code roles
+    assert config.resolve_role("planner").model == "my-pinned-model"
+    # codex has no tier table → the name passes through untouched
+    assert config.resolve_role("implementer").model == "smart"
+    # non-tier names are never rewritten
+    assert config.model_tiers["claude_code"].get("fast") == "sonnet"
 
 
 def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:
@@ -54,6 +75,7 @@ def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:
         "agents:\n"
         "  implementer:\n"
         "    runtime: codex\n"
+        "    model: null\n"
         "  reviewer:\n"
         "    model: haiku\n"
     )
@@ -61,7 +83,7 @@ def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:
 
     implementer = config.resolve_role("implementer")
     assert implementer.runtime == "codex"
-    assert implementer.model == "sonnet"  # inherited from base runtime
+    assert implementer.model == "sonnet"  # role model cleared → inherited from base runtime
     assert implementer.max_turns == 40
 
     reviewer = config.resolve_role("reviewer")
