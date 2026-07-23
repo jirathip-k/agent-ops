@@ -11,6 +11,12 @@ and report.
 Subagent role definitions live in `prompts/agents/`. Load each agent's role file
 when spawning it, and give it ONLY the inputs listed in its role file.
 
+Model tiers when spawning subagents: request model `fable` (claude-fable-5) for
+PLANNER and REVIEWER — analysis and judgment are the highest-leverage tokens —
+and the default model for IMPLEMENTER and TESTER. If your subagent tool does
+not support per-agent model selection, proceed with the default model rather
+than failing.
+
 ---
 
 ## Step 1 — Fetch & Triage

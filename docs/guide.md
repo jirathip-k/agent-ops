@@ -28,7 +28,7 @@ flowchart LR
 | Place | What runs there | When | Is it on today? |
 | --- | --- | --- | --- |
 | **Your Mac** (Herdr panes) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
-| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on climbing-tracker (report-only); org repos have the stub and go live once the org has the Claude App + token secret |
+| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on the managed repos (see the private fleet doc for per-repo status) |
 | **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs, the project board | Always | ✅ |
 
 So when you wonder "where is triage running?" — today the answer is always
@@ -75,6 +75,21 @@ you'd see it under the repo's **Actions** tab.
 | What's about to ship | The open **promotion PR** (staging → main) — its description is the changelog |
 | What the scheduled loop did (once on) | The managed repo → **Actions** tab → run summary |
 | Why an issue was classified some way | The **Triage:** comment the agent left on the issue |
+
+## Running the scheduled loop by hand
+
+Each managed repo's "Hourly Agent Triage" runs on its timer, but you can fire
+it anytime:
+
+- **Browser**: repo → **Actions** tab → *Hourly Agent Triage* → **Run
+  workflow** button.
+- **Terminal**: `gh workflow run triage.yml --repo <owner>/<repo>`
+- **gh dash**: select any PR or issue row and press **`t`** — it triggers
+  triage for that row's repo.
+
+One run = one Actions job = one Claude session that *spawns* the whole crew
+(planner → implementer → tester → reviewer) as sub-agents inside it. So the
+Actions tab shows a single workflow run even though several agents worked.
 
 ## How to verify staging (before merging a promotion PR)
 
