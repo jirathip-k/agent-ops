@@ -218,10 +218,24 @@ def worktree_remove(
     task_id: Annotated[str, typer.Argument(help="Task id, e.g. issue-123")],
     project: ProjectOpt = Path("."),
     force: Annotated[bool, typer.Option("--force", help="Remove even if dirty")] = False,
+    delete_branch: Annotated[
+        bool,
+        typer.Option(
+            "--delete-branch",
+            help="Also delete the local branch the worktree was on "
+            "(unmerged branches are kept unless --force)",
+        ),
+    ] = False,
 ) -> None:
     config = load_project_config(project.resolve())
     try:
-        worktree.remove(project.resolve(), config.worktree_dir, task_id, force=force)
+        worktree.remove(
+            project.resolve(),
+            config.worktree_dir,
+            task_id,
+            force=force,
+            delete_branch=delete_branch,
+        )
     except CommandError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc

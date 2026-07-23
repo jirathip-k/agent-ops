@@ -42,3 +42,51 @@ def test_remove_dirty_requires_force(repo: Path) -> None:
         worktree.remove(repo, ".worktrees", "issue-3")
     worktree.remove(repo, ".worktrees", "issue-3", force=True)
     assert not path.exists()
+
+
+def test_remove_delete_branch(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-4", "fix/issue-4", "main")
+    (path / "change.txt").write_text("unmerged change\n")
+    run(["git", "add", "."], cwd=path)
+    run(["git", "commit", "-m", "unmerged"], cwd=path)
+
+    worktree.remove(repo, ".worktrees", "issue-4", force=True, delete_branch=True)
+
+    assert not path.exists()
+    branches = run(["git", "branch", "--list", "fix/issue-4"], cwd=repo).stdout
+    assert "fix/issue-4" not in branches
+
+
+def test_remove_without_delete_branch_keeps_branch(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-5", "fix/issue-5", "main")
+
+    worktree.remove(repo, ".worktrees", "issue-5")
+
+    assert not path.exists()
+    branches = run(["git", "branch", "--list", "fix/issue-5"], cwd=repo).stdout
+    assert "fix/issue-5" in branches
+
+
+def test_delete_branch_without_force_keeps_unmerged_branch(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-6", "fix/issue-6", "main")
+    (path / "change.txt").write_text("unmerged change\n")
+    run(["git", "add", "."], cwd=path)
+    run(["git", "commit", "-m", "unmerged"], cwd=path)
+
+    with pytest.raises(CommandError, match="unmerged"):
+        worktree.remove(repo, ".worktrees", "issue-6", delete_branch=True)
+
+    # worktree is gone, but the unmerged branch survives
+    assert not path.exists()
+    branches = run(["git", "branch", "--list", "fix/issue-6"], cwd=repo).stdout
+    assert "fix/issue-6" in branches
+
+
+def test_delete_branch_without_force_deletes_merged_branch(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-7", "fix/issue-7", "main")
+
+    worktree.remove(repo, ".worktrees", "issue-7", delete_branch=True)
+
+    assert not path.exists()
+    branches = run(["git", "branch", "--list", "fix/issue-7"], cwd=repo).stdout
+    assert "fix/issue-7" not in branches
