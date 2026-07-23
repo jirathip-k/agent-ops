@@ -54,7 +54,9 @@ def role_request(
         max_turns=role.max_turns,
         permission_mode=role.permission_mode,
         stream=config.runtime.stream,
-        allowed_tools=gate_allowed_tools(config) if role_name == "implementer" else (),
+        # every role may run the gates: implementer to iterate, planner to
+        # reproduce, reviewer to verify — write access still differs by mode
+        allowed_tools=gate_allowed_tools(config),
     )
     return runtime, request
 

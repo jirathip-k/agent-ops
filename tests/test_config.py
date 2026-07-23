@@ -32,11 +32,12 @@ def test_platform_defaults_tier_models_by_role(tmp_path: Path) -> None:
     implementer = config.resolve_role("implementer")
     reviewer = config.resolve_role("reviewer")
 
-    # planner and reviewer get the smart tier (fable), read-only
+    # planner and reviewer get the smart tier (fable), effectively read-only
+    # (default mode: reads auto-allowed, writes denied headless)
     assert planner.model == "fable"
-    assert planner.permission_mode == "plan"
+    assert planner.permission_mode == "default"
     assert reviewer.model == "fable"
-    assert reviewer.permission_mode == "plan"
+    assert reviewer.permission_mode == "default"
     # implementer runs the fast tier (sonnet) with write access
     assert implementer.model == "sonnet"
     assert implementer.permission_mode == "acceptEdits"
@@ -89,4 +90,4 @@ def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:
     reviewer = config.resolve_role("reviewer")
     assert reviewer.runtime == "claude_code"
     assert reviewer.model == "haiku"
-    assert reviewer.permission_mode == "plan"  # platform default kept
+    assert reviewer.permission_mode == "default"  # platform default kept

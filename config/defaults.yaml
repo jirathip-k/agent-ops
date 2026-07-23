@@ -25,15 +25,20 @@ model_tiers:
 # Per-role overrides (fan-out): unset fields inherit from `runtime` above.
 # Planning and review are cheap in tokens but high in leverage, so they get
 # the smart tier; implementation runs on the fast tier.
+# planner/reviewer use "default" permission mode: read-only tools are
+# auto-allowed, writes are denied (headless has nobody to approve them), and
+# gate commands are pre-approved — so they can run tests/typecheck to verify
+# without being able to modify anything. "plan" mode is avoided: it blocks
+# gate commands and makes Claude write plan files instead of answering.
 agents:
   planner:
     model: smart
-    permission_mode: plan  # read-only
+    permission_mode: default
   implementer:
     model: fast            # does the bulk work, write access
   reviewer:
     model: smart
-    permission_mode: plan  # read-only
+    permission_mode: default
 
 commands:
   setup: null              # run once per fresh worktree, e.g. "npm install"
