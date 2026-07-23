@@ -88,7 +88,15 @@ def run_merge(
             return False
         log(f"OVERRIDE: merging despite {len(violations)} rule violation(s)")
 
-    run(["gh", "pr", "merge", str(pr_number), "--squash", "--delete-branch"], cwd=project_root)
+    # no --delete-branch: it also deletes the LOCAL branch, which fails (and
+    # taints the exit code) while the task worktree still holds it. Delete
+    # only the remote branch; locals are cleaned with the worktree.
+    run(["gh", "pr", "merge", str(pr_number), "--squash"], cwd=project_root)
+    run(
+        ["git", "push", "origin", "--delete", pr["headRefName"]],
+        cwd=project_root,
+        check=False,
+    )
     log(f"merged PR #{pr_number} ({pr['title']}) into {pr['baseRefName']}")
     return True
 
