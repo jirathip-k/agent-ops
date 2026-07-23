@@ -23,6 +23,8 @@ agent worktree list | remove <task-id> [--force]
 agent init                         # onboard a repo (AGENTS.md + CLAUDE.md link + .agent/)
 agent doctor                       # verify CLIs + config + gates
 agent board sync                   # push open issues from config/board.yml repos to the Projects board
+agent merge <PR> [--override]      # squash-merge into staging IF rules pass (CI, caps, blocked paths)
+agent promote                      # open the staging → main changelog PR (human merges it)
 ```
 
 All commands accept `--project <path>`; default is the current directory.
@@ -37,8 +39,14 @@ Run them from the target project's root, not from agent-ops.
 2. **Grooming gate.** Never label an issue `agent-ready` yourself unless the
    user asked; an issue qualifies only with acceptance criteria, small
    scope, and no danger zones (see the project's AGENTS.md).
-3. **Never merge.** PRs are merged by the user. Posting reviews/plans as
-   comments (`--post`) is fine when asked.
+3. **Branch model.** Projects with `base_branch: staging` use the promotion
+   flow: agent PRs target staging; `agent merge` may merge them when its
+   rules pass (CI green, diff caps, no blocked paths). `--override` is a
+   human decision — use it only when the user explicitly authorized the
+   specific violation (e.g. an approved auth change), and fix what can be
+   fixed (lockfile drift, size) instead of overriding it. The stable branch
+   (`merge.stable_branch`, usually main) is HUMAN-ONLY: `agent promote`
+   opens the verification PR, the user merges it. Never merge to main.
 4. **Failures keep the worktree.** If a run fails (gates exhausted, planner
    ESCALATE, review REQUEST CHANGES), inspect the kept worktree and the
    printed gate output, summarize the root cause for the user, and propose:
