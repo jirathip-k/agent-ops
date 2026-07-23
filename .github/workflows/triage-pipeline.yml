@@ -36,15 +36,15 @@ on:
         type: boolean
         default: false
 
-# One pipeline run at a time — prevents overlapping hourly runs from
-# grabbing the same issues.
-concurrency:
-  group: agent-triage-${{ inputs.target_repo }}
-  cancel-in-progress: false
-
 jobs:
   triage:
     runs-on: ubuntu-latest
+    # One pipeline run per target at a time — prevents overlapping hourly
+    # runs from grabbing the same issues. Job-level because workflow-level
+    # concurrency breaks startup when invoked via workflow_call.
+    concurrency:
+      group: agent-triage-${{ inputs.target_repo }}
+      cancel-in-progress: false
     timeout-minutes: 55 # must finish before the next hourly tick
     permissions:
       contents: write
