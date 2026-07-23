@@ -94,6 +94,7 @@ def run_implement(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
+    plan_file: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> bool:
     """Issue → worktree → plan (smart model) → implement loop → self-review → PR.
@@ -124,7 +125,11 @@ def run_implement(
             return False
 
     plan = NO_PLAN_TEXT
-    if config.loop.plan:
+    if plan_file is not None:
+        # human-approved plan (e.g. from a prior escalation) — skip the planner
+        plan = plan_file.read_text()
+        log(f"using approved plan from {plan_file} ({len(plan.splitlines())} lines)")
+    elif config.loop.plan:
         planner_role = config.resolve_role("planner")
         log(f"planning (model: {planner_role.model or 'default'})")
         try:

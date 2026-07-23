@@ -41,6 +41,10 @@ def implement(
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
     keep_worktree: Annotated[bool, typer.Option(help="Keep worktree after success")] = False,
+    plan_file: Annotated[
+        Path | None,
+        typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
+    ] = None,
 ) -> None:
     """Implement a GitHub issue: worktree → agent loop → gates → self-review → PR."""
     try:
@@ -50,6 +54,7 @@ def implement(
             runtime_name=runtime,
             open_pr=not no_pr,
             keep_worktree=keep_worktree,
+            plan_file=plan_file,
         )
     except (CommandError, FileExistsError, RuntimeError, FileNotFoundError) as exc:
         _err(str(exc))
