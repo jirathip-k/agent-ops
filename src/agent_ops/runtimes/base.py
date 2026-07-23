@@ -17,6 +17,7 @@ class RunRequest:
     permission_mode: str = "acceptEdits"
     resume_session: str | None = None
     stream: bool = False
+    allowed_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

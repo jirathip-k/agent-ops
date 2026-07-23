@@ -25,22 +25,9 @@ class ClaudeCodeRuntime:
         return shutil.which("claude") is not None
 
     def run(self, request: RunRequest) -> RunResult:
-        cmd = ["claude", "-p", "--permission-mode", request.permission_mode]
-        if request.system_prompt:
-            cmd += ["--append-system-prompt", request.system_prompt]
-        if request.model:
-            cmd += ["--model", request.model]
-        if request.max_turns is not None:
-            cmd += ["--max-turns", str(request.max_turns)]
-        if request.resume_session:
-            cmd += ["--resume", request.resume_session]
-
+        cmd = build_command(request)
         if request.stream:
-            # stream-json in print mode requires --verbose
-            cmd += ["--output-format", "stream-json", "--verbose"]
             return self._run_streaming(cmd, request)
-
-        cmd += ["--output-format", "json"]
         proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False)
         return parse_result(proc)
 
@@ -78,6 +65,26 @@ class ClaudeCodeRuntime:
         if final is None:
             return RunResult(ok=returncode == 0, text=stderr.strip())
         return result_from_json(final, returncode)
+
+
+def build_command(request: RunRequest) -> list[str]:
+    cmd = ["claude", "-p", "--permission-mode", request.permission_mode]
+    if request.system_prompt:
+        cmd += ["--append-system-prompt", request.system_prompt]
+    if request.model:
+        cmd += ["--model", request.model]
+    if request.max_turns is not None:
+        cmd += ["--max-turns", str(request.max_turns)]
+    if request.resume_session:
+        cmd += ["--resume", request.resume_session]
+    if request.allowed_tools:
+        cmd += ["--allowedTools", *request.allowed_tools]
+    if request.stream:
+        # stream-json in print mode requires --verbose
+        cmd += ["--output-format", "stream-json", "--verbose"]
+    else:
+        cmd += ["--output-format", "json"]
+    return cmd
 
 
 def format_event(event: dict[str, Any]) -> str | None:

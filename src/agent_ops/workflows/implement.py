@@ -15,6 +15,25 @@ from agent_ops.utils import run
 NO_PLAN_TEXT = "(no planning stage — analyze the root cause yourself before editing)"
 
 
+def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
+    """Permission patterns pre-approving the project's gate commands.
+
+    Headless runs have nobody to answer permission prompts, so the implementer
+    must be able to run test/lint/typecheck itself. Compound commands
+    (a && b) are split because permissions are checked per component.
+    """
+    patterns: list[str] = []
+    for name in ("test", "lint", "typecheck"):
+        command = getattr(config.commands, name, None)
+        if not command:
+            continue
+        for part in command.split("&&"):
+            part = part.strip()
+            if part:
+                patterns += [f"Bash({part})", f"Bash({part}:*)"]
+    return tuple(dict.fromkeys(patterns))
+
+
 def role_request(
     config: ProjectConfig,
     role_name: str,
@@ -35,6 +54,7 @@ def role_request(
         max_turns=role.max_turns,
         permission_mode=role.permission_mode,
         stream=config.runtime.stream,
+        allowed_tools=gate_allowed_tools(config) if role_name == "implementer" else (),
     )
     return runtime, request
 

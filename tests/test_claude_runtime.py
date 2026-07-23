@@ -1,6 +1,8 @@
 import subprocess
+from pathlib import Path
 
-from agent_ops.runtimes.claude_code import format_event, parse_result
+from agent_ops.runtimes.base import RunRequest
+from agent_ops.runtimes.claude_code import build_command, format_event, parse_result
 
 
 def _proc(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -62,3 +64,24 @@ def test_format_event_clips_long_text() -> None:
 def test_format_event_ignores_non_assistant_events() -> None:
     assert format_event({"type": "system", "subtype": "init"}) is None
     assert format_event({"type": "user", "message": {"content": []}}) is None
+
+
+def test_build_command_includes_allowed_tools_and_model() -> None:
+    request = RunRequest(
+        prompt="fix it",
+        cwd=Path("."),
+        model="sonnet",
+        permission_mode="acceptEdits",
+        allowed_tools=("Bash(uv run pytest -q)", "Bash(uv run pytest -q:*)"),
+    )
+    cmd = build_command(request)
+    assert cmd[:2] == ["claude", "-p"]
+    assert cmd[cmd.index("--model") : cmd.index("--model") + 2] == ["--model", "sonnet"]
+    idx = cmd.index("--allowedTools")
+    assert cmd[idx + 1 : idx + 3] == ["Bash(uv run pytest -q)", "Bash(uv run pytest -q:*)"]
+    assert cmd[-2:] == ["--output-format", "json"]
+
+
+def test_build_command_stream_uses_stream_json_verbose() -> None:
+    cmd = build_command(RunRequest(prompt="x", cwd=Path("."), stream=True))
+    assert cmd[-3:] == ["--output-format", "stream-json", "--verbose"]

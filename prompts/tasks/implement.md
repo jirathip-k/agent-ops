@@ -29,6 +29,10 @@ Labels: {issue_labels}
    after verifying your work.
 6. Do NOT modify CI config, auth code, migrations, or dependency manifests
    unless the issue is explicitly about them.
+7. You are running headless: nobody can answer permission prompts, so never
+   ask for approval. The project's test/lint/typecheck commands are
+   pre-approved — run them freely. If some other command is blocked, work
+   around it or note it in your summary instead of waiting.
 
 {skills}
 
