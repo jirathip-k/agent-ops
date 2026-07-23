@@ -22,6 +22,7 @@ agent review <PR> [--post]         # read-only PR review; --post comments on the
 agent worktree list | remove <task-id> [--force]
 agent init                         # onboard a repo (AGENTS.md + CLAUDE.md link + .agent/)
 agent doctor                       # verify CLIs + config + gates
+agent board sync                   # push open issues from config/board.yml repos to the Projects board
 ```
 
 All commands accept `--project <path>`; default is the current directory.
@@ -47,6 +48,31 @@ Run them from the target project's root, not from agent-ops.
    left over; check `agent worktree list` and ask/inspect before removing.
 6. **Parallel runs** are safe (worktree per task) — start each
    `agent implement` in its own background shell or Herdr pane.
+
+## Onboarding a new project (repeatable procedure)
+
+When the user asks to set up a project for agents, do all of these:
+
+1. **Inspect first**: `git status` (note dirty files / current branch),
+   remote URL (repo may live in an org, not the user account), default
+   branch, and the test/lint/typecheck commands (`package.json` scripts,
+   `pyproject.toml`, Makefile). Note which are missing.
+2. `agent init --project <path>`.
+3. **Instruction-file direction**: if the repo already has a real CLAUDE.md,
+   delete the generated AGENTS.md template and symlink `AGENTS.md ->
+   CLAUDE.md` (the existing file stays canonical). Repos with neither keep
+   the default direction (AGENTS.md canonical, CLAUDE.md symlink).
+4. Fill `.agent/config.yaml`: `base_branch` from the repo's default branch,
+   real gate commands with a comment noting what each maps to, and a comment
+   flagging any missing gate (e.g. "no test script yet").
+5. `gh label create agent-ready --repo <owner>/<repo> --color 1d76db
+   --description "Groomed and safe for an agent to implement" --force`.
+6. Add the repo to `config/board.yml` `repos:` in the agent-ops checkout,
+   then `agent board sync`.
+7. `agent doctor --project <path>` must pass; relay any skipped-gate warning
+   to the user as a risk (no test gate = no safety net).
+8. Leave the new files **uncommitted** in the project repo for the user to
+   review, but commit the board.yml change in agent-ops.
 
 ## Configuration facts
 
