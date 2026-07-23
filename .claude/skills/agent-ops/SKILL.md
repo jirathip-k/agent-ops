@@ -74,22 +74,23 @@ When the user asks to set up a project for agents, do all of these:
 8. Leave the new files **uncommitted** in the project repo for the user to
    review, but commit the board.yml change in agent-ops.
 
-## Running implements in Herdr panes
+## Spawning runs on a visible surface
 
-If `herdr` is on PATH and the user is in a Herdr session, start each
-implement run in its own tab instead of a plain background shell — Herdr
-then shows the run in its sidebar with live agent-status detection:
+Start long runs with `agent dispatch <N> --project <path>` instead of
+running `agent implement` in a plain background shell. Dispatch picks the
+most visible available surface automatically:
 
-```sh
-PANE=$(herdr tab create --cwd <project-path> --label "agent:issue-<N>" \
-  --no-focus | jq -r '.result.root_pane.pane_id')
-herdr pane run "$PANE" agent implement <N>
-```
+- **herdr** (if the Herdr server is up): new tab, agent process in the
+  pane → sidebar shows working/blocked/done and the run survives your
+  session. Check with `herdr tab list` / `herdr pane read <pane_id>`.
+- **background** (fallback, works everywhere incl. Claude Code UI): detached
+  process logging to `<project>/.agent-runs/agent-issue-<N>.log` — tell the
+  user the tail command.
 
-Check on runs with `herdr tab list` (agent_status: working/blocked/done) or
-`herdr pane read <pane_id>`. Background shells inside a Claude session are
-invisible to Herdr — only pane processes appear; at minimum give the user a
-tab tailing the run's output file.
+Force one with `--surface herdr|background`. Background shells inside a
+Claude session are invisible to Herdr — never use them for runs the user
+wants to watch. New surfaces (Orca IDE, tmux, ...) are one class in
+`src/agent_ops/surfaces.py`.
 
 ## Configuration facts
 

@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, worktree
+from agent_ops import __version__, github, surfaces, worktree
 from agent_ops import board as board_mod
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
 from agent_ops.runtimes import get_runtime, runtime_names
@@ -55,6 +55,26 @@ def implement(
         _err(str(exc))
         raise typer.Exit(1) from exc
     raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def dispatch(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number to implement")],
+    project: ProjectOpt = Path("."),
+    surface: Annotated[str, typer.Option(help="Where to run: auto | herdr | background")] = "auto",
+    no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+) -> None:
+    """Spawn `agent implement` on a visible surface (Herdr tab, background log, ...)."""
+    root = project.resolve()
+    command = ["agent", "implement", str(issue), "--project", str(root)]
+    if no_pr:
+        command.append("--no-pr")
+    try:
+        where = surfaces.pick(surface).spawn(f"agent-issue-{issue}", command, root)
+    except (ValueError, CommandError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"dispatched issue #{issue} → {where}")
 
 
 @app.command()
@@ -127,11 +147,11 @@ def init(project: ProjectOpt = Path(".")) -> None:
         typer.echo("linked CLAUDE.md -> AGENTS.md")
 
     gitignore = root / ".gitignore"
-    marker = ".worktrees/"
-    if not gitignore.exists() or marker not in gitignore.read_text():
-        with gitignore.open("a") as fh:
-            fh.write(f"\n{marker}\n")
-        typer.echo(f"added {marker} to .gitignore")
+    for marker in (".worktrees/", ".agent-runs/"):
+        if not gitignore.exists() or marker not in gitignore.read_text():
+            with gitignore.open("a") as fh:
+                fh.write(f"\n{marker}\n")
+            typer.echo(f"added {marker} to .gitignore")
 
 
 @app.command()
