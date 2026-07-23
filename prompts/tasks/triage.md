@@ -23,6 +23,16 @@ For each issue, explore the codebase enough to judge feasibility, then pick:
 
 When unsure between agent-ready and anything else, choose the safer label.
 
+## Defects you discover along the way
+
+If exploring the code reveals an unrelated defect (a bug, a security issue,
+a data hazard), FILE it — never fix it here:
+`gh issue create --title "..." --label found-by-audit --body "..."` with a
+file:line reference and severity in the body. Search existing open issues
+first (`gh issue list --search ...`) to avoid duplicates. Mention any filed
+issues in your prose before the results block, but do NOT include them in
+TRIAGE RESULTS (they are new, not part of this triage).
+
 ## Output format
 
 End your final message with a block in exactly this form (nothing after it):

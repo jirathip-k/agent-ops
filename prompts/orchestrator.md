@@ -21,14 +21,19 @@ than failing.
 
 ## Step 1 — Fetch & Triage
 1. List open issues updated since the last run. Skip anything labeled
-   `triage:done`, `needs-human`, `blocked`, or already assigned.
+   `triage:done`, `needs-human`, `blocked`, or already assigned — and skip any
+   issue that already has an open PR for it (a `fix/issue-<N>` branch or a PR
+   whose body references it): the local lane may have picked it up.
+   If triage exploration itself uncovers unrelated defects, file them per
+   Step 5 (search for duplicates first, `found-by-audit` label, never fix).
 2. Classify each new issue and route it:
    - `bug` + P0 (production down, data loss, security exploit) → HOTFIX LANE (Step 2B)
    - `bug` + P1 (major) / P2 (minor) → NORMAL LANE (Step 2A)
    - `enhancement` / idea → BACKLOG: label `enhancement` + `backlog`, add a triage
      comment (summary, rough size S/M/L, affected area). Do NOT implement.
-     Exception: issues a human has labeled `approved-for-agent` AND that contain
-     acceptance criteria enter the normal lane at lowest priority, max 1 per run.
+     Exception: issues labeled `agent-ready` or `approved-for-agent` (the human's
+     or local triage's go-ahead — same contract as the local lane) enter the
+     normal lane. The Planner still escalates if the spec is inadequate.
    - `question` → answer only if verifiable from the codebase/docs, citing file
      paths; otherwise label `needs-human`.
    - `duplicate` / `invalid` → close with explanation and a link to the original.
@@ -118,8 +123,9 @@ Unrelated defects found during any stage (bugs, security issues, flaky tests):
   branch protection or failing CI.
 - Hotfixes branch from `main`, are never auto-merged, and must be back-merged
   to `staging`.
-- Enhancements are never implemented without human approval
-  (`approved-for-agent`) + acceptance criteria.
+- Enhancements are never implemented without a go-ahead label
+  (`agent-ready` or `approved-for-agent`); the Planner escalates inadequate
+  specs rather than guessing.
 - One hotfix at a time: if a P0 is in flight, skip new normal-lane work.
 - Each subagent gets fresh context and only its listed inputs — no shared
   transcripts.

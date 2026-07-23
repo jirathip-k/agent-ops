@@ -41,6 +41,7 @@ def role_request(
     cwd: Path,
     *,
     runtime_override: str | None = None,
+    extra_allowed_tools: tuple[str, ...] = (),
 ) -> tuple[Runtime, RunRequest]:
     """Resolve a role (planner/implementer/reviewer) to its runtime and request."""
     role = config.resolve_role(role_name)
@@ -56,7 +57,7 @@ def role_request(
         stream=config.runtime.stream,
         # every role may run the gates: implementer to iterate, planner to
         # reproduce, reviewer to verify — write access still differs by mode
-        allowed_tools=gate_allowed_tools(config),
+        allowed_tools=gate_allowed_tools(config) + extra_allowed_tools,
     )
     return runtime, request
 

@@ -15,7 +15,12 @@ from agent_ops.workflows.implement import role_request
 # Issues carrying any of these have been triaged (or decided) already.
 DONE_LABELS = {"agent-ready", "needs-human", "backlog", "triage:done"}
 
-LABEL_COLORS = {"agent-ready": "1d76db", "needs-human": "d93f0b", "backlog": "c5def5"}
+LABEL_COLORS = {
+    "agent-ready": "1d76db",
+    "needs-human": "d93f0b",
+    "backlog": "c5def5",
+    "found-by-audit": "fbca04",
+}
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")
 
@@ -89,7 +94,17 @@ def run_triage(
     )
     try:
         runtime, request = role_request(
-            config, "planner", render_task("triage", issues=issues_text), triage_wt
+            config,
+            "planner",
+            render_task("triage", issues=issues_text),
+            triage_wt,
+            # triage may FILE audit issues it discovers (never fix them);
+            # search first to avoid duplicates
+            extra_allowed_tools=(
+                "Bash(gh issue create:*)",
+                "Bash(gh issue list:*)",
+                "Bash(gh search issues:*)",
+            ),
         )
         result = runtime.run(request)
     finally:
