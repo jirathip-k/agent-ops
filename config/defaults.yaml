@@ -36,6 +36,7 @@ agents:
     permission_mode: plan  # read-only
 
 commands:
+  setup: null              # run once per fresh worktree, e.g. "npm install"
   test: null               # e.g. "uv run pytest -q" / "npm test"
   lint: null               # e.g. "uv run ruff check ."
   typecheck: null          # e.g. "uv run pyright"

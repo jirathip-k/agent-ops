@@ -4,9 +4,16 @@ from agent_ops.workflows.implement import gate_allowed_tools
 
 def test_gate_allowed_tools_covers_each_command() -> None:
     config = ProjectConfig.model_validate(
-        {"commands": {"test": "uv run pytest -q", "typecheck": "uv run pyright"}}
+        {
+            "commands": {
+                "setup": "npm install",
+                "test": "uv run pytest -q",
+                "typecheck": "uv run pyright",
+            }
+        }
     )
     patterns = gate_allowed_tools(config)
+    assert "Bash(npm install)" in patterns
     assert "Bash(uv run pytest -q)" in patterns
     assert "Bash(uv run pytest -q:*)" in patterns
     assert "Bash(uv run pyright)" in patterns

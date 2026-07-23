@@ -4,6 +4,7 @@
 base_branch: main
 
 commands:
+  setup: null       # run once per fresh worktree, e.g. "npm install"
   test: null        # e.g. "uv run pytest -q" | "npm test" | "swift test"
   lint: null        # e.g. "uv run ruff check ." | "npx eslint ."
   typecheck: null   # e.g. "uv run pyright" | "npx tsc --noEmit"

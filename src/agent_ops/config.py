@@ -13,6 +13,7 @@ PROJECT_CONFIG_REL = Path(".agent") / "config.yaml"
 
 
 class Commands(BaseModel):
+    setup: str | None = None  # run once in each fresh worktree before gates (e.g. npm install)
     test: str | None = None
     lint: str | None = None
     typecheck: str | None = None

@@ -10,7 +10,7 @@ from agent_ops.loop import run_task_loop
 from agent_ops.prompts import render_task
 from agent_ops.runtimes import RunRequest, Runtime, get_runtime
 from agent_ops.skills import load_skills
-from agent_ops.utils import run
+from agent_ops.utils import CommandError, run
 
 NO_PLAN_TEXT = "(no planning stage — analyze the root cause yourself before editing)"
 
@@ -23,7 +23,7 @@ def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
     (a && b) are split because permissions are checked per component.
     """
     patterns: list[str] = []
-    for name in ("test", "lint", "typecheck"):
+    for name in ("setup", "test", "lint", "typecheck"):
         command = getattr(config.commands, name, None)
         if not command:
             continue
@@ -110,6 +110,16 @@ def run_implement(
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch
     )
+
+    if config.commands.setup:
+        log(f"setup: {config.commands.setup}")
+        try:
+            run(["sh", "-c", config.commands.setup], cwd=wt_path)
+        except CommandError as exc:
+            log(f"setup failed: {exc}")
+            worktree.remove(project_root, config.worktree_dir, task_id, force=True)
+            log("worktree removed (nothing was changed)")
+            return False
 
     plan = NO_PLAN_TEXT
     if config.loop.plan:
