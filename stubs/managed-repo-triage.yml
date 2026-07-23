@@ -1,0 +1,26 @@
+# Copy this file into each managed repo at .github/workflows/triage.yml
+# Replace YOUR-USERNAME with your GitHub username/org.
+#
+# Requires:
+#   - CLAUDE_CODE_OAUTH_TOKEN available to this repo (org secret, or repo secret)
+#   - The agent-ops repo must allow workflow reuse:
+#     agent-ops → Settings → Actions → General → Access →
+#     "Accessible from repositories owned by <you>"
+
+name: Hourly Agent Triage
+
+on:
+  schedule:
+    # Start conservative: every 4 hours. Switch to '0 * * * *' (hourly)
+    # once you trust the pipeline.
+    - cron: '0 */4 * * *'
+  workflow_dispatch: {}   # manual "run now" button for testing
+
+jobs:
+  triage:
+    uses: YOUR-USERNAME/agent-ops/.github/workflows/triage-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      max_issues: 3
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

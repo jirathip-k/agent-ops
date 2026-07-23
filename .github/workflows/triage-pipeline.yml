@@ -1,0 +1,68 @@
+# Reusable triage pipeline workflow.
+# Managed repos call this via workflow_call (see stubs/managed-repo-triage.yml).
+# Can also be run directly against this repo for testing via workflow_dispatch.
+
+name: Agent Triage Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to operate on"
+        required: true
+        type: string
+      max_issues:
+        description: "Max issues to process per run"
+        required: false
+        type: number
+        default: 3
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to operate on"
+        required: true
+        type: string
+
+# One pipeline run at a time — prevents overlapping hourly runs from
+# grabbing the same issues.
+concurrency:
+  group: agent-triage-${{ inputs.target_repo }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55 # must finish before the next hourly tick
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout control repo (for prompts)
+        uses: actions/checkout@v4
+        with:
+          path: agent-ops
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Run orchestrator
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            TARGET_REPO: ${{ inputs.target_repo }}
+            MAX_ISSUES: ${{ inputs.max_issues }}
+            Working directory for the target repo: ./target
+            Agent role files: ./agent-ops/prompts/agents/
+
+            Follow the orchestrator instructions in
+            ./agent-ops/prompts/orchestrator.md exactly.

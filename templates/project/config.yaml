@@ -1,0 +1,21 @@
+# Project-level agent-ops config. Merged over the platform defaults
+# (agent-ops/config/defaults.yaml); values here win.
+
+base_branch: main
+
+commands:
+  test: null        # e.g. "uv run pytest -q" | "npm test" | "swift test"
+  lint: null        # e.g. "uv run ruff check ." | "npx eslint ."
+  typecheck: null   # e.g. "uv run pyright" | "npx tsc --noEmit"
+
+# runtime:
+#   name: claude_code
+#   model: claude-sonnet-5
+
+# loop:
+#   max_attempts: 3
+#   self_review: true
+
+# Extra skills for this project. Names resolve to .agent/skills/<name>.md
+# here first, then agent-ops/skills/<name>.md.
+# skills: [coding, testing]
