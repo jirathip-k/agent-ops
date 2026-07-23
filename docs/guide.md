@@ -28,7 +28,7 @@ flowchart LR
 | Place | What runs there | When | Is it on today? |
 | --- | --- | --- | --- |
 | **Your Mac** (Herdr panes) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
-| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ⏸ Not yet — activates when the stub workflow is committed in a managed repo |
+| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on climbing-tracker (report-only); org repos have the stub and go live once the org has the Claude App + token secret |
 | **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs, the project board | Always | ✅ |
 
 So when you wonder "where is triage running?" — today the answer is always
