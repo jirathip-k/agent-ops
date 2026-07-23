@@ -50,10 +50,14 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      id-token: write  # claude-code-action exchanges an OIDC token
     steps:
       - name: Checkout control repo (for prompts)
         uses: actions/checkout@v7
         with:
+          # explicit: inside a reusable workflow the default is the CALLER's
+          # repo, which would put the managed repo here instead of the prompts
+          repository: jirathip-k/agent-ops
           path: agent-ops
 
       - name: Checkout target repo
