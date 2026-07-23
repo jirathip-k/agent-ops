@@ -151,3 +151,26 @@ close the window. It pairs naturally with worktree-per-task:
 Herdr replaces scattered terminal windows; it doesn't replace the platform's
 gates — a run only becomes a PR when tests, lint, and self-review pass,
 regardless of which pane it ran in.
+
+## Orca (worktree cockpit)
+
+[Orca](https://www.onorca.dev/) is a desktop IDE built around parallel
+agents in git worktrees — worktree list, diff viewer, PR/CI inspection, and
+terminals in one window. It overlaps heavily with what this platform already
+does, so the rule is: **agent-ops orchestrates, Orca observes.**
+
+- Open the **main checkout** in Orca. Task worktrees appear automatically
+  under `.worktrees/` as `agent implement` creates them.
+- Run the `agent` CLI in Orca's terminal panes; `runtime.stream: true`
+  (the default) makes panes show live agent activity.
+- Use Orca's diff/PR/CI views to review a run's branch before merge or
+  promote. Reviewing there is fine; merging goes through `agent`.
+- **Don't use Orca's native spawn-agent-in-worktree feature here.** It
+  bypasses the loop entirely: no plan/review fan-out, no gates, no merge
+  caps, no blocked-path protection.
+- **Don't create or remove worktrees from Orca's UI.** Lifecycle belongs to
+  `agent implement` / `agent worktree remove`; a half-removed worktree
+  blocks the next run for that task, and concurrent `worktree add` from two
+  tools invites the git config-lock contention the platform retries around.
+- Orca and Herdr solve the same monitoring problem — pick one as the
+  primary surface rather than tracking runs in both.
