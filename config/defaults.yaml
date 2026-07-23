@@ -1,0 +1,24 @@
+# Platform-wide defaults. Every project's .agent/config.yaml is merged on top
+# of this file (project values win). Keep this file conservative — projects
+# opt IN to more autonomy, never out of safety.
+
+base_branch: main
+worktree_dir: .worktrees
+
+runtime:
+  name: claude_code        # claude_code | codex
+  model: null              # runtime default
+  permission_mode: acceptEdits
+  max_turns: null
+
+commands:
+  test: null               # e.g. "uv run pytest -q" / "npm test"
+  lint: null               # e.g. "uv run ruff check ."
+  typecheck: null          # e.g. "uv run pyright"
+
+loop:
+  max_attempts: 3          # implement attempts before escalating to a human
+  gates: [test, lint, typecheck]   # run in order; gates without a command are skipped
+  self_review: true        # run a read-only review agent before committing
+
+skills: [coding, testing]  # platform skills injected into implement prompts
