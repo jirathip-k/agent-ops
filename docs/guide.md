@@ -84,6 +84,10 @@ Use a throwaway worktree so your main checkout stays untouched:
 cd ~/Projects/<app>
 git fetch origin staging
 git worktree add .worktrees/verify origin/staging
+cp .env* .worktrees/verify/ 2>/dev/null          # env files are gitignored —
+                                                 # a fresh worktree has none,
+                                                 # and without them many apps
+                                                 # boot to a white screen
 cd .worktrees/verify && npm ci && npm run dev    # click around, check the fixes
 cd ../.. && git worktree remove --force .worktrees/verify
 ```
