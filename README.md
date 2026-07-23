@@ -49,11 +49,15 @@ agent worktree list            # see in-flight task worktrees
 agent runtimes                 # claude_code / codex availability
 ```
 
-Stages fan out across roles: the **planner** and **reviewer** default to a
-stronger model (`opus`) in read-only mode, while the **implementer** runs on
-the workhorse default with write access. Override per project (or per role)
-under `agents:` in `.agent/config.yaml`; a planner `ESCALATE:` stops the
-workflow before anything is changed.
+Stages fan out across roles via model tiers: **planner** and **reviewer**
+run the `smart` tier (currently `fable`) in read-only mode; **implementer**
+runs the `fast` tier (currently `sonnet`) with write access. Tiers are
+defined once in `config/defaults.yaml` (`model_tiers:`) using floating
+vendor aliases, so they track new model releases without config changes;
+override per project or per role under `agents:` in `.agent/config.yaml`.
+A planner `ESCALATE:` stops the workflow before anything is changed. Agent
+activity streams live (tool calls + text) by default; set
+`runtime.stream: false` for quiet runs.
 
 The full loop — capture → groom (`agent-ready` label) → dispatch → review →
 merge — plus GitHub Projects board setup and running parallel agents under
