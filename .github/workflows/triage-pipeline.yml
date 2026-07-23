@@ -52,7 +52,23 @@ jobs:
       pull-requests: write
       id-token: write  # claude-code-action exchanges an OIDC token
     steps:
+      # Idle guard: skip the (token-costing) Claude session entirely when the
+      # repo has no issue the orchestrator would act on. Runs in seconds, free.
+      - name: Check for actionable work
+        id: precheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list --repo "${{ inputs.target_repo }}" --state open --limit 100 \
+            --json labels --jq '[.[] | select(
+              ([.labels[].name] | map(. == "triage:done" or . == "needs-human"
+                or . == "blocked" or . == "backlog") | any) | not
+            )] | length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Actionable issues: $COUNT"
+
       - name: Checkout control repo (for prompts)
+        if: steps.precheck.outputs.count != '0'
         uses: actions/checkout@v7
         with:
           # explicit: inside a reusable workflow the default is the CALLER's
@@ -61,6 +77,7 @@ jobs:
           path: agent-ops
 
       - name: Checkout target repo
+        if: steps.precheck.outputs.count != '0'
         uses: actions/checkout@v7
         with:
           repository: ${{ inputs.target_repo }}
@@ -69,6 +86,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run orchestrator
+        if: steps.precheck.outputs.count != '0'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
