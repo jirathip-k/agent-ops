@@ -76,6 +76,22 @@ you'd see it under the repo's **Actions** tab.
 | What the scheduled loop did (once on) | The managed repo → **Actions** tab → run summary |
 | Why an issue was classified some way | The **Triage:** comment the agent left on the issue |
 
+## How to verify staging (before merging a promotion PR)
+
+Use a throwaway worktree so your main checkout stays untouched:
+
+```sh
+cd ~/Projects/<app>
+git fetch origin staging
+git worktree add .worktrees/verify origin/staging
+cd .worktrees/verify && npm ci && npm run dev    # click around, check the fixes
+cd ../.. && git worktree remove --force .worktrees/verify
+```
+
+(Plain `git switch staging && git pull` in your normal checkout works too —
+the worktree way just avoids moving your branch while you have work open.)
+Happy? Merge the promotion PR on GitHub. That's the release.
+
 ## The words that keep coming up
 
 - **staging** — the "try it first" branch. Agents may merge here (with rules).
