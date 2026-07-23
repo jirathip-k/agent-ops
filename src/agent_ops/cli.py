@@ -272,6 +272,18 @@ def queue(
 
 
 @app.command()
+def status() -> None:
+    """Fleet overview: open PRs and issue buckets for every registered repo."""
+    from agent_ops.status import fleet_status
+
+    try:
+        fleet_status(board_mod.load_board_config())
+    except (CommandError, FileNotFoundError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+
+@app.command()
 def runtimes() -> None:
     """List available runtimes and whether their CLI is installed."""
     for name in runtime_names():
