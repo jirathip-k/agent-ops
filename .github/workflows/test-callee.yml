@@ -27,8 +27,5 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    concurrency:
-      group: agent-triage-${{ inputs.target_repo }}
-      cancel-in-progress: false
     steps:
       - run: echo "target=${{ inputs.target_repo }} max=${{ inputs.max_issues }} am=${{ inputs.auto_merge }}"
