@@ -117,11 +117,17 @@ Happy? Merge the promotion PR on GitHub. That's the release.
 changelog — agents never merge it.
 
 Once you've verified staging (above), merge it yourself with a **merge
-commit**, not squash:
+commit**, not squash — and give the merge commit a real message (the default
+"Merge pull request #N from …/staging" says nothing in `git log`):
 
 ```sh
-gh pr merge <N> --merge
+gh pr merge <N> --merge \
+  --subject "release: promote staging to main (#<N>)" \
+  --body "Changelog in PR #<N>."
 ```
+
+(The gh-dash `M` key does exactly this.) For milestones worth naming, tag
+after merging: `gh release create v0.x.0 --generate-notes`.
 
 Or on GitHub, use the green button with "Create a merge commit" selected.
 Squash would rewrite history and make staging and main diverge.
