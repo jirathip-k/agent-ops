@@ -1,0 +1,26 @@
+# Temporary: minimal reusable workflow for startup_failure bisection.
+name: Test Callee
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        required: true
+        type: string
+      max_issues:
+        required: false
+        type: number
+        default: 3
+      auto_merge:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "target=${{ inputs.target_repo }} max=${{ inputs.max_issues }} am=${{ inputs.auto_merge }}"
