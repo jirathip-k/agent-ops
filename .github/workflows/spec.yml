@@ -3,14 +3,17 @@
 # Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
 # and workflow-reuse access on the agent-ops repo.
 #
-# On-demand lane, no cron: label an issue `spec-requested`, then press
-# "Run workflow". The pipeline is label-gated, so a run with no labeled
-# issues skips the Claude session and costs nothing.
+# Runs nightly and on demand: label an issue `spec-requested`, then wait
+# for the nightly run or press "Run workflow". The pipeline is label-gated,
+# so a night with no labeled issues skips the Claude session and costs
+# nothing.
 
 name: Agent Spec
 
 on:
-  workflow_dispatch: {}   # manual "run now" button — this lane has no cron
+  schedule:
+    - cron: '0 19 * * *'  # 02:00 Asia/Bangkok (UTC+7)
+  workflow_dispatch: {}   # manual "run now" button
 
 jobs:
   spec:
