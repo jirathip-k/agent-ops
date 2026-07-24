@@ -63,8 +63,8 @@ activity streams live (tool calls + text) by default; set
 
 The full loop — capture (`agent scout` for agent-sourced ideas) → groom →
 spec (`agent spec` turns backlog ideas into agent-ready checklists) →
-dispatch → review → merge — plus GitHub Projects board setup and running
-parallel agents under Orca is described in `docs/workflow.md`.
+dispatch → review → merge — plus running parallel agents under Orca is
+described in `docs/workflow.md`.
 
 The implement loop retries up to `loop.max_attempts` times; each retry is a
 fresh session fed the original task plus the gate-failure report. On failure

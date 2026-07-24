@@ -1,0 +1,7 @@
+# EXAMPLE — copy to config/local/repos.yml (git-ignored) and fill in.
+# The local copy is the real registry; it never enters version control, so
+# private repo names stay off public forks of this platform.
+
+repos:
+  - your-user/your-repo
+  - your-org/another-repo

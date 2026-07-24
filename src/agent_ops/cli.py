@@ -7,8 +7,7 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, surfaces, worktree
-from agent_ops import board as board_mod
+from agent_ops import __version__, github, registry, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
@@ -23,8 +22,6 @@ app = typer.Typer(
 )
 worktree_app = typer.Typer(help="Manage per-task worktrees.", no_args_is_help=True)
 app.add_typer(worktree_app, name="worktree")
-board_app = typer.Typer(help="Sync issues to the GitHub Projects board.", no_args_is_help=True)
-app.add_typer(board_app, name="board")
 
 ProjectOpt = Annotated[
     Path, typer.Option("--project", "-C", help="Project repo root (default: cwd)")
@@ -339,7 +336,7 @@ def status() -> None:
     from agent_ops.status import fleet_status
 
     try:
-        fleet_status(board_mod.load_board_config())
+        fleet_status(registry.load_registry())
     except (CommandError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
@@ -356,18 +353,6 @@ def runtimes() -> None:
 @app.command()
 def version() -> None:
     typer.echo(__version__)
-
-
-@board_app.command("sync")
-def board_sync() -> None:
-    """Add open issues from every repo in config/board.yml to the Projects board."""
-    try:
-        config = board_mod.load_board_config()
-        total = board_mod.sync(config)
-    except (CommandError, FileNotFoundError, ValueError) as exc:
-        _err(str(exc))
-        raise typer.Exit(1) from exc
-    typer.echo(f"synced {total} issue(s) across {len(config.repos)} repo(s)")
 
 
 @worktree_app.command("list")

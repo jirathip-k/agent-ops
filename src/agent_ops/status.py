@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-from agent_ops.board import BoardConfig
+from agent_ops.registry import RegistryConfig
 from agent_ops.utils import run
 
 BUCKETS = ("agent-ready", "needs-human", "backlog")
@@ -24,7 +24,7 @@ def bucket_counts(issues: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def fleet_status(config: BoardConfig, log: Callable[[str], None] = print) -> None:
+def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """One screen: every registered repo's open PRs and issue buckets."""
     for repo in config.repos:
         prs = json.loads(
