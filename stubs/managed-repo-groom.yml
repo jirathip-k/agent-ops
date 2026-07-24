@@ -1,0 +1,33 @@
+# Copy this file into each managed repo at .github/workflows/groom.yml
+# Replace YOUR-USERNAME with your GitHub username/org.
+#
+# Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
+# and workflow-reuse access on the agent-ops repo.
+#
+# WARNING: with the triage pipeline's go-ahead override and auto_merge: true,
+# a groom promotion feeds straight into implementation on the next triage
+# tick — filed → groomed → implemented → staged, no human touch until
+# promotion to main. Deploy this stub only where that's intended.
+
+name: Daily Agent Groom
+
+on:
+  schedule:
+    # Daily; the next triage tick (every 4h) picks up promotions.
+    # Grooming re-validates EVERY open issue, so it's the most token-hungry
+    # job — keep it daily unless the issue flow demands more.
+    - cron: '0 1 * * *'
+  workflow_dispatch: {}   # manual "run now" button for testing
+
+jobs:
+  groom:
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: read
+      issues: write
+    uses: YOUR-USERNAME/agent-ops/.github/workflows/groom-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
