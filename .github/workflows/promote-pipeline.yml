@@ -1,0 +1,80 @@
+# Reusable promotion pipeline workflow.
+# Runs the real `agent promote` CLI against a managed repo — the same code
+# path as local promotion, so the changelog PR can't drift between lanes.
+# Opens (or refreshes) the staging → main promotion PR whenever staging is
+# ahead. NEVER merges — promotion into the stable branch stays a human click,
+# and gh-dash's Promotions section stays a complete "what needs promoting"
+# view because every repo with pending work has an open PR.
+#
+# Caveat: PRs created with the workflow's GITHUB_TOKEN do not trigger other
+# workflows (GitHub anti-recursion), so CI checks may not run on a promotion
+# PR this lane opens. Acceptable: every commit already passed CI on its way
+# into staging, and promotion verification happens on the deployed staging
+# environment, not on the PR.
+
+name: Agent Promote Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to open the promotion PR for"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to open the promotion PR for"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read # run_promote reads open issues to build the Closes lines
+      pull-requests: write
+    steps:
+      - name: Checkout control repo (CLI)
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      # Idle guard: a repo not on the staging model (no base_branch in
+      # .agent/config.yaml, or base_branch is already the stable branch)
+      # has nothing to promote — skip before installing anything.
+      - name: Check promotion applies
+        id: precheck
+        run: |
+          BASE=$(sed -n 's/^[[:space:]]*base_branch:[[:space:]]*\([^[:space:]#]*\).*/\1/p' \
+            target/.agent/config.yaml 2>/dev/null | head -1)
+          if [ -n "$BASE" ] && [ "$BASE" != "main" ]; then
+            echo "applies=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "applies=no" >> "$GITHUB_OUTPUT"
+            echo "base_branch is '${BASE:-unset}' — promotion flow not configured; skipping"
+          fi
+
+      - name: Install uv
+        if: steps.precheck.outputs.applies == 'yes'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Open or refresh promotion PR
+        if: steps.precheck.outputs.applies == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: agent-ops
+        run: uv run agent promote -C "$GITHUB_WORKSPACE/target"
