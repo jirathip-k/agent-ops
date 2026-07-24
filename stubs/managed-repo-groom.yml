@@ -13,7 +13,7 @@ name: Daily Agent Groom
 
 on:
   schedule:
-    # Daily, before the day's first triage ticks pick up promotions.
+    # Daily; the next triage tick (every 4h) picks up promotions.
     # Grooming re-validates EVERY open issue, so it's the most token-hungry
     # job — keep it daily unless the issue flow demands more.
     - cron: '0 1 * * *'

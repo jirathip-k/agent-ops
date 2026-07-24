@@ -46,8 +46,10 @@ jobs:
         id: precheck
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          TARGET_REPO: ${{ inputs.target_repo }}
         run: |
-          COUNT=$(gh issue list --repo "${{ inputs.target_repo }}" --state open \
+          COUNT=$(gh issue list --repo "$TARGET_REPO" --state open \
             --limit 1 --json number --jq 'length')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "Open issues: $COUNT"
