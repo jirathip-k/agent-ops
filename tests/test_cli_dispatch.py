@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import surfaces, worktree
+from agent_ops import github, surfaces, worktree
 from agent_ops.cli import app
 from agent_ops.utils import CommandError, run
 
@@ -154,3 +154,44 @@ def test_dispatch_worktree_creation_failure_leaves_nothing_behind(
     branches = run(["git", "branch", "--list", "fix/issue-9"], cwd=repo).stdout
     assert "fix/issue-9" not in branches
     assert fake.calls == []  # never spawned when the worktree itself failed
+
+
+def test_dispatch_refuses_when_issue_already_has_open_pr(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    monkeypatch.setattr(
+        github,
+        "open_prs_for_issue",
+        lambda number, cwd: [
+            {"number": 141, "url": "https://github.com/org/repo/pull/141", "headRefName": ""}
+        ],
+    )
+
+    result = runner.invoke(app, ["dispatch", "8", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    assert "#141" in result.output
+    assert not (repo / ".worktrees" / "issue-8").exists()
+    assert fake.calls == []  # never spawned onto a duplicate
+
+
+def test_dispatch_force_bypasses_open_pr_guard_and_forwards_flag(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    monkeypatch.setattr(
+        github,
+        "open_prs_for_issue",
+        lambda number, cwd: [
+            {"number": 141, "url": "https://github.com/org/repo/pull/141", "headRefName": ""}
+        ],
+    )
+
+    result = runner.invoke(app, ["dispatch", "9", "--project", str(repo), "--force"])
+
+    assert result.exit_code == 0
+    ((_, command, _, _),) = fake.calls
+    assert "--force" in command

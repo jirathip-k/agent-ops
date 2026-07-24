@@ -118,6 +118,12 @@ Parallelism is free because every task gets its own worktree — run several
 `agent implement` commands at once (see Orca below). While building trust in
 a new project, use `--no-pr` and inspect the kept worktree before pushing.
 
+Both `agent dispatch` and `agent implement` refuse to start when an open PR
+already references the issue (branch `fix/issue-N` or a `#N` mention in the
+title/body) — this is what stops the local lane and the CI lane from fixing
+the same issue twice. The message names the existing PR; pass `--force` to
+implement anyway (e.g. the match was a false positive).
+
 ## 4. Review & merge — humans own main
 
 ```sh
@@ -132,7 +138,9 @@ The agent review is a pre-filter, never the approval. Merge is always yours.
 
 The scheduled triage pipeline handles the long tail (triage, small fixes,
 audit issues) across repos registered in `config/repos.yml`. Check its run
-summaries and `needs-human` labels once a day; that's your ops inbox.
+summaries and `needs-human` labels once a day; that's your ops inbox. It
+skips issues that already have an open PR, the symmetric half of the local
+lane's guard above, so the two lanes never fix the same issue twice.
 
 ## Preview-environment standard (deployed frontends)
 
