@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import shutil
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Protocol
 
+from agent_ops import orca
 from agent_ops.utils import run
 
 
@@ -13,8 +14,8 @@ class Surface(Protocol):
     """Somewhere a long-running agent command can be spawned and watched.
 
     Mirrors the Runtime protocol: `agent dispatch` depends only on this, so
-    adding a new surface (Orca IDE, tmux, VS Code terminal, ...) is one class
-    with `name`, `available()`, and `spawn()` registered in SURFACES.
+    adding a new surface (tmux, VS Code terminal, ...) is one class with
+    `name`, `available()`, and `spawn()` registered in SURFACES.
     """
 
     name: str
@@ -26,29 +27,37 @@ class Surface(Protocol):
         ...
 
 
-class HerdrSurface:
-    """New tab in the user's running Herdr session, via its socket API.
+class OrcaSurface:
+    """New terminal in the Orca IDE, attached to the project's worktree card.
 
-    The agent process lives in the pane, so Herdr's sidebar shows live
-    working/blocked/done status and the run survives this session ending.
+    The agent process lives in an Orca-managed terminal, so the app shows it
+    working live and the run survives this session ending.
     """
 
-    name = "herdr"
+    name = "orca"
 
     def available(self) -> bool:
-        if shutil.which("herdr") is None:
-            return False
-        return run(["herdr", "tab", "list"], check=False).returncode == 0
+        return orca.available()
 
     def spawn(self, label: str, command: list[str], cwd: Path) -> str:
         created = json.loads(
             run(
-                ["herdr", "tab", "create", "--cwd", str(cwd), "--label", label, "--no-focus"]
+                [
+                    orca.executable(),
+                    "terminal",
+                    "create",
+                    "--worktree",
+                    f"path:{cwd}",
+                    "--title",
+                    label,
+                    "--command",
+                    shlex.join(command),
+                    "--json",
+                ]
             ).stdout
         )
-        pane_id = created["result"]["root_pane"]["pane_id"]
-        run(["herdr", "pane", "run", pane_id, *command])
-        return f"herdr tab {label!r} (pane {pane_id})"
+        handle = created["result"]["terminal"]["handle"]
+        return f"orca terminal {label!r} (handle {handle})"
 
 
 class BackgroundSurface:
@@ -79,7 +88,7 @@ class BackgroundSurface:
 
 
 # Detection order for --surface auto: most visible first.
-SURFACES: list[Surface] = [HerdrSurface(), BackgroundSurface()]
+SURFACES: list[Surface] = [OrcaSurface(), BackgroundSurface()]
 
 
 def pick(name: str = "auto") -> Surface:

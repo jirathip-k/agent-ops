@@ -15,7 +15,7 @@ class ClaudeCodeRuntime:
     Uses subscription auth locally; in CI the claude-code-action provides the
     OAuth token instead of this adapter. With `stream=True` the adapter uses
     `--output-format stream-json` and prints agent activity (tool calls, text)
-    live — this is what makes a Herdr pane show real progress instead of
+    live — this is what makes an Orca terminal show real progress instead of
     silence until the stage ends.
     """
 

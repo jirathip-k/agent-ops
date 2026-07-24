@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, worktree
+from agent_ops import github, orca, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.loop import run_task_loop
 from agent_ops.prompts import render_task
@@ -114,6 +114,7 @@ def run_implement(
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch
     )
+    orca.report(wt_path, comment=f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 
     if config.commands.setup:
         log(f"setup: {config.commands.setup}")
@@ -132,6 +133,7 @@ def run_implement(
     elif config.loop.plan:
         planner_role = config.resolve_role("planner")
         log(f"planning (model: {planner_role.model or 'default'})")
+        orca.report(wt_path, comment=f"#{issue_number}: planning")
         try:
             plan = make_plan(config, issue, wt_path, runtime_override=runtime_name)
         except RuntimeError as exc:
@@ -155,18 +157,22 @@ def run_implement(
         config, "implementer", prompt, wt_path, runtime_override=runtime_name
     )
 
+    orca.report(wt_path, comment=f"#{issue_number}: implementing")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
     if not outcome.ok:
+        failing = ", ".join(g.name for g in outcome.gate_failures)
         log(
             f"FAILED after {outcome.attempts} attempts; worktree kept at {wt_path} "
-            f"for inspection. Failing gates: {', '.join(g.name for g in outcome.gate_failures)}"
+            f"for inspection. Failing gates: {failing}"
         )
+        orca.report(wt_path, comment=f"#{issue_number}: FAILED gates ({failing}); worktree kept")
         return False
 
     if config.loop.self_review and not _self_review_ok(
         config, wt_path, log=log, runtime_override=runtime_name
     ):
         log(f"self-review requested changes; worktree kept at {wt_path}")
+        orca.report(wt_path, comment=f"#{issue_number}: self-review requested changes")
         return False
 
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip()
@@ -185,6 +191,9 @@ def run_implement(
         )
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         log(f"opened PR: {url}")
+        orca.report(
+            wt_path, comment=f"#{issue_number}: PR opened {url}", status=orca.STATUS_IN_REVIEW
+        )
         if config.loop.auto_merge:
             from agent_ops.workflows.merge import run_merge
 
