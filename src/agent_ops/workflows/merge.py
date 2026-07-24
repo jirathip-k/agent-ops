@@ -171,7 +171,11 @@ def run_promote(project_root: Path, *, log: Callable[[str], None] = print) -> st
     body = (
         f"Promotion of `{working}` into `{stable}` — human verification required.\n\n"
         f"## Changes\n\n{changelog}{closes_section}\n\n"
-        "Verify on staging, then merge (do NOT let an agent merge this)."
+        "Verify on staging, then merge **with a merge commit** (`M` in gh-dash) — "
+        "never squash. A squashed promotion puts a commit on the stable branch "
+        "that the working branch's history doesn't contain; the branches diverge "
+        "and every later promotion hits phantom conflicts. "
+        "Do NOT let an agent merge this."
     )
     proc = run(
         [
