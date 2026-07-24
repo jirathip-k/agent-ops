@@ -50,6 +50,82 @@ def test_format_event_shows_tool_use_with_detail() -> None:
     assert "⚙ Bash: uv run pytest -q" in summary
 
 
+def test_format_event_bash_prefers_description_over_command() -> None:
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {
+                        "command": 'rg -n "photoKey" /Users/x/proj/src --type ts -l',
+                        "description": "Search for photoKey usages",
+                    },
+                },
+            ]
+        },
+    }
+    summary = format_event(event, cwd=Path("/Users/x/proj"))
+    assert summary is not None
+    assert "⚙ Bash: Search for photoKey usages" in summary
+    assert "rg -n" not in summary
+
+
+def test_format_event_bash_without_description_strips_cwd_from_command() -> None:
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "cat /Users/x/proj/src/App.tsx"},
+                },
+            ]
+        },
+    }
+    summary = format_event(event, cwd=Path("/Users/x/proj"))
+    assert summary is not None
+    assert "⚙ Bash: cat src/App.tsx" in summary
+
+
+def test_format_event_relativizes_file_path_under_cwd() -> None:
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "/Users/x/proj/src/App.tsx"},
+                },
+            ]
+        },
+    }
+    summary = format_event(event, cwd=Path("/Users/x/proj"))
+    assert summary is not None
+    assert "⚙ Read: src/App.tsx" in summary
+
+
+def test_format_event_leaves_paths_outside_cwd_absolute() -> None:
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "/etc/hosts"},
+                },
+            ]
+        },
+    }
+    summary = format_event(event, cwd=Path("/Users/x/proj"))
+    assert summary is not None
+    assert "⚙ Read: /etc/hosts" in summary
+
+
 def test_format_event_clips_long_text() -> None:
     event = {
         "type": "assistant",
