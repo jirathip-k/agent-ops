@@ -31,7 +31,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | **Your Mac** (Orca terminals) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
 | **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on the managed repos (see the private fleet doc for per-repo status) |
-| **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs, the project board | Always | ✅ |
+| **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs | Always | ✅ |
 
 So when you wonder "where is triage running?" — today the answer is always
 **your Mac, because someone typed `agent triage`**. When the Actions loop is
@@ -79,8 +79,8 @@ you'd see it under the repo's **Actions** tab.
 | You want to know… | Look at |
 | --- | --- |
 | What is running *right now* | Orca sidebar — terminals named `agent-issue-N` stream every action live |
-| What's waiting on **me** | Issues labeled `needs-human` + open PRs (the board's "In review" column) |
-| Overall state of all projects | The **Agentic Workflow** project board |
+| What's waiting on **me** | Issues labeled `needs-human` + open PRs |
+| Overall state of all projects | Orca IDE — it aggregates issues and PRs across repos (or `agent status` in a terminal) |
 | What's about to ship | The open **promotion PR** (staging → main) — its description is the changelog |
 | What the scheduled loop did (once on) | The managed repo → **Actions** tab → run summary |
 | Why an issue was classified some way | The **Triage:** comment the agent left on the issue |
