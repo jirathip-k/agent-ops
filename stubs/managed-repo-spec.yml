@@ -1,0 +1,30 @@
+# Copy this file into each managed repo at .github/workflows/spec.yml
+# Replace YOUR-USERNAME with your GitHub username/org.
+#
+# Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
+# and workflow-reuse access on the agent-ops repo.
+#
+# On-demand lane, no cron: label an issue `spec-requested`, then press
+# "Run workflow". The pipeline is label-gated, so a run with no labeled
+# issues skips the Claude session and costs nothing.
+
+name: Agent Spec
+
+on:
+  workflow_dispatch: {}   # manual "run now" button — this lane has no cron
+
+jobs:
+  spec:
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: read
+      issues: write
+    uses: YOUR-USERNAME/agent-ops/.github/workflows/spec-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      # issue: 123      # optional: spec one specific issue instead of by label
+      # max_issues: 2   # optional: cap label-selected issues per run
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
