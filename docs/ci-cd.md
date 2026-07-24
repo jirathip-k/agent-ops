@@ -104,3 +104,67 @@ with verification steps that do not belong in a fire-and-forget job.
    disk anywhere.
 7. CLAUDE.md states what deploys automatically and what remains manual, so
    agents don't improvise.
+
+## Moving or renaming a managed repo
+
+Runbook for transferring a repo to another owner (e.g. personal → its own
+org) and optionally renaming it. First exercised for
+jirathip-k/climbing-tracker → sendmeter/sendmeter (2026-07-24).
+
+### What survives a transfer
+
+Issues, PRs, labels, releases, branch protections, **repo-level** Actions
+secrets/variables/environments, and Actions run history all move with the
+repo. GitHub creates redirects for git and web URLs — valid until someone
+claims the old name. **Org-level** secrets do NOT follow the repo; anything
+the old owner provided at org/user level must be re-created in the new org.
+The scheduled triage workflow keeps firing (schedules attach to the repo's
+default branch), and `uses: <owner>/agent-ops/...` references keep working
+because agent-ops is public and does not move.
+
+### Order of operations
+
+1. Merge or close in-flight PRs first (they survive, but it's tidier).
+2. Transfer: repo Settings → Danger Zone → Transfer ownership → target
+   org. As an owner of both, it completes immediately.
+3. Rename (optional): new repo Settings → General → Rename. Transfer and
+   rename are independent; both leave redirects.
+
+### Re-add checklist
+
+1. **Local clone**: `git remote set-url origin
+   git@github.com:<org>/<name>.git` — once per clone; linked worktrees
+   share the same remote. Keep the local folder path unless you enjoy
+   re-adding the repo to every tool that keys on it.
+2. **Orca**: repo identity derives from the origin remote + folder path.
+   After `set-url`, verify with `orca repo show`; only if the folder was
+   also renamed, re-add via `orca repo add --path <new-path>`.
+3. **Secrets**: `gh secret list -R <org>/<name>` — verify
+   `CLAUDE_CODE_OAUTH_TOKEN` (and any deploy secrets) survived; re-add
+   anything that was org/user-level at the old owner. Create pending
+   GitHub environments (e.g. `testflight`) in the new location, not the
+   old one.
+4. **GitHub Apps do NOT follow the repo** — every app the pipeline or
+   platform relies on must be installed on the new org:
+   - **Claude Code app** (github.com/apps/claude) — without it the triage
+     pipeline fails with "Claude Code is not installed on this repository"
+     even though the OAuth token secret transferred fine.
+   - **Vercel app**, then relink the project to the new repo slug
+     (`vercel git connect` fails with a generic "make sure you have
+     access" error until the app is installed). Platform-side env vars
+     are untouched.
+   - Any runner provider's app (e.g. Blacksmith), subject to its own
+     account screening.
+5. **Actions policy**: confirm the org allows Actions and public reusable
+   workflows. Billing note: minutes now draw from the new org's plan
+   (free org = 2,000 min/mo, macOS at 10×).
+6. **In-repo self-references**: update CLAUDE.md / README links to the
+   old slug (redirects mask this; fix it anyway).
+7. **Cross-repo references**: agent-ops docs and memory that name the old
+   slug still resolve via redirects — update opportunistically.
+
+### Verify
+
+`gh repo view <org>/<name>` → correct slug; `git fetch` still works from
+an un-updated clone (redirect); `workflow_dispatch` the triage workflow
+once; next merge deploys on the platform integration.
