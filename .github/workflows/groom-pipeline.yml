@@ -18,6 +18,11 @@ on:
         description: "owner/repo to groom"
         required: true
         type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -27,10 +32,15 @@ on:
         description: "owner/repo to groom"
         required: true
         type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   groom:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     # Deliberately the SAME group as the triage pipeline: groom and triage
     # mutate the same labels, so a repo is never groomed and triaged at once.
     concurrency:
