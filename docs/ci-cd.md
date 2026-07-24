@@ -144,9 +144,17 @@ because agent-ops is public and does not move.
    anything that was org/user-level at the old owner. Create pending
    GitHub environments (e.g. `testflight`) in the new location, not the
    old one.
-4. **Platform integrations**: install the Vercel (and any runner
-   provider's) GitHub App on the new org, then relink the project to the
-   new repo slug. Platform-side env vars are untouched.
+4. **GitHub Apps do NOT follow the repo** — every app the pipeline or
+   platform relies on must be installed on the new org:
+   - **Claude Code app** (github.com/apps/claude) — without it the triage
+     pipeline fails with "Claude Code is not installed on this repository"
+     even though the OAuth token secret transferred fine.
+   - **Vercel app**, then relink the project to the new repo slug
+     (`vercel git connect` fails with a generic "make sure you have
+     access" error until the app is installed). Platform-side env vars
+     are untouched.
+   - Any runner provider's app (e.g. Blacksmith), subject to its own
+     account screening.
 5. **Actions policy**: confirm the org allows Actions and public reusable
    workflows. Billing note: minutes now draw from the new org's plan
    (free org = 2,000 min/mo, macOS at 10×).
