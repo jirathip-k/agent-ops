@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from agent_ops.runtimes.base import RunRequest, RunResult
@@ -56,7 +57,7 @@ class ClaudeCodeRuntime:
             if event.get("type") == "result":
                 final = event
                 continue
-            summary = format_event(event)
+            summary = format_event(event, cwd=request.cwd)
             if summary:
                 print(summary, flush=True)
 
@@ -87,7 +88,7 @@ def build_command(request: RunRequest) -> list[str]:
     return cmd
 
 
-def format_event(event: dict[str, Any]) -> str | None:
+def format_event(event: dict[str, Any], cwd: Path | None = None) -> str | None:
     """One compact line per assistant action; None for events not worth showing."""
     if event.get("type") != "assistant":
         return None
@@ -97,17 +98,29 @@ def format_event(event: dict[str, Any]) -> str | None:
         if kind == "text" and block.get("text", "").strip():
             lines.append(f"  │ {_clip(block['text'])}")
         elif kind == "tool_use":
-            detail = _tool_detail(block.get("input") or {})
+            detail = _tool_detail(block.get("input") or {}, cwd=cwd)
             lines.append(f"  │ ⚙ {block.get('name', '?')}{': ' + detail if detail else ''}")
     return "\n".join(lines) or None
 
 
-def _tool_detail(tool_input: dict[str, Any]) -> str:
-    for key in ("command", "file_path", "pattern", "description", "prompt", "query"):
+def _tool_detail(tool_input: dict[str, Any], cwd: Path | None = None) -> str:
+    # description first: for Bash it is the short human summary that ships with
+    # every call, and it beats echoing a 160-char shell incantation at the user
+    for key in ("description", "command", "file_path", "pattern", "prompt", "query"):
         value = tool_input.get(key)
-        if value:
-            return _clip(str(value))
+        if not value:
+            continue
+        text = str(value)
+        if cwd is not None and key in ("command", "file_path"):
+            text = _strip_cwd(text, cwd)
+        return _clip(text)
     return ""
+
+
+def _strip_cwd(text: str, cwd: Path) -> str:
+    """Drop the run cwd from absolute paths so lines show `src/App.tsx`, not the worktree."""
+    prefix = str(cwd).rstrip("/") + "/"
+    return text.replace(prefix, "")
 
 
 def _clip(text: str, limit: int = 160) -> str:
