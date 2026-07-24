@@ -14,7 +14,10 @@ For each issue, explore the codebase enough to judge feasibility, then pick:
 - `agent-ready` — clear scope with acceptance criteria or a confirmable
   root cause, roughly ≤ half a day of work, verifiable by the project's
   gates, touches no danger zone from AGENTS.md/CLAUDE.md (auth, CI/CD,
-  migrations, dependencies, payments, infra).
+  migrations, dependencies, payments, infra). UI-facing issues clear this
+  bar ONLY with checklist acceptance criteria naming each affected
+  surface/screen — a one-line criterion is not enough (missed surfaces are
+  the top cause of reopened issues); otherwise choose `backlog`.
 - `needs-human` — ambiguous intent, requires a product/data/security
   decision, touches a danger zone, or is not reproducible/confirmable from
   the code.

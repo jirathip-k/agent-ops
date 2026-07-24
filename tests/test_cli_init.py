@@ -22,6 +22,9 @@ def test_init_scaffolds_project(tmp_path: Path) -> None:
 
     assert ".worktrees/" in (tmp_path / ".gitignore").read_text()
 
+    template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    assert "Acceptance criteria" in template.read_text()
+
 
 def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text("# my existing instructions\n")
@@ -34,3 +37,8 @@ def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     assert (tmp_path / "CLAUDE.md").read_text() == "# my existing instructions\n"
     # .gitignore not appended twice
     assert (tmp_path / ".gitignore").read_text().count(".worktrees/") == 1
+    # existing issue template untouched
+    template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    template.write_text("custom\n")
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    assert template.read_text() == "custom\n"

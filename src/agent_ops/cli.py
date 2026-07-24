@@ -106,6 +106,26 @@ def plan(
 
 
 @app.command()
+def spec(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number to elaborate")],
+    project: ProjectOpt = Path("."),
+    runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
+    post: Annotated[
+        bool, typer.Option("--post/--no-post", help="Post the spec as an issue comment")
+    ] = True,
+) -> None:
+    """Elaborate a backlog idea into an agent-ready spec (checklist acceptance criteria)."""
+    from agent_ops.workflows.spec import run_spec
+
+    try:
+        text = run_spec(project.resolve(), issue, post=post, runtime_override=runtime)
+    except (CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(text)
+
+
+@app.command()
 def review(
     pr: Annotated[int, typer.Argument(help="PR number to review")],
     project: ProjectOpt = Path("."),
@@ -156,6 +176,22 @@ def groom(project: ProjectOpt = Path(".")) -> None:
     for r in results:
         counts[r.verdict] = counts.get(r.verdict, 0) + 1
     typer.echo(", ".join(f"{v}: {n}" for v, n in counts.items()) or "nothing to groom")
+
+
+@app.command()
+def scout(
+    project: ProjectOpt = Path("."),
+    max_issues: Annotated[int, typer.Option("--max", help="Maximum number of issues to file")] = 3,
+) -> None:
+    """Mine TODOs, deferred review threads, and gaps; file capped backlog issues."""
+    from agent_ops.workflows.scout import run_scout
+
+    try:
+        results = run_scout(project.resolve(), max_issues=max_issues)
+    except (CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"filed {len(results)} issue(s)" if results else "nothing filed")
 
 
 @app.command()
@@ -215,6 +251,16 @@ def init(project: ProjectOpt = Path(".")) -> None:
     else:
         claude_dst.symlink_to("AGENTS.md")
         typer.echo("linked CLAUDE.md -> AGENTS.md")
+
+    # issue template: nudges checklist acceptance criteria at capture time,
+    # which is what the triage/groom UI bar keys off
+    template_dst = root / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    if template_dst.exists():
+        typer.echo(f"skip: {template_dst} already exists")
+    else:
+        template_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(templates / "issue-template-task.md", template_dst)
+        typer.echo(f"wrote {template_dst}")
 
     gitignore = root / ".gitignore"
     for marker in (".worktrees/", ".agent-runs/"):

@@ -1,8 +1,8 @@
 # Day-to-day workflow
 
-How work actually flows through the platform: capture → groom → dispatch →
-review → merge, with GitHub Projects as the board and Orca as the cockpit
-for parallel runs.
+How work actually flows through the platform: capture → groom → spec →
+dispatch → review → merge, with GitHub Projects as the board and Orca as
+the cockpit for parallel runs.
 
 ## 0. One-time per project
 
@@ -21,7 +21,25 @@ both in sync manually or replace one with a symlink yourself.
 
 Ideas, bugs, chores — file them where you are (`gh issue create`, GitHub
 mobile, a Claude session). An issue is the unit of agent work; if it isn't an
-issue, the agents can't see it.
+issue, the agents can't see it. `agent init` installs an issue template that
+nudges checklist acceptance criteria at capture time — for UI work, one
+checkbox per affected surface. One caveat on capture channels: GitHub's API
+can't attach images, so file UI issues with screenshots from the browser or
+mobile, not from a CLI/agent session.
+
+You don't have to be the only source of ideas:
+
+```sh
+agent scout --project <app>       # or --max N (default 3)
+```
+
+runs a read-only discovery agent that mines signals already in the repo —
+TODO/FIXME comments, merged-PR review threads that deferred work
+("follow-up", "out of scope"), error paths that swallow failures, untested
+modules — and files at most N issues labeled `backlog` + `proposed-by-agent`,
+each citing its signal (file:line or PR link). It never brainstorms from a
+blank page and never fixes anything; filed issues enter the same groom/spec
+funnel as yours. Run it weekly-ish, or whenever the queue runs dry.
 
 ## 2. Groom — decide what an agent may do
 
@@ -47,6 +65,32 @@ workable issues to `agent-ready` (writing a one-line acceptance criterion into
 the groom comment when missing), and refreshes stale buckets. Run it when you
 sit down to work; every action lands as a labeled comment on the issue, so
 it's auditable and reversible (reopen / relabel).
+
+**UI-facing issues have a higher bar**: triage and groom only promote them
+when checklist acceptance criteria name each affected surface/screen. A
+one-line criterion isn't enough there — missed surfaces (the modal's other
+step, the alternate grouping, the expanded row) are the top cause of
+reopened issues.
+
+### 2b. Spec — turn a parked idea into agent-ready work
+
+`backlog` used to be a dead end: ideas sat until you wrote acceptance
+criteria yourself. Now:
+
+```sh
+agent spec 123                    # explores code, posts the spec as a comment
+agent spec 123 --no-post          # print only
+gh issue edit 123 --add-label agent-ready --remove-label backlog
+```
+
+A read-only agent (smart model) reads the issue *and its comments*, walks
+the code to enumerate every surface the request touches, and posts a spec
+comment: checklist acceptance criteria (one box per surface/behavior),
+affected files, S/M/L size (L comes with a proposed split), and open
+questions. If the idea needs a product/data/security decision it escalates
+instead of guessing. Your job shrinks to reading the spec and flipping the
+label — the spec comment becomes the source of truth for the planner and
+implementer.
 
 Grooming also runs in CI (`stubs/managed-repo-groom.yml`, daily): the same
 `agent groom` code path executed in Actions, so verdicts can't drift between

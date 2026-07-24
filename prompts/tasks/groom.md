@@ -29,7 +29,11 @@ For each issue, in this order:
      gates, touches no danger zone from AGENTS.md/CLAUDE.md (auth, CI/CD,
      migrations, dependencies, payments, infra). If scope is clear but
      acceptance criteria are missing, state a one-line acceptance criterion
-     in your reasoning — it becomes part of the groom comment.
+     in your reasoning — it becomes part of the groom comment. Exception:
+     UI-facing issues need checklist acceptance criteria naming each
+     affected surface/screen (on the issue or supplied by `agent spec`) — a
+     one-line criterion is not enough there; keep them `backlog` until the
+     checklist exists.
    - `needs-human` — ambiguous intent, product/data/security decision,
      danger zone, or not confirmable from the code.
    - `backlog` — idea or enhancement without acceptance criteria.

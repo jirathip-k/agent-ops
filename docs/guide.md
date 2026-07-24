@@ -15,7 +15,9 @@ flowchart LR
     A["💡 Your idea<br/>(GitHub issue)"] --> B["🔍 Triage<br/>agent labels it"]
     B -->|agent-ready| C["🛠 Pipeline<br/>plan → code → test → review"]
     B -->|needs-human| H1["🧑 You decide,<br/>then it re-enters"]
-    B -->|backlog| P["🅿️ Parked"]
+    B -->|backlog| P["🅿️ Parked idea"]
+    P -->|agent spec writes<br/>acceptance criteria| H1
+    S["🔭 agent scout<br/>mines TODOs & gaps"] --> A
     C --> D["📬 Pull request"]
     D -->|rules pass| E["🟡 staging branch<br/>(auto-merged)"]
     D -->|rules block| H2["🧑 You approve<br/>the PR"]
@@ -53,9 +55,16 @@ you'd see it under the repo's **Actions** tab.
 
 **The agents' job (everything else):**
 
+- **Scout** (`agent scout`, run it when the queue is dry) mines the code for
+  work worth doing — TODO comments, review threads that said "later", error
+  handling gaps — and files a few `backlog` issues, each citing its evidence.
+- **Spec** (`agent spec <N>`) takes a parked idea, explores the code, and
+  writes checklist acceptance criteria — one box per affected screen — as an
+  issue comment. You read it and flip the label to `agent-ready`.
 - **Triage** reads new issues *and the code*, then labels each one:
   `agent-ready` (crew can do it), `needs-human` (question for you),
-  `backlog` (idea, parked).
+  `backlog` (idea, parked until spec'd). UI issues only count as
+  `agent-ready` when every affected screen is listed as a checkbox.
 - **Planner** (smart model, read-only) finds the root cause and writes a
   plan — or escalates instead of guessing.
 - **Implementer** (fast model) writes the code in an isolated worktree.

@@ -22,6 +22,7 @@ LABEL_COLORS = {
     "needs-human": "d93f0b",
     "backlog": "c5def5",
     "found-by-audit": "fbca04",
+    "proposed-by-agent": "bfd4f2",
 }
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")

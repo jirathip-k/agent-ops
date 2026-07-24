@@ -40,6 +40,8 @@ overwritten.
 ## Use it
 
 ```sh
+agent scout                    # mine TODOs/deferred threads/gaps → file backlog issues (≤3)
+agent spec 123                 # backlog idea → checklist acceptance criteria, posted on the issue
 agent queue                    # open issues labeled agent-ready, oldest first
 agent plan 123 --post          # planner only (smart model, read-only) → issue comment
 agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
@@ -59,9 +61,10 @@ A planner `ESCALATE:` stops the workflow before anything is changed. Agent
 activity streams live (tool calls + text) by default; set
 `runtime.stream: false` for quiet runs.
 
-The full loop — capture → groom (`agent-ready` label) → dispatch → review →
-merge — plus GitHub Projects board setup and running parallel agents under
-Orca is described in `docs/workflow.md`.
+The full loop — capture (`agent scout` for agent-sourced ideas) → groom →
+spec (`agent spec` turns backlog ideas into agent-ready checklists) →
+dispatch → review → merge — plus GitHub Projects board setup and running
+parallel agents under Orca is described in `docs/workflow.md`.
 
 The implement loop retries up to `loop.max_attempts` times; each retry is a
 fresh session fed the original task plus the gate-failure report. On failure
