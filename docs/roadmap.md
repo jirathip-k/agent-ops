@@ -14,6 +14,12 @@ the previous stage is boringly reliable.
 
 - [x] `agent plan <issue>` + in-workflow plan stage (planner role on a
       stronger model, read-only; ESCALATE stops the run).
+- [x] `agent spec <issue>`: elaborate a backlog idea into checklist
+      acceptance criteria posted on the issue (2026-07-24).
+- [x] `agent scout`: signal-mined idea discovery filing capped
+      `proposed-by-agent` backlog issues (2026-07-24). CI wiring (a scout
+      pipeline + stub) is deferred — `.github/workflows/` changes are
+      human-reviewed.
 - [ ] Structured run logs (`.agent-runs/<task-id>.jsonl`): attempts, gate
       results, cost — the audit trail for tuning prompts.
 - [ ] `agent implement --from-plan`: consume an approved plan comment

@@ -6,10 +6,10 @@ knowledge** (each managed repo's `AGENTS.md` + `.agent/`).
 ## Layers
 
 ```
-CLI (agent plan / implement / review / queue / init / doctor / worktree)
+CLI (agent scout / spec / triage / groom / plan / implement / review / ...)
  │
  ├─ config      platform defaults ⊕ project .agent/config.yaml
- ├─ workflows   implement, review        ← business logic lives here
+ ├─ workflows   scout, spec, triage, groom, implement, review   ← business logic
  │    │
  │    ├─ roles      planner / implementer / reviewer — per-role model +
  │    │             permission overrides (agents: in config); planner and
