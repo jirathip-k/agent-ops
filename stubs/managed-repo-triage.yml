@@ -31,5 +31,6 @@ jobs:
       target_repo: ${{ github.repository }}
       max_issues: 3
       auto_merge: false   # report-only; flip to true after a trusted week
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

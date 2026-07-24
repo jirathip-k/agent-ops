@@ -21,16 +21,26 @@ on:
         description: "owner/repo to open the promotion PR for"
         required: true
         type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
   workflow_dispatch:
     inputs:
       target_repo:
         description: "owner/repo to open the promotion PR for"
         required: true
         type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   promote:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
