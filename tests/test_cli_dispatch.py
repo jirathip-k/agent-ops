@@ -69,7 +69,7 @@ def test_dispatch_precreates_worktree_and_attaches_surface_to_it(
     assert attach_path == wt_path  # the visible run lives under the issue's card
 
 
-def test_dispatch_cleans_up_worktree_and_branch_when_spawn_fails(
+def test_dispatch_keeps_worktree_and_branch_when_spawn_fails(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(surfaces, "pick", lambda name="auto": FailingSurface())
@@ -77,13 +77,33 @@ def test_dispatch_cleans_up_worktree_and_branch_when_spawn_fails(
     result = runner.invoke(app, ["dispatch", "6", "--project", str(repo)])
 
     assert result.exit_code == 1
-    assert not (repo / ".worktrees" / "issue-6").exists()
+    # the surface attach failed, not the worktree — keep both so a retry can reuse them
+    assert (repo / ".worktrees" / "issue-6").is_dir()
     branches = run(["git", "branch", "--list", "fix/issue-6"], cwd=repo).stdout
-    assert "fix/issue-6" not in branches
-    # cleanup worked, so an immediate retry can create the worktree again
+    assert "fix/issue-6" in branches
+    stderr = result.stderr.lower()
+    assert "spawn exploded" in stderr
+    assert "kept" in stderr
+
+
+def test_dispatch_retry_after_spawn_failure_reuses_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": FailingSurface())
+    first = runner.invoke(app, ["dispatch", "6", "--project", str(repo)])
+    assert first.exit_code == 1
+
+    # retry re-runs dispatch's worktree.create with reuse=True: it must reuse
+    # the pristine leftover worktree instead of raising FileExistsError
     retry_fake = FakeSurface()
     monkeypatch.setattr(surfaces, "pick", lambda name="auto": retry_fake)
-    assert runner.invoke(app, ["dispatch", "6", "--project", str(repo)]).exit_code == 0
+    second = runner.invoke(app, ["dispatch", "6", "--project", str(repo)])
+
+    assert second.exit_code == 0
+    root = repo.resolve()
+    wt_path = root / ".worktrees" / "issue-6"
+    ((_, _, _, attach_path),) = retry_fake.calls
+    assert attach_path == wt_path
 
 
 def test_dispatch_fails_when_worktree_already_exists(
@@ -95,5 +115,42 @@ def test_dispatch_fails_when_worktree_already_exists(
 
     result = runner.invoke(app, ["dispatch", "7", "--project", str(repo)])
 
+    # pristine leftover matching the issue's branch is reused (this is the
+    # retry path), so this now succeeds by attaching to the existing worktree
+    assert result.exit_code == 0
+    ((_, _, _, attach_path),) = fake.calls
+    assert attach_path == repo.resolve() / ".worktrees" / "issue-7"
+
+
+def test_dispatch_fails_fast_on_dirty_leftover_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-8", "fix/issue-8", "main")
+    (repo / ".worktrees" / "issue-8" / "dirty.txt").write_text("oops\n")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+
+    result = runner.invoke(app, ["dispatch", "8", "--project", str(repo)])
+
     assert result.exit_code == 1
-    assert fake.calls == []  # never spawned onto a leftover worktree
+    assert fake.calls == []  # never spawned onto a leftover, dirty worktree
+
+
+def test_dispatch_worktree_creation_failure_leaves_nothing_behind(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+
+    def failing_create(*args: object, **kwargs: object) -> Path:
+        raise CommandError("git worktree add failed: simulated failure")
+
+    monkeypatch.setattr(worktree, "create", failing_create)
+
+    result = runner.invoke(app, ["dispatch", "9", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    assert not (repo / ".worktrees" / "issue-9").exists()
+    branches = run(["git", "branch", "--list", "fix/issue-9"], cwd=repo).stdout
+    assert "fix/issue-9" not in branches
+    assert fake.calls == []  # never spawned when the worktree itself failed
