@@ -184,10 +184,14 @@ does, so the rule is: **agent-ops orchestrates, Orca observes.**
   `.worktrees/` as `agent implement` creates them — turn on the repo's
   "show external worktrees" setting so Orca displays worktrees it didn't
   create itself.
-- `agent dispatch <N>` spawns each run in an Orca terminal on the main
-  checkout's card (the `orca` surface, preferred by `--surface auto`), so
-  the app shows the agent working live and the run survives the dispatching
-  session. It falls back to a background log when Orca isn't running.
+- `agent dispatch <N>` creates the task's `fix/issue-N` worktree up front
+  and spawns each run in an Orca terminal attached to that worktree's card
+  (the `orca` surface, preferred by `--surface auto`), so the app shows the
+  agent working live under the issue it belongs to and the run survives the
+  dispatching session. `agent implement` takes over the pre-created
+  worktree. It falls back to a background log (kept under the main
+  checkout's `.agent-runs/`, where it outlives the worktree) when Orca
+  isn't running.
 - One terminal per task; worktrees guarantee runs never trample each other.
   Keep an interactive `claude` in the main checkout for grooming issues,
   exploring, and writing acceptance criteria.

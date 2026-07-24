@@ -19,7 +19,16 @@ def test_background_surface_spawns_and_logs(tmp_path: Path) -> None:
     assert "surface-works" in log.read_text()
 
 
-def test_orca_surface_spawns_terminal_in_worktree(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_background_surface_logs_under_cwd_not_attach_path(tmp_path: Path) -> None:
+    wt = tmp_path / ".worktrees" / "issue-1"
+    wt.mkdir(parents=True)
+    surfaces.BackgroundSurface().spawn("demo", ["true"], tmp_path, attach_path=wt)
+    # the attach target may be deleted on success; the log must outlive it
+    assert (tmp_path / ".agent-runs" / "demo.log").exists()
+    assert not (wt / ".agent-runs").exists()
+
+
+def _orca_spawn_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -28,14 +37,31 @@ def test_orca_surface_spawns_terminal_in_worktree(monkeypatch: pytest.MonkeyPatc
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
     monkeypatch.setattr(surfaces, "run", fake_run)
+    return calls
+
+
+def test_orca_surface_attaches_terminal_to_attach_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _orca_spawn_calls(monkeypatch)
     where = surfaces.OrcaSurface().spawn(
-        "agent-issue-7", ["agent", "implement", "7", "--project", "/repo"], Path("/repo")
+        "agent-issue-7",
+        ["agent", "implement", "7", "--project", "/repo"],
+        Path("/repo"),
+        attach_path=Path("/repo/.worktrees/issue-7"),
     )
     assert "term_abc" in where
     (cmd,) = calls
     assert cmd[1:3] == ["terminal", "create"]
-    assert "path:/repo" in cmd
+    assert "path:/repo/.worktrees/issue-7" in cmd
     assert "agent implement 7 --project /repo" in cmd  # shell-joined, one --command arg
+
+
+def test_orca_surface_defaults_attach_to_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _orca_spawn_calls(monkeypatch)
+    surfaces.OrcaSurface().spawn(
+        "agent-issue-7", ["agent", "implement", "7", "--project", "/repo"], Path("/repo")
+    )
+    (cmd,) = calls
+    assert "path:/repo" in cmd
 
 
 def test_pick_auto_falls_back_to_background(monkeypatch: pytest.MonkeyPatch) -> None:
