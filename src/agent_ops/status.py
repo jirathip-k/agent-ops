@@ -4,6 +4,7 @@ import base64
 import json
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -42,33 +43,46 @@ def bucket_counts(issues: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def detect_lanes(workflows: dict[str, str]) -> dict[str, str | None]:
-    """Map each lane a repo has wired up to the runner label its stub passes.
+@dataclass(frozen=True)
+class LaneInfo:
+    """How a repo wires one lane: runner label passed (None = pipeline default)
+    and the cron expression of the calling stub's `on: schedule:` trigger
+    (None = not cron-scheduled)."""
+
+    runner: str | None
+    cron: str | None
+
+
+def detect_lanes(workflows: dict[str, str]) -> dict[str, LaneInfo]:
+    """Map each lane a repo has wired up to how its calling stub wires it.
 
     Content-based on purpose: stub filenames vary per repo (triage.yml,
     groom.yml, ...), but every caller must `uses:` a reusable
     `<lane>-pipeline.yml`, so that reference is the source of truth. The
-    value is the `runner:` input in the calling job's `with:` block, or
-    None when the stub passes none (pipeline default ubuntu-latest). If two
-    jobs/files call the same lane, the last one wins.
+    runner is the `runner:` input in the calling job's `with:` block, or
+    None when the stub passes none (pipeline default ubuntu-latest). The
+    cron comes from the stub file's `on: schedule:` trigger and applies to
+    every lane that file calls; workflow_dispatch-only stubs get cron=None.
+    If two jobs/files call the same lane, the last one wins.
     """
-    lanes: dict[str, str | None] = {}
+    lanes: dict[str, LaneInfo] = {}
     for content in workflows.values():
         lanes.update(_lanes_in(content))
     return lanes
 
 
-def _lanes_in(content: str) -> Iterator[tuple[str, str | None]]:
+def _lanes_in(content: str) -> Iterator[tuple[str, LaneInfo]]:
     try:
         doc = yaml.safe_load(content)
     except yaml.YAMLError:
-        # Unparseable file: fall back to a plain line scan (runner unknown).
+        # Unparseable file: fall back to a plain line scan (runner/cron unknown).
         for match in _USES_LINE_RE.finditer(content):
-            yield match.group(1), None
+            yield match.group(1), LaneInfo(runner=None, cron=None)
         return
     jobs = doc.get("jobs") if isinstance(doc, dict) else None
     if not isinstance(jobs, dict):
         return
+    cron = _file_cron(doc)
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
@@ -78,7 +92,22 @@ def _lanes_in(content: str) -> Iterator[tuple[str, str | None]]:
             continue
         with_block = job.get("with")
         runner = with_block.get("runner") if isinstance(with_block, dict) else None
-        yield match.group(1), str(runner) if runner is not None else None
+        yield match.group(1), LaneInfo(str(runner) if runner is not None else None, cron)
+
+
+def _file_cron(doc: dict[Any, Any]) -> str | None:
+    """First cron expression under the file's `on: schedule:` trigger, if any.
+
+    YAML 1.1 parses a bare `on` key as boolean True, so look under both.
+    """
+    triggers = doc.get("on", doc.get(True))
+    schedule = triggers.get("schedule") if isinstance(triggers, dict) else None
+    if not isinstance(schedule, list):
+        return None
+    for entry in schedule:
+        if isinstance(entry, dict) and entry.get("cron") is not None:
+            return str(entry["cron"])
+    return None
 
 
 def _repo_workflows(repo: str) -> dict[str, str]:
@@ -115,16 +144,22 @@ def _short_runner(runner: str | None) -> str:
     return runner
 
 
+def _cell(info: LaneInfo) -> str:
+    """Matrix cell: shorthand runner, starred when the lane is cron-scheduled."""
+    return _short_runner(info.runner) + ("*" if info.cron is not None else "")
+
+
 def pipeline_coverage(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """Matrix of which reusable agent-ops CI lanes each registered repo has wired up.
 
     Derived live from each repo's .github/workflows via the GitHub API —
     no stored state (ADR 0003: state lives in GitHub). Cells show the runner
-    each lane's stub passes; `gh` means the pipeline default (ubuntu-latest).
+    each lane's stub passes; `gh` means the pipeline default (ubuntu-latest);
+    a trailing `*` marks lanes whose calling stub has a cron schedule.
     """
     rows = [(repo, detect_lanes(_repo_workflows(repo))) for repo in config.repos]
     cells = {
-        repo: {lane: _short_runner(lanes[lane]) if lane in lanes else "–" for lane in LANES}
+        repo: {lane: _cell(lanes[lane]) if lane in lanes else "–" for lane in LANES}
         for repo, lanes in rows
     }
     name_width = max((len(repo) for repo, _ in rows), default=0)
@@ -137,7 +172,7 @@ def pipeline_coverage(config: RegistryConfig, log: Callable[[str], None] = print
         row = "  ".join(cells[repo][lane].center(widths[lane]) for lane in LANES)
         note = "" if lanes else "  ⚠ no agent-ops lanes wired"
         log(f"\033[1m{repo.ljust(name_width)}\033[0m  {row}{note}")
-    log("\ngh = pipeline default ubuntu-latest")
+    log("\n* = cron-scheduled; gh = pipeline default ubuntu-latest")
 
 
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
