@@ -56,7 +56,13 @@ class ClaudeCodeRuntime:
         stderr_chunks: list[str] = [""]
 
         def _read_stderr() -> None:
-            stderr_chunks[0] = stderr_pipe.read()
+            # Unlike `_write_stdin`, a *read* here has no BrokenPipeError hazard:
+            # the child holds its stderr write-end open for its whole life, so
+            # there's no early-exit race to suppress. `OSError` is still guarded
+            # defensively (e.g. the fd getting torn down from elsewhere) so a
+            # rare, unrelated failure here can't crash this daemon thread.
+            with contextlib.suppress(OSError):
+                stderr_chunks[0] = stderr_pipe.read()
 
         stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
         stderr_thread = threading.Thread(target=_read_stderr, daemon=True)

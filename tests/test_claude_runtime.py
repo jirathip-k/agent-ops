@@ -3,7 +3,7 @@ import sys
 import threading
 from pathlib import Path
 
-from agent_ops.runtimes.base import RunRequest
+from agent_ops.runtimes.base import RunRequest, RunResult
 from agent_ops.runtimes.claude_code import (
     ClaudeCodeRuntime,
     build_command,
@@ -225,6 +225,18 @@ sys.stderr.write("boom")
 sys.exit(1)
 """
 
+# No result event *and* >64 KiB of stderr, non-zero exit. Exercises the
+# `final is None` fallback path (`RunResult(text=stderr.strip())`) together
+# with the large-stderr pipe-draining behavior, which the other chatty-stderr
+# tests only ever pair with a successful result event.
+_CHILD_CHATTY_STDERR_NO_RESULT_NONZERO_EXIT = """
+import sys
+sys.stdin.read()
+sys.stderr.write("e" * 262144)
+sys.stderr.flush()
+sys.exit(1)
+"""
+
 # Exits immediately without ever reading stdin, despite a >64 KiB prompt
 # waiting to be written.
 _CHILD_EARLY_EXIT_NO_STDIN_READ = """
@@ -285,6 +297,14 @@ def test_streaming_no_result_event_and_nonzero_exit_returns_stderr() -> None:
     result = _run_streaming_with_timeout(cmd, request)
     assert not result.ok
     assert result.text == "boom"
+
+
+def test_streaming_chatty_stderr_no_result_and_nonzero_exit_returns_full_stderr() -> None:
+    cmd = [sys.executable, "-c", _CHILD_CHATTY_STDERR_NO_RESULT_NONZERO_EXIT]
+    request = RunRequest(prompt="small prompt", cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert not result.ok
+    assert result.text == "e" * 262144
 
 
 def test_streaming_early_exit_child_does_not_leak_broken_pipe_error() -> None:
