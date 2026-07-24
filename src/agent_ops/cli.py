@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from contextlib import suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -98,7 +97,9 @@ def dispatch(
         chosen = surfaces.pick(surface)
         config = load_project_config(root)
         task_id, branch = task_identifiers(issue)
-        wt_path = worktree.create(root, config.worktree_dir, task_id, branch, config.base_branch)
+        wt_path = worktree.create(
+            root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
+        )
     except (ValueError, FileExistsError, CommandError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
@@ -106,10 +107,17 @@ def dispatch(
     try:
         where = chosen.spawn(f"agent-issue-{issue}", command, root, attach_path=wt_path)
     except CommandError as exc:
-        # leave nothing behind: a kept worktree/branch would block the retry
-        with suppress(CommandError):
-            worktree.remove(root, config.worktree_dir, task_id, force=True, delete_branch=True)
-        _err(str(exc))
+        # The worktree itself is fine — only the surface attach (e.g. Orca not
+        # yet indexing the brand-new worktree) failed. Keep the worktree and
+        # branch: deleting them here would force a retry to recreate the
+        # worktree from scratch and race the exact same window again.
+        _err(
+            f"worktree {wt_path} was created successfully, but attaching the run to a "
+            f"surface failed: {exc}\n"
+            f"the worktree and branch were kept — re-run `agent dispatch {issue} "
+            f"--project {root}` to retry, it will reuse this worktree.\n"
+            f"or attach manually: agent implement {issue} --project {root}"
+        )
         raise typer.Exit(1) from exc
     typer.echo(f"dispatched issue #{issue} → {where}")
 
