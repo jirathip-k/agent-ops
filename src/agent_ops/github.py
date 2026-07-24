@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from agent_ops.utils import run
+from agent_ops.utils import CommandError, run
 
 
 def get_issue(number: int, cwd: Path) -> dict[str, Any]:
@@ -41,3 +42,40 @@ def comment_on_pr(number: int, body: str, cwd: Path) -> None:
 
 def comment_on_issue(number: int, body: str, cwd: Path) -> None:
     run(["gh", "issue", "comment", str(number), "--body", body], cwd=cwd)
+
+
+def pr_references_issue(pr: dict[str, Any], issue_number: int) -> bool:
+    """True if this PR's branch or title/body plausibly fixes the given issue."""
+    if pr.get("headRefName") == f"fix/issue-{issue_number}":
+        return True
+    pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
+    text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
+    return bool(pattern.search(text))
+
+
+def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
+    """Open PRs that already reference this issue, for the dedupe guard.
+
+    Fails open (returns []) when `gh` can't answer — e.g. no remote in a
+    test/scratch repo — since without a GitHub remote no duplicate PR can
+    exist, and the run would fail later at push/PR anyway.
+    """
+    try:
+        proc = run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,body,headRefName,url",
+                "--limit",
+                "100",
+            ],
+            cwd=cwd,
+        )
+    except CommandError:
+        return []
+    prs: list[dict[str, Any]] = json.loads(proc.stdout)
+    return [pr for pr in prs if pr_references_issue(pr, issue_number)]

@@ -44,6 +44,9 @@ def implement(
         Path | None,
         typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
     ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Implement even if an open PR already references it")
+    ] = False,
 ) -> None:
     """Implement a GitHub issue: worktree → agent loop → gates → self-review → PR."""
     try:
@@ -54,6 +57,7 @@ def implement(
             open_pr=not no_pr,
             keep_worktree=keep_worktree,
             plan_file=plan_file,
+            force=force,
         )
     except (CommandError, FileExistsError, RuntimeError, FileNotFoundError) as exc:
         _err(str(exc))
@@ -67,16 +71,30 @@ def dispatch(
     project: ProjectOpt = Path("."),
     surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Dispatch even if an open PR already references it")
+    ] = False,
 ) -> None:
     """Spawn `agent implement` on a visible surface (Orca terminal, background log, ...)."""
     root = project.resolve()
     command = ["agent", "implement", str(issue), "--project", str(root)]
     if no_pr:
         command.append("--no-pr")
+    if force:
+        command.append("--force")
 
     # Pre-create the worktree implement will reuse, so the surface can attach
     # the run to the issue's worktree card instead of the project root's.
     try:
+        if not force:
+            existing = github.open_prs_for_issue(issue, cwd=root)
+            if existing:
+                pr = existing[0]
+                raise CommandError(
+                    f"issue #{issue} already has open PR #{pr['number']} ({pr['url']}) — "
+                    "review/merge that instead, or close it to re-dispatch. "
+                    "Pass --force to override."
+                )
         chosen = surfaces.pick(surface)
         config = load_project_config(root)
         task_id, branch = task_identifiers(issue)

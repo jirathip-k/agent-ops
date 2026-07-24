@@ -106,6 +106,7 @@ def run_implement(
     open_pr: bool = True,
     keep_worktree: bool = False,
     plan_file: Path | None = None,
+    force: bool = False,
     log: Callable[[str], None] = print,
 ) -> bool:
     """Issue → worktree → plan (smart model) → implement loop → self-review → PR.
@@ -118,6 +119,16 @@ def run_implement(
     config = load_project_config(project_root)
     issue = github.get_issue(issue_number, cwd=project_root)
     task_id, branch = task_identifiers(issue_number)
+
+    if not force:
+        existing = github.open_prs_for_issue(issue_number, cwd=project_root)
+        if existing:
+            pr = existing[0]
+            log(
+                f"issue #{issue_number} already has open PR #{pr['number']} ({pr['url']}) — "
+                "review/merge that instead, or close it to re-dispatch. Pass --force to override."
+            )
+            return False
 
     log(f"creating worktree for {branch} from {config.base_branch}")
     # reuse: `agent dispatch` pre-creates this worktree so the surface can
