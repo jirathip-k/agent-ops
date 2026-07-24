@@ -8,7 +8,7 @@
 # plan lands as an issue comment ("## Agent plan") from a read-only planner
 # run — the human only has to review it and flip the label to agent-ready.
 
-name: Agent Plan Pipeline
+name: Reusable · Plan Pipeline
 
 on:
   workflow_call:

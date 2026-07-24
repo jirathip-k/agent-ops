@@ -9,7 +9,7 @@
 # criteria — the human only has to read it and flip the label to agent-ready.
 # An ESCALATE from the spec agent fails the run visibly, never silently.
 
-name: Agent Spec Pipeline
+name: Reusable · Spec Pipeline
 
 on:
   workflow_call:
