@@ -61,7 +61,7 @@ activity streams live (tool calls + text) by default; set
 
 The full loop — capture → groom (`agent-ready` label) → dispatch → review →
 merge — plus GitHub Projects board setup and running parallel agents under
-Herdr is described in `docs/workflow.md`.
+Orca is described in `docs/workflow.md`.
 
 The implement loop retries up to `loop.max_attempts` times; each retry is a
 fresh session fed the original task plus the gate-failure report. On failure

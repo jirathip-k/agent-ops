@@ -1,7 +1,7 @@
 # Day-to-day workflow
 
 How work actually flows through the platform: capture → groom → dispatch →
-review → merge, with GitHub Projects as the board and Herdr as the cockpit
+review → merge, with GitHub Projects as the board and Orca as the cockpit
 for parallel runs.
 
 ## 0. One-time per project
@@ -61,7 +61,7 @@ agent implement 123         # worktree → loop → gates → self-review → PR
 ```
 
 Parallelism is free because every task gets its own worktree — run several
-`agent implement` commands at once (see Herdr below). While building trust in
+`agent implement` commands at once (see Orca below). While building trust in
 a new project, use `--no-pr` and inspect the kept worktree before pushing.
 
 ## 4. Review & merge — humans own main
@@ -141,44 +141,31 @@ Convention: moving a card to **Ready (agent)** means you add the
 source of truth, the column mirrors it). PRs opened by `agent implement`
 carry `Closes #N`, so merge closes the issue and the board sweeps itself.
 
-## Herdr (running agents in parallel)
-
-[Herdr](https://github.com/ogulcancelik/herdr) is a terminal multiplexer
-built for AI coding agents: it detects Claude Code/Codex processes in its panes, shows
-which are working / blocked / finished, and keeps sessions alive when you
-close the window. It pairs naturally with worktree-per-task:
-
-- **One workspace per project**, one pane per task.
-- **Pane 1**: interactive `claude` in the main checkout — grooming issues,
-  exploring, writing acceptance criteria.
-- **Panes 2+**: either `agent implement <N>` (headless, fire-and-check-back)
-  or an interactive `claude` inside `.worktrees/issue-<N>` for tasks that
-  need supervision. Worktrees guarantee the panes never trample each other.
-- `agent implement` streams the underlying agent's activity live — every
-  tool call (`⚙ Bash: uv run pytest -q`) and thought line — interleaved with
-  the stage log (planning → attempts → gates → verdict), so a pane always
-  shows what the agent is actually doing. Set `runtime.stream: false` in
-  config for quiet output.
-- Herdr's blocked-state detection is your signal to jump into a pane that's
-  waiting on a permission prompt.
-- `agent worktree list` reconciles what's actually in flight if you lose
-  track of panes.
-
-Herdr replaces scattered terminal windows; it doesn't replace the platform's
-gates — a run only becomes a PR when tests, lint, and self-review pass,
-regardless of which pane it ran in.
-
-## Orca (worktree cockpit)
+## Orca (worktree cockpit, running agents in parallel)
 
 [Orca](https://www.onorca.dev/) is a desktop IDE built around parallel
 agents in git worktrees — worktree list, diff viewer, PR/CI inspection, and
 terminals in one window. It overlaps heavily with what this platform already
 does, so the rule is: **agent-ops orchestrates, Orca observes.**
 
-- Open the **main checkout** in Orca. Task worktrees appear automatically
-  under `.worktrees/` as `agent implement` creates them.
-- Run the `agent` CLI in Orca's terminal panes; `runtime.stream: true`
-  (the default) makes panes show live agent activity.
+- Open the **main checkout** in Orca. Task worktrees appear under
+  `.worktrees/` as `agent implement` creates them — turn on the repo's
+  "show external worktrees" setting so Orca displays worktrees it didn't
+  create itself.
+- `agent dispatch <N>` spawns each run in an Orca terminal on the main
+  checkout's card (the `orca` surface, preferred by `--surface auto`), so
+  the app shows the agent working live and the run survives the dispatching
+  session. It falls back to a background log when Orca isn't running.
+- One terminal per task; worktrees guarantee runs never trample each other.
+  Keep an interactive `claude` in the main checkout for grooming issues,
+  exploring, and writing acceptance criteria.
+- `agent implement` streams the underlying agent's activity live — every
+  tool call (`⚙ Bash: uv run pytest -q`) and thought line — interleaved with
+  the stage log (planning → attempts → gates → verdict), so a terminal
+  always shows what the agent is actually doing. Set `runtime.stream: false`
+  in config for quiet output.
+- `agent worktree list` reconciles what's actually in flight if you lose
+  track of terminals.
 - Use Orca's diff/PR/CI views to review a run's branch before merge or
   promote. Reviewing there is fine; merging goes through `agent`.
 - **Don't use Orca's native spawn-agent-in-worktree feature here.** It
@@ -188,5 +175,7 @@ does, so the rule is: **agent-ops orchestrates, Orca observes.**
   `agent implement` / `agent worktree remove`; a half-removed worktree
   blocks the next run for that task, and concurrent `worktree add` from two
   tools invites the git config-lock contention the platform retries around.
-- Orca and Herdr solve the same monitoring problem — pick one as the
-  primary surface rather than tracking runs in both.
+
+Orca replaces scattered terminal windows; it doesn't replace the platform's
+gates — a run only becomes a PR when tests, lint, and self-review pass,
+regardless of which terminal it ran in.

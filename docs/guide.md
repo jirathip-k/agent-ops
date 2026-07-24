@@ -27,7 +27,7 @@ flowchart LR
 
 | Place | What runs there | When | Is it on today? |
 | --- | --- | --- | --- |
-| **Your Mac** (Herdr panes) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
+| **Your Mac** (Orca terminals) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
 | **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on the managed repos (see the private fleet doc for per-repo status) |
 | **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs, the project board | Always | ✅ |
 
@@ -69,7 +69,7 @@ you'd see it under the repo's **Actions** tab.
 
 | You want to know… | Look at |
 | --- | --- |
-| What is running *right now* | Herdr sidebar — tabs named `agent:issue-N` stream every action live |
+| What is running *right now* | Orca sidebar — terminals named `agent-issue-N` stream every action live |
 | What's waiting on **me** | Issues labeled `needs-human` + open PRs (the board's "In review" column) |
 | Overall state of all projects | The **Agentic Workflow** project board |
 | What's about to ship | The open **promotion PR** (staging → main) — its description is the changelog |
@@ -162,7 +162,7 @@ state (worktrees branch from `origin/staging`).
 1. An issue was filed: "add vitest tests for checklist.ts". *(human: 1 minute)*
 2. `agent triage` read it against the staging branch, labeled it
    `agent-ready`, and explained why in a comment. *(agent)*
-3. It was dispatched to a Herdr tab; planner → implementer → gates →
+3. It was dispatched to an Orca terminal; planner → implementer → gates →
    reviewer ran there. *(agents)*
 4. Its PR touches `package.json` (a protected file), so auto-merge is
    blocked — the PR waits for a human merge. *(rules doing their job)*
