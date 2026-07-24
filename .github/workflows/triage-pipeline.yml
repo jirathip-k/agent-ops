@@ -2,7 +2,7 @@
 # Managed repos call this via workflow_call (see stubs/managed-repo-triage.yml).
 # Can also be run directly against this repo for testing via workflow_dispatch.
 
-name: Agent Triage Pipeline
+name: Reusable · Triage Pipeline
 
 on:
   workflow_call:

@@ -12,7 +12,7 @@
 # into staging, and promotion verification happens on the deployed staging
 # environment, not on the PR.
 
-name: Agent Promote Pipeline
+name: Reusable · Promote Pipeline
 
 on:
   workflow_call:

@@ -9,7 +9,7 @@
 # staging. The guardrails are the merge caps, blocked paths, tester+reviewer
 # gates — and humans owning main via promotion.
 
-name: Agent Groom Pipeline
+name: Reusable · Groom Pipeline
 
 on:
   workflow_call:
