@@ -13,10 +13,26 @@ class Worktree:
     branch: str
 
 
-def create(project_root: Path, worktree_dir: str, task_id: str, branch: str, base: str) -> Path:
-    """Create an isolated worktree for one task, on a fresh branch cut from base."""
+def create(
+    project_root: Path,
+    worktree_dir: str,
+    task_id: str,
+    branch: str,
+    base: str,
+    *,
+    reuse: bool = False,
+) -> Path:
+    """Create an isolated worktree for one task, on a fresh branch cut from base.
+
+    With `reuse`, an existing worktree is returned as-is when it is still the
+    pristine one an earlier stage pre-created (e.g. `agent dispatch`): checked
+    out on `branch` with a clean status. Anything else fails loudly so leftovers
+    from a previous run are never silently reused.
+    """
     path = project_root / worktree_dir / task_id
     if path.exists():
+        if reuse and _pristine_checkout(path, branch):
+            return path
         raise FileExistsError(
             f"Worktree {path} already exists. Remove it with `agent worktree remove {task_id}`."
         )
@@ -51,6 +67,15 @@ def create(project_root: Path, worktree_dir: str, task_id: str, branch: str, bas
             break  # non-contention error — retrying won't help
         time.sleep(1.5 * (attempt + 1))
     raise CommandError(f"git worktree add failed for {branch!r}:\n{last_err}")
+
+
+def _pristine_checkout(path: Path, branch: str) -> bool:
+    """True if `path` is checked out on `branch` with nothing modified or untracked."""
+    head = run(["git", "branch", "--show-current"], cwd=path, check=False)
+    if head.returncode != 0 or head.stdout.strip() != branch:
+        return False
+    status = run(["git", "status", "--porcelain"], cwd=path, check=False)
+    return status.returncode == 0 and not status.stdout.strip()
 
 
 def create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) -> Path:

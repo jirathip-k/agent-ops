@@ -56,6 +56,26 @@ def test_create_twice_fails(repo: Path) -> None:
         worktree.create(repo, ".worktrees", "issue-2", "fix/issue-2", "main")
 
 
+def test_create_reuse_returns_pristine_precreated_worktree(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-10", "fix/issue-10", "main")
+    again = worktree.create(repo, ".worktrees", "issue-10", "fix/issue-10", "main", reuse=True)
+    assert again == path
+
+
+def test_create_reuse_rejects_dirty_worktree(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-11", "fix/issue-11", "main")
+    (path / "dirty.txt").write_text("uncommitted\n")
+    with pytest.raises(FileExistsError):
+        worktree.create(repo, ".worktrees", "issue-11", "fix/issue-11", "main", reuse=True)
+
+
+def test_create_reuse_rejects_wrong_branch(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-12", "fix/issue-12", "main")
+    run(["git", "checkout", "-b", "other-branch"], cwd=path)
+    with pytest.raises(FileExistsError):
+        worktree.create(repo, ".worktrees", "issue-12", "fix/issue-12", "main", reuse=True)
+
+
 def test_remove_dirty_requires_force(repo: Path) -> None:
     path = worktree.create(repo, ".worktrees", "issue-3", "fix/issue-3", "main")
     (path / "dirty.txt").write_text("uncommitted\n")

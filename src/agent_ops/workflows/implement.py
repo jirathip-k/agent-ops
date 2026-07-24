@@ -15,6 +15,16 @@ from agent_ops.utils import CommandError, run
 NO_PLAN_TEXT = "(no planning stage — analyze the root cause yourself before editing)"
 
 
+def task_identifiers(issue_number: int) -> tuple[str, str]:
+    """The (task_id, branch) pair every stage derives from an issue number.
+
+    Dispatch pre-creates the worktree with these names and implement reuses
+    it, so the naming must live in exactly one place.
+    """
+    task_id = f"issue-{issue_number}"
+    return task_id, f"fix/{task_id}"
+
+
 def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
     """Permission patterns pre-approving the project's gate commands.
 
@@ -107,12 +117,13 @@ def run_implement(
     """
     config = load_project_config(project_root)
     issue = github.get_issue(issue_number, cwd=project_root)
-    task_id = f"issue-{issue_number}"
-    branch = f"fix/{task_id}"
+    task_id, branch = task_identifiers(issue_number)
 
     log(f"creating worktree for {branch} from {config.base_branch}")
+    # reuse: `agent dispatch` pre-creates this worktree so the surface can
+    # attach to it; a pristine checkout on our branch is ours to take over.
     wt_path = worktree.create(
-        project_root, config.worktree_dir, task_id, branch, config.base_branch
+        project_root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
     )
     orca.report(wt_path, comment=f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 

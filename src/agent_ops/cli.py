@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +13,7 @@ from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import run_implement, run_review
-from agent_ops.workflows.implement import make_plan
+from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 
 app = typer.Typer(
@@ -72,9 +73,24 @@ def dispatch(
     command = ["agent", "implement", str(issue), "--project", str(root)]
     if no_pr:
         command.append("--no-pr")
+
+    # Pre-create the worktree implement will reuse, so the surface can attach
+    # the run to the issue's worktree card instead of the project root's.
     try:
-        where = surfaces.pick(surface).spawn(f"agent-issue-{issue}", command, root)
-    except (ValueError, CommandError) as exc:
+        chosen = surfaces.pick(surface)
+        config = load_project_config(root)
+        task_id, branch = task_identifiers(issue)
+        wt_path = worktree.create(root, config.worktree_dir, task_id, branch, config.base_branch)
+    except (ValueError, FileExistsError, CommandError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    try:
+        where = chosen.spawn(f"agent-issue-{issue}", command, root, attach_path=wt_path)
+    except CommandError as exc:
+        # leave nothing behind: a kept worktree/branch would block the retry
+        with suppress(CommandError):
+            worktree.remove(root, config.worktree_dir, task_id, force=True, delete_branch=True)
         _err(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"dispatched issue #{issue} → {where}")

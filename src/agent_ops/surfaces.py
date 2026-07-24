@@ -22,16 +22,26 @@ class Surface(Protocol):
 
     def available(self) -> bool: ...
 
-    def spawn(self, label: str, command: list[str], cwd: Path) -> str:
-        """Start the command; return a human-readable 'where it went'."""
+    def spawn(
+        self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+    ) -> str:
+        """Start the command from `cwd`; return a human-readable 'where it went'.
+
+        `attach_path` is where the run should be *shown* (e.g. the task's
+        worktree card in an IDE); it defaults to `cwd`. Surfaces without a UI
+        may ignore it, but must keep run artifacts (logs) under `cwd` — the
+        attach target can be a worktree that is deleted when the run succeeds.
+        """
         ...
 
 
 class OrcaSurface:
-    """New terminal in the Orca IDE, attached to the project's worktree card.
+    """New terminal in the Orca IDE, attached to a worktree card.
 
     The agent process lives in an Orca-managed terminal, so the app shows it
-    working live and the run survives this session ending.
+    working live and the run survives this session ending. The terminal is
+    attached to `attach_path`'s card (the task worktree), falling back to the
+    project root's card.
     """
 
     name = "orca"
@@ -39,7 +49,9 @@ class OrcaSurface:
     def available(self) -> bool:
         return orca.available()
 
-    def spawn(self, label: str, command: list[str], cwd: Path) -> str:
+    def spawn(
+        self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+    ) -> str:
         created = json.loads(
             run(
                 [
@@ -47,7 +59,7 @@ class OrcaSurface:
                     "terminal",
                     "create",
                     "--worktree",
-                    f"path:{cwd}",
+                    f"path:{attach_path or cwd}",
                     "--title",
                     label,
                     "--command",
@@ -64,7 +76,9 @@ class BackgroundSurface:
     """Detached process logging to <cwd>/.agent-runs/<label>.log.
 
     Works everywhere (plain terminal, Claude Code UI, CI). Watch with
-    `tail -f` on the log file.
+    `tail -f` on the log file. `attach_path` is ignored: there is no UI to
+    attach to, and the log must live under `cwd` (the project root) so it
+    survives the task worktree being removed on success.
     """
 
     name = "background"
@@ -72,7 +86,9 @@ class BackgroundSurface:
     def available(self) -> bool:
         return True
 
-    def spawn(self, label: str, command: list[str], cwd: Path) -> str:
+    def spawn(
+        self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+    ) -> str:
         log_dir = cwd / ".agent-runs"
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"{label}.log"
