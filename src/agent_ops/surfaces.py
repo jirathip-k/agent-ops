@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
-import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Protocol
 
+from agent_ops import orca
 from agent_ops.utils import run
 
 
@@ -29,19 +27,6 @@ class Surface(Protocol):
         ...
 
 
-def _orca_executable() -> str:
-    """The Orca IDE CLI for this session.
-
-    Orca exports ORCA_CLI_COMMAND in managed sessions. Outside those, bare
-    `orca` on Linux usually resolves to the GNOME screen reader and would
-    start speech — Orca installs itself as `orca-ide` there instead.
-    """
-    from_env = os.environ.get("ORCA_CLI_COMMAND")
-    if from_env:
-        return from_env
-    return "orca" if sys.platform == "darwin" else "orca-ide"
-
-
 class OrcaSurface:
     """New terminal in the Orca IDE, attached to the project's worktree card.
 
@@ -52,16 +37,13 @@ class OrcaSurface:
     name = "orca"
 
     def available(self) -> bool:
-        exe = _orca_executable()
-        if shutil.which(exe) is None:
-            return False
-        return run([exe, "status", "--json"], check=False).returncode == 0
+        return orca.available()
 
     def spawn(self, label: str, command: list[str], cwd: Path) -> str:
         created = json.loads(
             run(
                 [
-                    _orca_executable(),
+                    orca.executable(),
                     "terminal",
                     "create",
                     "--worktree",

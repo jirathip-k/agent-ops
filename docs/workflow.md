@@ -166,6 +166,10 @@ does, so the rule is: **agent-ops orchestrates, Orca observes.**
   in config for quiet output.
 - `agent worktree list` reconciles what's actually in flight if you lose
   track of terminals.
+- `agent implement` pushes progress to each task worktree's Orca card —
+  comment (`#N: planning` → `implementing` → `PR opened …` / `FAILED gates`)
+  and card status (`in-progress` → `in-review`) — best-effort, so runs
+  behave identically when Orca is closed.
 - Use Orca's diff/PR/CI views to review a run's branch before merge or
   promote. Reviewing there is fine; merging goes through `agent`.
 - **Don't use Orca's native spawn-agent-in-worktree feature here.** It
