@@ -1,0 +1,90 @@
+# Reusable scout pipeline workflow.
+# Runs the real `agent scout` CLI against a managed repo — the same code path
+# as local scouting, so filed issues can't drift between lanes. Managed repos
+# call this via workflow_call (see stubs/managed-repo-scout.yml).
+#
+# No idle precheck: scout always mines the codebase itself (TODOs, deferred
+# review threads, untested modules), so there is no cheap "nothing to do"
+# signal to guard on. Filing is capped at max_issues per run; issues land as
+# backlog + proposed-by-agent and enter the same groom funnel as human ones.
+
+name: Reusable · Scout Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to scout"
+        required: true
+        type: string
+      max_issues:
+        description: "Max issues to file per run"
+        required: false
+        type: number
+        default: 3
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to scout"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  scout:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    # Deliberately the SAME group as the triage/groom pipelines: scout files
+    # issues into the queue those lanes label, so a repo is never scouted
+    # while it's being groomed or triaged.
+    concurrency:
+      group: agent-triage-${{ inputs.target_repo }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout control repo (CLI + prompts)
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run scout
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          MAX_ISSUES: ${{ inputs.max_issues }}
+        working-directory: agent-ops
+        run: |
+          MAX_ISSUES="${MAX_ISSUES:-3}"   # workflow_dispatch omits the input
+          uv run agent scout -C "$GITHUB_WORKSPACE/target" --max "$MAX_ISSUES"

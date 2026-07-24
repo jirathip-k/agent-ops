@@ -14,7 +14,7 @@ from agent_ops.utils import CommandError, run
 
 BUCKETS = ("agent-ready", "needs-human", "backlog")
 
-LANES = ("triage", "groom", "promote", "spec", "plan")
+LANES = ("triage", "groom", "promote", "spec", "plan", "scout")
 
 # Name of the control repo hosting the reusable pipelines. Detection accepts
 # any owner prefix (`<owner>/agent-ops/...`) so forks keep working, plus the

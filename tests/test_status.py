@@ -142,6 +142,11 @@ def test_detect_lanes_spec_plan_and_promote() -> None:
     }
 
 
+def test_detect_lanes_scout_stub_cron_no_runner() -> None:
+    stub = _stub("scout", cron="0 18 * * *")
+    assert detect_lanes({"scout.yml": stub}) == {"scout": _lane(cron="0 18 * * *")}
+
+
 def test_detect_lanes_yaml_extension_in_uses() -> None:
     content = "jobs:\n  t:\n    uses: o/agent-ops/.github/workflows/triage-pipeline.yaml@main\n"
     assert detect_lanes({"t.yml": content}) == {"triage": _lane()}

@@ -39,7 +39,9 @@ TODO/FIXME comments, merged-PR review threads that deferred work
 modules — and files at most N issues labeled `backlog` + `proposed-by-agent`,
 each citing its signal (file:line or PR link). It never brainstorms from a
 blank page and never fixes anything; filed issues enter the same groom/spec
-funnel as yours. Run it weekly-ish, or whenever the queue runs dry.
+funnel as yours. In CI it runs daily via the scout lane (01:00 Asia/Bangkok,
+feeding the same morning's triage and groom runs); run it locally whenever
+the queue runs dry.
 
 ## 2. Groom — decide what an agent may do
 
