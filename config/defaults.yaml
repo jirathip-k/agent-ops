@@ -11,7 +11,7 @@ runtime:
   permission_mode: acceptEdits
   max_turns: null
   stream: true             # print agent activity (tool calls, text) live —
-                           # makes Herdr panes show real progress
+                           # makes Orca terminals show real progress
 
 # Tier names → concrete models, per runtime. Roles below reference tiers, so
 # swapping the whole fleet to a new model is a one-line edit here — and since

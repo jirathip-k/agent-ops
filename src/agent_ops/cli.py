@@ -67,10 +67,10 @@ def implement(
 def dispatch(
     issue: Annotated[int, typer.Argument(help="GitHub issue number to implement")],
     project: ProjectOpt = Path("."),
-    surface: Annotated[str, typer.Option(help="Where to run: auto | herdr | background")] = "auto",
+    surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
 ) -> None:
-    """Spawn `agent implement` on a visible surface (Herdr tab, background log, ...)."""
+    """Spawn `agent implement` on a visible surface (Orca terminal, background log, ...)."""
     root = project.resolve()
     command = ["agent", "implement", str(issue), "--project", str(root)]
     if no_pr:

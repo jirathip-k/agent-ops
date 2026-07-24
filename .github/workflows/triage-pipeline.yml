@@ -61,8 +61,10 @@ jobs:
         id: precheck
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          TARGET_REPO: ${{ inputs.target_repo }}
         run: |
-          COUNT=$(gh issue list --repo "${{ inputs.target_repo }}" --state open --limit 100 \
+          COUNT=$(gh issue list --repo "$TARGET_REPO" --state open --limit 100 \
             --json labels --jq '[.[] | [.labels[].name] as $l | select(
               (($l | map(. == "needs-human" or . == "blocked") | any) | not)
               and (
