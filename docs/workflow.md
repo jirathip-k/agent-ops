@@ -172,6 +172,8 @@ This repo is public; the names of the repos it manages are not. The split:
 - The CI lane has no central registry at all: each managed repo carries its
   own stub workflow and passes its settings as workflow inputs, so managed
   repo names only ever appear inside the managed repos themselves.
+  `agent status --pipelines` shows which reusable CI lanes each registered
+  repo has wired up, read live from its workflow files via the GitHub API.
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 

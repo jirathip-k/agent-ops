@@ -373,12 +373,24 @@ def queue(
 
 
 @app.command()
-def status() -> None:
+def status(
+    pipelines: Annotated[
+        bool,
+        typer.Option(
+            "--pipelines",
+            help="Show per-repo CI lane coverage (triage/groom/...) instead of PRs and issues",
+        ),
+    ] = False,
+) -> None:
     """Fleet overview: open PRs and issue buckets for every registered repo."""
-    from agent_ops.status import fleet_status
+    from agent_ops.status import fleet_status, pipeline_coverage
 
     try:
-        fleet_status(registry.load_registry())
+        config = registry.load_registry()
+        if pipelines:
+            pipeline_coverage(config)
+        else:
+            fleet_status(config)
     except (CommandError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
