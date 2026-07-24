@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
+
+import yaml
 
 from agent_ops.registry import RegistryConfig
 from agent_ops.utils import CommandError, run
@@ -18,11 +20,12 @@ LANES = ("triage", "groom", "promote", "spec", "plan")
 # local form (`./.github/workflows/...`) the control repo itself could use.
 CONTROL_REPO = "agent-ops"
 
-_USES_RE = re.compile(
-    rf"^\s*uses:\s*(?:[\w.-]+/{CONTROL_REPO}|\.)/\.github/workflows/"
-    rf"({'|'.join(LANES)})-pipeline\.ya?ml(?:@\S+)?\s*$",
-    re.MULTILINE,
+_USES_PATH = (
+    rf"(?:[\w.-]+/{CONTROL_REPO}|\.)/\.github/workflows/"
+    rf"({'|'.join(LANES)})-pipeline\.ya?ml(?:@\S+)?"
 )
+_USES_VALUE_RE = re.compile(_USES_PATH)
+_USES_LINE_RE = re.compile(rf"^\s*uses:\s*{_USES_PATH}\s*$", re.MULTILINE)
 
 
 def bucket_counts(issues: list[dict[str, Any]]) -> dict[str, int]:
@@ -39,17 +42,43 @@ def bucket_counts(issues: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def detect_lanes(workflows: dict[str, str]) -> set[str]:
-    """Lanes a repo has wired up, judged by `uses:` references in workflow content.
+def detect_lanes(workflows: dict[str, str]) -> dict[str, str | None]:
+    """Map each lane a repo has wired up to the runner label its stub passes.
 
     Content-based on purpose: stub filenames vary per repo (triage.yml,
     groom.yml, ...), but every caller must `uses:` a reusable
-    `<lane>-pipeline.yml`, so that reference is the source of truth.
+    `<lane>-pipeline.yml`, so that reference is the source of truth. The
+    value is the `runner:` input in the calling job's `with:` block, or
+    None when the stub passes none (pipeline default ubuntu-latest). If two
+    jobs/files call the same lane, the last one wins.
     """
-    lanes: set[str] = set()
+    lanes: dict[str, str | None] = {}
     for content in workflows.values():
-        lanes.update(match.group(1) for match in _USES_RE.finditer(content))
+        lanes.update(_lanes_in(content))
     return lanes
+
+
+def _lanes_in(content: str) -> Iterator[tuple[str, str | None]]:
+    try:
+        doc = yaml.safe_load(content)
+    except yaml.YAMLError:
+        # Unparseable file: fall back to a plain line scan (runner unknown).
+        for match in _USES_LINE_RE.finditer(content):
+            yield match.group(1), None
+        return
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        uses = job.get("uses")
+        match = _USES_VALUE_RE.fullmatch(uses) if isinstance(uses, str) else None
+        if match is None:
+            continue
+        with_block = job.get("with")
+        runner = with_block.get("runner") if isinstance(with_block, dict) else None
+        yield match.group(1), str(runner) if runner is not None else None
 
 
 def _repo_workflows(repo: str) -> dict[str, str]:
@@ -71,20 +100,44 @@ def _repo_workflows(repo: str) -> dict[str, str]:
     return workflows
 
 
+def _short_runner(runner: str | None) -> str:
+    """Compress runner labels so the matrix stays readable.
+
+    blacksmith-2vcpu-ubuntu-2404 → bs-2vcpu; macOS Blacksmith labels get a
+    -mac suffix; no runner passed → gh (pipeline default ubuntu-latest).
+    """
+    if runner is None:
+        return "gh"
+    match = re.fullmatch(r"blacksmith-(\d+vcpu)-([\w.-]+)", runner)
+    if match:
+        suffix = "-mac" if "mac" in match.group(2) else ""
+        return f"bs-{match.group(1)}{suffix}"
+    return runner
+
+
 def pipeline_coverage(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """Matrix of which reusable agent-ops CI lanes each registered repo has wired up.
 
     Derived live from each repo's .github/workflows via the GitHub API —
-    no stored state (ADR 0003: state lives in GitHub).
+    no stored state (ADR 0003: state lives in GitHub). Cells show the runner
+    each lane's stub passes; `gh` means the pipeline default (ubuntu-latest).
     """
-    name_width = max((len(repo) for repo in config.repos), default=0)
+    rows = [(repo, detect_lanes(_repo_workflows(repo))) for repo in config.repos]
+    cells = {
+        repo: {lane: _short_runner(lanes[lane]) if lane in lanes else "–" for lane in LANES}
+        for repo, lanes in rows
+    }
+    name_width = max((len(repo) for repo, _ in rows), default=0)
+    widths = {
+        lane: max([len(lane), *(len(cells[repo][lane]) for repo, _ in rows)]) for lane in LANES
+    }
     log("")
-    log(" " * name_width + "  " + "  ".join(LANES))
-    for repo in config.repos:
-        lanes = detect_lanes(_repo_workflows(repo))
-        cells = "  ".join(("✓" if lane in lanes else "–").center(len(lane)) for lane in LANES)
+    log(" " * name_width + "  " + "  ".join(lane.center(widths[lane]) for lane in LANES))
+    for repo, lanes in rows:
+        row = "  ".join(cells[repo][lane].center(widths[lane]) for lane in LANES)
         note = "" if lanes else "  ⚠ no agent-ops lanes wired"
-        log(f"\033[1m{repo.ljust(name_width)}\033[0m  {cells}{note}")
+        log(f"\033[1m{repo.ljust(name_width)}\033[0m  {row}{note}")
+    log("\ngh = pipeline default ubuntu-latest")
 
 
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
