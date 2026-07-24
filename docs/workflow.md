@@ -101,6 +101,19 @@ promotion. That's the intended autonomy level (decided 2026-07-23); the
 guardrails are the merge caps, blocked paths, the tester/reviewer gates, and
 humans owning `main`.
 
+Spec and plan run in CI too (`stubs/managed-repo-spec.yml` /
+`stubs/managed-repo-plan.yml`) — the same `agent spec` / `agent plan` code
+paths executed in Actions, so the output can't drift between lanes. Unlike
+groom they are label-gated, not scheduled: add `spec-requested` or
+`plan-requested` (or dispatch the workflow with an explicit issue number),
+and the pipeline runs the CLI, posts the "## Agent spec" / "## Agent plan"
+comment, and removes the request label on success. `needs-human`/`blocked`
+issues are always skipped, runs are capped by `max_issues`, and both lanes
+share the `agent-triage-<repo>` concurrency group with triage/groom so a
+repo is never specced while it's being groomed. None of this moves a gate:
+spec and plan are read-only + comment-only, and the human still flips the
+label to `agent-ready` and owns dispatch/merge exactly as above.
+
 In the local lane the human gate is still **dispatch and merge** — nothing
 runs without `agent implement`, nothing lands without your merge. In the CI
 lane the go-ahead label *is* dispatch, so the human gates are grooming
