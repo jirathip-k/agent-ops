@@ -7,7 +7,7 @@
 #     agent-ops → Settings → Actions → General → Access →
 #     "Accessible from repositories owned by <you>"
 
-name: Hourly Agent Triage
+name: Agent Triage · every 4h
 
 on:
   schedule:
