@@ -620,6 +620,44 @@ def test_wait_for_runs_single_degraded_poll_resets_stopped_streak(
     assert any("→ done" in line for line in lines)
 
 
+def test_wait_for_runs_untrustworthy_first_poll_does_not_seed_stopped_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untrustworthy poll that *establishes* the watch (the very first poll)
+    must not seed `stopped_streak` as if it were a trustworthy observation.
+
+    A degraded first poll reading `stopped` looks identical to the known
+    dispatch pre-spawn race window. If it seeded a streak of 1, a single
+    subsequent *trustworthy* poll that still reads `stopped` (the race still
+    settling) would push the streak to 2 and end the wait after only one
+    trustworthy `stopped` observation — violating the documented 2-consecutive-
+    trustworthy-polls invariant. It must instead take a *second* trustworthy
+    `stopped` poll to terminate."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+            return [runs.Run(77, "stopped", STOPPED_DETAIL)], False
+        # Both remaining polls are trustworthy and still read `stopped` — the
+        # dispatch race settling slowly. Termination must wait for the second
+        # of these, not the first.
+        return [runs.Run(77, "stopped", STOPPED_DETAIL)], True
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    # poll 1: untrustworthy, establishes watch, streak must seed at 0 (not 1)
+    # poll 2: trustworthy stopped -> streak 1 (not terminal)
+    # poll 3: trustworthy stopped -> streak 2 (terminal)
+    assert calls["n"] == 3
+
+
 def test_wait_for_runs_raises_after_sustained_gh_outage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

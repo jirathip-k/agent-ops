@@ -484,6 +484,11 @@ def wait_for_runs(
             if issue is not None:
                 if issue not in found:
                     if trustworthy:
+                        if degraded_polls:
+                            capture(
+                                f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                                f"{total_polls} polls in this wait"
+                            )
                         raise CommandError(f"no run found for #{issue} — nothing to wait on")
                     # A degraded first poll not showing the named issue is not
                     # trustworthy evidence it doesn't exist — the same "unknown
@@ -499,6 +504,11 @@ def wait_for_runs(
                 if not candidate:
                     if trustworthy:
                         capture("no agent runs found")
+                        if degraded_polls:
+                            capture(
+                                f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                                f"{total_polls} polls in this wait"
+                            )
                         return True
                     # Same reasoning: an empty result from a degraded poll is
                     # not trustworthy evidence there are no runs at all — wait
@@ -510,7 +520,7 @@ def wait_for_runs(
                     r = found[i]
                     capture(f"#{i}  {r.state:<8}  {r.detail}")
                     states[i] = r.state
-                    stopped_streak[i] = 1 if r.state == "stopped" else 0
+                    stopped_streak[i] = 1 if (trustworthy and r.state == "stopped") else 0
         else:
             for i in sorted(watch):
                 r = found.get(i)
