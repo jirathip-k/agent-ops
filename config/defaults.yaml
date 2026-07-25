@@ -22,6 +22,19 @@ model_tiers:
     smart: fable           # planning & review: highest-leverage tokens
     fast: sonnet           # implementation: the workhorse
 
+# Per-runtime fallback ladders (full sequence, best first): when the active
+# model is unavailable (spend limit, unsupported, retired), run_with_fallback
+# steps down to the next rung instead of dying with nowhere to go. See
+# docs/workflow.md for how to refresh these against the Models API.
+# A project that overrides model_tiers must override model_fallbacks to match:
+# the ladder is only trimmed to the rungs below the active model when that
+# model is on it, so pointing a tier at something off-ladder keeps the whole
+# sequence and can step UP into a costlier model the project never chose.
+model_fallbacks:
+  claude_code:
+    smart: [fable, opus, sonnet]
+    fast: [sonnet, haiku]
+
 # Per-role overrides (fan-out): unset fields inherit from `runtime` above.
 # Planning and review are cheap in tokens but high in leverage, so they get
 # the smart tier; implementation runs on the fast tier.
