@@ -51,6 +51,64 @@ def _missing_gitignore_markers(root: Path) -> list[str]:
     return [marker for marker in GITIGNORE_MARKERS if marker not in text]
 
 
+def _checkout_drift(root: Path) -> str | None:
+    """Warn when `root` (the editable install's tree) is behind/ahead of its upstream.
+
+    Uses only already-fetched refs — never runs `git fetch` — so `doctor` stays a
+    fast, network-free diagnostic. Silent (returns None) for anything that isn't a
+    plain, tracked, attached-HEAD git checkout, so it never tracebacks.
+    """
+    try:
+        if not root.is_dir():
+            return None
+        toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+        if toplevel.returncode != 0 or Path(toplevel.stdout.strip()) != root.resolve():
+            return None
+        head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+        if head.returncode != 0:
+            return None
+        upstream_name = run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if upstream_name.returncode != 0:
+            return None
+        upstream = upstream_name.stdout.strip()
+        counts = run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if counts.returncode != 0:
+            return None
+        parts = counts.stdout.strip().split()
+        if len(parts) != 2:
+            return None
+        ahead, behind = int(parts[0]), int(parts[1])
+        if ahead == 0 and behind == 0:
+            return None
+
+        def commits(n: int) -> str:
+            return f"{n} commit{'' if n == 1 else 's'}"
+
+        if behind and not ahead:
+            return (
+                f"agent-ops checkout is {commits(behind)} behind {upstream} — the editable "
+                f"install runs this tree; git -C {root} pull "
+                "(local refs; run git fetch for a current comparison)"
+            )
+        if ahead and not behind:
+            return f"agent-ops checkout is {commits(ahead)} ahead of {upstream} ({root})"
+        return (
+            f"agent-ops checkout has diverged from {upstream}: {commits(ahead)} ahead, "
+            f"{commits(behind)} behind ({root}) "
+            "(local refs; run git fetch for a current comparison)"
+        )
+    except Exception:  # noqa: BLE001 — doctor reports, never crashes
+        return None
+
+
 @app.command()
 def implement(
     issue: Annotated[int, typer.Argument(help="GitHub issue number to implement")],
@@ -461,6 +519,10 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     missing = _missing_gitignore_markers(project.resolve())
     if missing:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
+
+    drift = _checkout_drift(PLATFORM_ROOT)
+    if drift:
+        typer.echo(f"! {drift}")
 
     raise typer.Exit(0 if ok else 1)
 
