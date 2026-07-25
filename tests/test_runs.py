@@ -732,6 +732,116 @@ def test_wait_for_runs_logs_degradation_summary_on_clean_finish(
     assert any(line.startswith("note:") and "1 of 2" in line for line in lines)
 
 
+def test_wait_for_runs_first_poll_degraded_named_issue_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded *first* poll not showing the named issue must not be read as
+    "no run found" — the watch set doesn't exist yet to hold state against,
+    but the same "unknown is not evidence of death" reasoning still applies.
+    Recovering with genuine data on the next poll must establish the watch and
+    finish normally."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log("warning: could not list worktrees (boom); runs may be misreported as stopped")
+            return [], False
+        if calls["n"] == 2:
+            return [runs.Run(77, "running", "pid 1")], True
+        return [runs.Run(77, "done", "PR #76")], True
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, issue=77, log=lines.append)
+
+    assert result is True
+    assert calls["n"] == 3  # did not raise "no run found" off the degraded first poll
+    assert any("running → done" in line for line in lines)
+
+
+def test_wait_for_runs_first_poll_degraded_watch_all_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded first poll with an empty result in watch-all mode must not
+    be read as "no agent runs found" (exit 0) — the exact false-positive-
+    success shape issue #86 was filed against, relocated to the
+    watch-establishment step. Recovering on the next poll must establish the
+    watch from real data and finish normally."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log("warning: could not list worktrees (boom); runs may be misreported as stopped")
+            return [], False
+        if calls["n"] == 2:
+            return [runs.Run(77, "running", "pid 1")], True
+        return [runs.Run(77, "done", "PR #76")], True
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert calls["n"] == 3  # did not exit early with "no agent runs found"
+    assert not any("no agent runs found" in line for line in lines)
+    assert any("running → done" in line for line in lines)
+
+
+def test_wait_for_runs_raises_when_named_issue_degraded_from_first_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If every poll from the very first one is degraded and never shows the
+    named issue, this must still surface as the distinct degraded-outage
+    `CommandError` (not a raised "no run found", and not a hang)."""
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        log("warning: could not list worktrees (gh: rate limited); may misreport as stopped")
+        return [], False
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    with pytest.raises(CommandError) as exc_info:
+        runs.wait_for_runs(tmp_path, issue=77, log=lines.append)
+
+    message = str(exc_info.value)
+    assert "no run found" not in message
+    assert "unreliable" in message
+    assert "rate limited" in message
+
+
+def test_wait_for_runs_raises_when_watch_all_degraded_from_first_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same as above for watch-all mode: sustained degradation from the first
+    poll must raise the degraded-outage `CommandError`, never silently
+    conclude "no agent runs found" and exit 0."""
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        log("warning: could not list worktrees (gh: rate limited); may misreport as stopped")
+        return [], False
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    with pytest.raises(CommandError) as exc_info:
+        runs.wait_for_runs(tmp_path, log=lines.append)
+
+    message = str(exc_info.value)
+    assert "no agent runs found" not in message
+    assert "unreliable" in message
+    assert "rate limited" in message
+    assert not any("no agent runs found" in line for line in lines)
+
+
 def test_cli_runs_wait_finishes_once_stopped_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

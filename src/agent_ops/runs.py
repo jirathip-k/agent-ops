@@ -392,11 +392,16 @@ def wait_for_runs(
 ) -> bool:
     """Block until every watched run reaches a terminal state, printing transitions.
 
-    The watch set is fixed on the first poll: `issue` if given, else every
-    issue `discover_runs` finds at that moment. Runs that appear later are not
-    added — a caller waits for what existed when it asked. A watched issue
-    that later disappears entirely (worktree removed, PR merged) transitions
-    to `gone`, which counts as terminal.
+    The watch set is fixed on the first *trustworthy* poll: `issue` if given,
+    else every issue `discover_runs` finds at that moment. Runs that appear
+    later are not added — a caller waits for what existed when it asked. If
+    the very first poll comes back untrustworthy and shows no sign of the
+    thing being waited on (the named `issue` absent, or nothing at all in
+    watch-all mode), that is not treated as "no run found"/"no agent runs
+    found" either: it retries on the next poll instead, subject to the same
+    `_MAX_DEGRADED_POLLS` bound described below. A watched issue that later
+    disappears entirely (worktree removed, PR merged) transitions to `gone`,
+    which counts as terminal.
 
     `stopped` is not trusted on a single observation: `dispatch` leaves the
     same signature (worktree exists, nothing live yet) for the few seconds
@@ -478,18 +483,34 @@ def wait_for_runs(
         if watch is None:
             if issue is not None:
                 if issue not in found:
-                    raise CommandError(f"no run found for #{issue} — nothing to wait on")
-                watch = {issue}
+                    if trustworthy:
+                        raise CommandError(f"no run found for #{issue} — nothing to wait on")
+                    # A degraded first poll not showing the named issue is not
+                    # trustworthy evidence it doesn't exist — the same "unknown
+                    # is not evidence of death" reasoning applied to an
+                    # already-watched issue's disappearance, just before the
+                    # watch set exists to hold state against. Retry rather than
+                    # concluding "no run found"; the degraded_streak bound
+                    # above still applies if this persists.
+                else:
+                    watch = {issue}
             else:
-                watch = set(found)
-                if not watch:
-                    capture("no agent runs found")
-                    return True
-            for i in sorted(watch):
-                r = found[i]
-                capture(f"#{i}  {r.state:<8}  {r.detail}")
-                states[i] = r.state
-                stopped_streak[i] = 1 if r.state == "stopped" else 0
+                candidate = set(found)
+                if not candidate:
+                    if trustworthy:
+                        capture("no agent runs found")
+                        return True
+                    # Same reasoning: an empty result from a degraded poll is
+                    # not trustworthy evidence there are no runs at all — wait
+                    # for a trustworthy poll before concluding that.
+                else:
+                    watch = candidate
+            if watch is not None:
+                for i in sorted(watch):
+                    r = found[i]
+                    capture(f"#{i}  {r.state:<8}  {r.detail}")
+                    states[i] = r.state
+                    stopped_streak[i] = 1 if r.state == "stopped" else 0
         else:
             for i in sorted(watch):
                 r = found.get(i)
@@ -512,7 +533,7 @@ def wait_for_runs(
                     capture(line)
                     states[i] = state
 
-        if all(is_terminal(i) for i in watch):
+        if watch is not None and all(is_terminal(i) for i in watch):
             if degraded_polls:
                 capture(
                     f"note: PR/worktree data was unreliable for {degraded_polls} of "
