@@ -26,6 +26,13 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write  # claude-code-action exchanges an OIDC token
+      # Required by the auto-merge gate — unnamed scopes resolve to none,
+      # so without these the pipeline gets 403 on check-runs and holds
+      # every PR instead of merging. actions:read additionally lets it tell
+      # "CI failed" apart from "CI never ran" (action_required).
+      checks: read
+      statuses: read
+      actions: read
     uses: YOUR-USERNAME/agent-ops/.github/workflows/triage-pipeline.yml@main
     with:
       target_repo: ${{ github.repository }}

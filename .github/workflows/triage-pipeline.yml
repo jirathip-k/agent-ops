@@ -61,6 +61,16 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write  # claude-code-action exchanges an OIDC token
+      # Step 3's auto-merge gate requires "all CI checks green" before it
+      # squash-merges. A called workflow is capped by the caller *and* by
+      # this block, and unnamed scopes resolve to none — so without these
+      # the orchestrator gets 403 on check-runs and can never satisfy its
+      # own gate. Callers must grant these too.
+      checks: read      # check-runs (the target repo's CI job conclusions)
+      statuses: read    # legacy commit statuses, for the combined rollup
+      actions: read     # workflow runs — lets Step 3 distinguish "CI failed"
+                        # from "CI never ran" (a run held on action_required,
+                        # which otherwise looks identical to "no CI at all")
     steps:
       # Idle guard: skip the (token-costing) Claude session entirely when the
       # repo has no issue the orchestrator would act on. Runs in seconds, free.
