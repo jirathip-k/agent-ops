@@ -50,6 +50,67 @@ def test_create_with_remote_only_base_stays_on_task_branch(tmp_path: Path) -> No
     assert proc.stdout.strip() == "fix/issue-9"
 
 
+def _clone_with_remote_branch(tmp_path: Path, branch: str) -> tuple[Path, Path]:
+    """(origin, clone) where `branch` exists on the origin only."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    run(["git", "init", "-b", "main"], cwd=origin)
+    run(["git", "config", "user.email", "t@example.com"], cwd=origin)
+    run(["git", "config", "user.name", "t"], cwd=origin)
+    (origin / "f.txt").write_text("hi\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "init"], cwd=origin)
+    run(["git", "branch", branch], cwd=origin)
+
+    clone = tmp_path / "clone"
+    run(["git", "clone", str(origin), str(clone)], cwd=tmp_path)
+    return origin, clone
+
+
+def test_create_tracking_checks_out_a_remote_only_branch(tmp_path: Path) -> None:
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-4")
+
+    path = worktree.create_tracking(clone, ".worktrees", "issue-4", "fix/issue-4")
+
+    assert path == clone / ".worktrees" / "issue-4"
+    assert run(["git", "branch", "--show-current"], cwd=path).stdout.strip() == "fix/issue-4"
+
+
+def test_create_tracking_is_idempotent(tmp_path: Path) -> None:
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-4")
+    first = worktree.create_tracking(clone, ".worktrees", "issue-4", "fix/issue-4")
+
+    again = worktree.create_tracking(clone, ".worktrees", "issue-4", "fix/issue-4")
+
+    assert again == first
+    branches = [wt.branch for wt in worktree.list_worktrees(clone)]
+    assert branches.count("fix/issue-4") == 1
+
+
+def test_create_tracking_reuses_a_worktree_under_another_name(tmp_path: Path) -> None:
+    # `agent dispatch` may already have that branch checked out elsewhere; the
+    # viewer must adopt it rather than fail or duplicate it.
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-4")
+    existing = worktree.create_tracking(clone, ".worktrees", "dispatched", "fix/issue-4")
+
+    adopted = worktree.create_tracking(clone, ".worktrees", "issue-4", "fix/issue-4")
+
+    assert adopted == existing
+
+
+def test_create_tracking_refuses_a_leftover_directory_on_another_branch(repo: Path) -> None:
+    worktree.create(repo, ".worktrees", "issue-4", "other/branch", "main")
+    run(["git", "branch", "fix/issue-4"], cwd=repo)
+
+    with pytest.raises(FileExistsError, match="not on 'fix/issue-4'"):
+        worktree.create_tracking(repo, ".worktrees", "issue-4", "fix/issue-4")
+
+
+def test_create_tracking_raises_when_the_branch_does_not_exist(repo: Path) -> None:
+    with pytest.raises(CommandError, match="git worktree add failed"):
+        worktree.create_tracking(repo, ".worktrees", "issue-99", "fix/issue-99")
+
+
 def test_create_twice_fails(repo: Path) -> None:
     worktree.create(repo, ".worktrees", "issue-2", "fix/issue-2", "main")
     with pytest.raises(FileExistsError):
