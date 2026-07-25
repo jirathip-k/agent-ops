@@ -141,3 +141,91 @@ def test_secrets_inherit_satisfies_every_key(tmp_path: Path) -> None:
     _write_caller(tmp_path, caller)
 
     assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+
+
+def test_read_all_permissions_does_not_pass_as_satisfied(tmp_path: Path) -> None:
+    """`permissions: read-all` grants no write scope, so the stub's writes are still missing.
+
+    Treating any non-mapping value as "can't compare, assume fine" made the
+    check silently blind to a caller that had downgraded to read-only.
+    """
+    caller = IN_SYNC_CALLER.replace(
+        "    permissions:\n"
+        "      contents: write\n"
+        "      issues: write\n"
+        "      pull-requests: write\n"
+        "      id-token: write\n"
+        "      checks: read\n"
+        "      statuses: read\n"
+        "      actions: read\n",
+        "    permissions: read-all\n",
+    )
+    _write_caller(tmp_path, caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.error is None
+    assert "contents" in drift.permissions
+    assert drift.secrets == []
+
+
+def test_write_all_permissions_satisfies_every_key(tmp_path: Path) -> None:
+    caller = IN_SYNC_CALLER.replace(
+        "    permissions:\n"
+        "      contents: write\n"
+        "      issues: write\n"
+        "      pull-requests: write\n"
+        "      id-token: write\n"
+        "      checks: read\n"
+        "      statuses: read\n"
+        "      actions: read\n",
+        "    permissions: write-all\n",
+    )
+    _write_caller(tmp_path, caller)
+
+    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+
+
+def test_unrelated_triage_workflow_is_not_a_caller(tmp_path: Path) -> None:
+    """ "triage" is a common workflow name — a stale-bot or labeler isn't a pipeline caller."""
+    _write_caller(
+        tmp_path,
+        """
+name: Triage stale issues
+on:
+  schedule:
+    - cron: '0 0 * * *'
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+""",
+    )
+
+    assert triage_caller_drift(tmp_path) is None
+
+
+def test_a_second_job_cannot_mask_the_caller_job_gap(tmp_path: Path) -> None:
+    """Keys were unioned across every job, so an unrelated job's grants hid real drift."""
+    caller = (
+        IN_SYNC_CALLER.replace(
+            "      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}\n"
+            "      AGENT_APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}\n",
+            "",
+        )
+        + """
+  notify:
+    runs-on: ubuntu-latest
+    secrets: inherit
+    steps:
+      - run: echo done
+"""
+    )
+    _write_caller(tmp_path, caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]

@@ -12,6 +12,16 @@ TRIAGE_CALLER_REL = Path(".github") / "workflows" / "triage.yml"
 
 _DRIFT_SECTIONS = ("secrets", "permissions")
 
+# Blanket grants that make every stub key present by definition.
+_SATISFIES_ALL = {"secrets": {"inherit"}, "permissions": {"write-all"}}
+
+# A repo can have an unrelated workflow named triage.yml (stale-bot, labeler),
+# and a caller file can hold jobs besides the one calling the pipeline. Compare
+# only the jobs that actually call it — otherwise an unrelated workflow gets
+# told to add App-token secrets, and a second job's `secrets: inherit` masks a
+# genuine gap in the caller job itself.
+_PIPELINE_REF = "triage-pipeline.yml"
+
 
 @dataclass(frozen=True)
 class TriageDrift:
@@ -38,13 +48,20 @@ def _load_jobs(path: Path) -> dict[str, object]:
 
 
 def _section_keys(jobs: dict[str, object], section: str) -> set[str] | None:
-    """Keys under `section:` across all jobs, or None if any job's value there isn't a mapping."""
+    """Keys under `section:` across all jobs, or None when a blanket grant satisfies everything."""
     keys: set[str] = set()
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
         value = job.get(section)
         if value is None:
+            continue
+        if isinstance(value, str):
+            if value in _SATISFIES_ALL[section]:
+                return None  # `secrets: inherit` / `permissions: write-all`
+            # `permissions: read-all` grants no write scope, and the stub's
+            # permissions are mostly writes — contribute nothing so the caller
+            # reports them, rather than reading as satisfied.
             continue
         if not isinstance(value, dict):
             return None
@@ -66,6 +83,15 @@ def _ordered_stub_keys(jobs: dict[str, object], section: str) -> list[str]:
     return ordered
 
 
+def _caller_jobs(jobs: dict[str, object]) -> dict[str, object]:
+    """Only the jobs whose `uses:` points at the reusable triage pipeline."""
+    return {
+        name: job
+        for name, job in jobs.items()
+        if isinstance(job, dict) and _PIPELINE_REF in str(job.get("uses", ""))
+    }
+
+
 def triage_caller_drift(root: Path) -> TriageDrift | None:
     """Structural drift in root's triage.yml vs. the stub, or None if the repo has no caller."""
     caller_path = root / TRIAGE_CALLER_REL
@@ -73,10 +99,16 @@ def triage_caller_drift(root: Path) -> TriageDrift | None:
         return None
 
     try:
-        stub_jobs = _load_jobs(TRIAGE_STUB)
-        caller_jobs = _load_jobs(caller_path)
+        stub_jobs = _caller_jobs(_load_jobs(TRIAGE_STUB))
+        caller_jobs = _caller_jobs(_load_jobs(caller_path))
     except ValueError as exc:
         return TriageDrift([], [], error=str(exc))
+
+    # A triage.yml that never calls the pipeline isn't a caller at all — same
+    # answer as having no file, rather than a warning about secrets it has no
+    # use for.
+    if not caller_jobs:
+        return None
 
     missing: dict[str, list[str]] = {}
     for section in _DRIFT_SECTIONS:
