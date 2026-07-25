@@ -7,6 +7,9 @@ dist/
 .DS_Store
 .worktrees/
 
+# Background-surface run logs (agent review/plan --surface background).
+.agent-runs/
+
 config/local/
 
 # Supabase CLI scratch state (link refs, temp creds) — never a source artifact.

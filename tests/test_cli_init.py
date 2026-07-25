@@ -20,7 +20,9 @@ def test_init_scaffolds_project(tmp_path: Path) -> None:
     assert claude_md.readlink() == Path("AGENTS.md")
     assert claude_md.read_text() == (tmp_path / "AGENTS.md").read_text()
 
-    assert ".worktrees/" in (tmp_path / ".gitignore").read_text()
+    gitignore_text = (tmp_path / ".gitignore").read_text()
+    assert ".worktrees/" in gitignore_text
+    assert ".agent-runs/" in gitignore_text
 
     template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
     assert "Acceptance criteria" in template.read_text()
@@ -36,7 +38,9 @@ def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     assert not (tmp_path / "CLAUDE.md").is_symlink()
     assert (tmp_path / "CLAUDE.md").read_text() == "# my existing instructions\n"
     # .gitignore not appended twice
-    assert (tmp_path / ".gitignore").read_text().count(".worktrees/") == 1
+    gitignore_text = (tmp_path / ".gitignore").read_text()
+    assert gitignore_text.count(".worktrees/") == 1
+    assert gitignore_text.count(".agent-runs/") == 1
     # existing issue template untouched
     template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
     template.write_text("custom\n")
