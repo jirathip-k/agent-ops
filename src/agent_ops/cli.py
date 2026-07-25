@@ -13,6 +13,7 @@ from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
+    dispatch_plan,
     dispatch_review,
     format_summary,
     run_implement,
@@ -136,9 +137,29 @@ def plan(
     project: ProjectOpt = Path("."),
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     post: Annotated[bool, typer.Option("--post", help="Post the plan as an issue comment")] = False,
+    surface: Annotated[
+        str,
+        typer.Option(
+            help="Where to run: inline (print here) | auto | orca | background",
+        ),
+    ] = "inline",
 ) -> None:
     """Run only the planner role (smart model, read-only) and print the plan."""
     root = project.resolve()
+
+    # inline is the default on purpose: a plan's whole value is the text it
+    # prints, and plan-pipeline.yml consumes it inline on the runner.
+    if surface != "inline":
+        try:
+            where = dispatch_plan(
+                root, issue, surface_name=surface, post_comment=post, runtime_name=runtime
+            )
+        except (ValueError, CommandError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo(f"dispatched plan for issue #{issue} → {where}")
+        return
+
     config = load_project_config(root)
     try:
         issue_data = github.get_issue(issue, cwd=root)
