@@ -124,7 +124,7 @@ jobs:
       #
       # A GitHub App installation token avoids this: App-triggered runs are not
       # gated (the same reason claude-code-action's own App-authored PRs always
-      # ran). Credentials are optional — see docs/workflow.md for setup.
+      # ran). Credentials are optional — see docs/ci-cd.md for setup.
       - name: Detect App credentials
         id: appcfg
         if: steps.precheck.outputs.count != '0'
