@@ -626,10 +626,12 @@ class SelfReview:
     reviewed: bool = True
     """False when there was nothing to review, which is not a rejection.
 
-    `git diff` ignores untracked files, so an implementer that only *creates*
-    files produces an empty diff. Treating that as REQUEST CHANGES would post
-    "changes requested — (empty diff)" on the issue and store it as resume
-    feedback, telling the next run to address a message that says nothing.
+    A truly empty diff — the implementer changed nothing at all. (Untracked
+    files are covered: `_self_review` stages intent-to-add first, so a
+    create-only run is reviewed, not skipped.) Treating this as REQUEST
+    CHANGES would post "changes requested — (empty diff)" on the issue and
+    store it as resume feedback, telling the next run to address a message
+    that says nothing.
     """
 
 

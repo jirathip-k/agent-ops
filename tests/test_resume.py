@@ -284,12 +284,12 @@ def test_run_implement_halt_survives_a_failed_issue_comment(
 def test_empty_diff_halts_without_recording_findings_or_commenting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty diff is "nothing to review", not a rejection.
+    """A truly empty diff is "nothing to review", not a rejection.
 
-    `git diff` ignores untracked files, so an implementer that only creates
-    files produces one. Recording it would post "changes requested — (empty
-    diff — nothing to review)" on the issue and hand that string to the next
-    run as feedback to address.
+    (Create-only runs are reviewed — see test_self_review_sees_untracked_files.)
+    Recording this would post "changes requested — (empty diff — nothing to
+    review)" on the issue and hand that string to the next run as feedback to
+    address.
     """
     commented: list[int] = []
     monkeypatch.setattr(
@@ -408,3 +408,30 @@ def test_finish_run_clears_the_stored_findings_on_success(
     assert ok is True
     assert not implement_module._feedback_path(repo, 7).exists()
     assert not implement_module._ad_hoc_message_path(repo, 7).exists()
+
+
+def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An implementer that only creates files must still be reviewed.
+
+    `git diff` alone reports nothing for untracked files, so without the
+    intent-to-add pass this run would look empty and skip review entirely —
+    the common shape for "add X" issues. Delete that line and this test fails.
+    """
+    (repo / "new_module.py").write_text("def added(): ...\n")
+    captured: dict[str, str] = {}
+
+    def fake_role_request(config, role_name, prompt, cwd, **kwargs):
+        captured["prompt"] = prompt
+        return object(), RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(implement_module, "role_request", fake_role_request)
+    monkeypatch.setattr(
+        implement_module,
+        "run_with_fallback",
+        lambda runtime, request, on_event=None: RunResult(ok=True, text="APPROVE"),
+    )
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.reviewed is True
+    assert "new_module.py" in captured["prompt"]
