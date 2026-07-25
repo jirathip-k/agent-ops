@@ -8,7 +8,8 @@ from typing import Annotated
 import typer
 
 from agent_ops import __version__, github, registry, surfaces, worktree
-from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
+from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
+from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import dispatch_review, run_implement, run_review
@@ -134,13 +135,16 @@ def plan(
     config = load_project_config(root)
     try:
         issue_data = github.get_issue(issue, cwd=root)
-        text = make_plan(config, issue_data, root, runtime_override=runtime)
+        request, result = make_plan(
+            config, issue_data, root, runtime_override=runtime, log=typer.echo
+        )
     except (CommandError, RuntimeError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    typer.echo(text)
+    typer.echo(result.text)
     if post:
-        github.comment_on_issue(issue, f"## Agent plan\n\n{text}", cwd=root)
+        body = f"## Agent plan\n\n{result.text}{artifact_footer(request, result)}"
+        github.comment_on_issue(issue, body, cwd=root)
         typer.echo(f"posted plan on issue #{issue}")
 
 
@@ -348,6 +352,16 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         unset = [g for g in config.loop.gates if not getattr(config.commands, g, None)]
         if unset:
             typer.echo(f"! gates with no command configured (will be skipped): {', '.join(unset)}")
+        for report in role_reports(config):
+            if report.error:
+                _err(f"✗ {report.name}: {report.error}")
+                ok = False
+                continue
+            ladder = " → ".join(report.fallbacks) if report.fallbacks else "none configured"
+            typer.echo(
+                f"  {report.name}: {report.runtime} / "
+                f"{report.model or 'runtime default'} (fallbacks: {ladder})"
+            )
     except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
         _err(f"✗ config error: {exc}")
         ok = False

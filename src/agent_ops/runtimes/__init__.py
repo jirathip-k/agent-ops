@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_ops.runtimes.base import RunRequest, RunResult, Runtime
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, Runtime
 from agent_ops.runtimes.claude_code import ClaudeCodeRuntime
 from agent_ops.runtimes.codex import CodexRuntime
 
@@ -21,4 +21,11 @@ def runtime_names() -> list[str]:
     return list(_RUNTIMES)
 
 
-__all__ = ["Runtime", "RunRequest", "RunResult", "get_runtime", "runtime_names"]
+__all__ = [
+    "FailureKind",
+    "RunRequest",
+    "RunResult",
+    "Runtime",
+    "get_runtime",
+    "runtime_names",
+]

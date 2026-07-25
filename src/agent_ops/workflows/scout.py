@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_ops import worktree
 from agent_ops.config import load_project_config
+from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import run
 from agent_ops.workflows.implement import role_request
@@ -81,7 +82,7 @@ def run_scout(
                 "Bash(gh pr view:*)",
             ),
         )
-        result = runtime.run(request)
+        result = run_with_fallback(runtime, request, on_event=log)
     finally:
         worktree.remove(project_root, config.worktree_dir, "scout-tmp", force=True)
     if not result.ok:

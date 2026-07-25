@@ -1,8 +1,13 @@
 import subprocess
 from pathlib import Path
 
-from agent_ops.runtimes.base import RunRequest
-from agent_ops.runtimes.claude_code import build_command, format_event, parse_result
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
+from agent_ops.runtimes.claude_code import (
+    build_command,
+    classify_failure,
+    format_event,
+    parse_result,
+)
 
 
 def _proc(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -161,3 +166,43 @@ def test_build_command_includes_allowed_tools_and_model() -> None:
 def test_build_command_stream_uses_stream_json_verbose() -> None:
     cmd = build_command(RunRequest(prompt="x", cwd=Path("."), stream=True))
     assert cmd[-3:] == ["--output-format", "stream-json", "--verbose"]
+
+
+# The exact text Claude Code printed when the account hit its Fable spend
+# limit mid-review on 2026-07-25 (issue #41). Kept verbatim: classification is
+# only as good as the strings it was actually built against.
+SPEND_LIMIT_OUTPUT = (
+    "You've hit your monthly spend limit. Run /usage-credits to manage your limit and "
+    "keep using Fable 5 or switch models to continue this chat."
+)
+
+
+def test_spend_limit_prose_classifies_as_model_unavailable() -> None:
+    result = parse_result(_proc(SPEND_LIMIT_OUTPUT, returncode=1))
+    assert not result.ok
+    assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE
+
+
+def test_unsupported_model_classifies_as_model_unavailable() -> None:
+    result = parse_result(_proc('{"result": "Model not found: fable-6", "is_error": true}'))
+    assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE
+
+
+def test_rate_limit_classifies_as_transient() -> None:
+    result = parse_result(_proc('{"result": "API Error: 429 rate_limit_error", "is_error": true}'))
+    assert classify_failure(result) is FailureKind.TRANSIENT
+
+
+def test_overload_classifies_as_transient() -> None:
+    result = parse_result(_proc('{"result": "API Error: 529 overloaded_error", "is_error": true}'))
+    assert classify_failure(result) is FailureKind.TRANSIENT
+
+
+def test_ordinary_agent_error_is_not_a_model_problem() -> None:
+    result = parse_result(_proc('{"result": "I could not fix the failing test", "is_error": true}'))
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
+
+
+def test_stderr_is_searched_when_stdout_carried_no_prose() -> None:
+    result = RunResult(ok=False, text="", raw={"stderr": SPEND_LIMIT_OUTPUT})
+    assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE

@@ -192,6 +192,63 @@ This repo is public; the names of the repos it manages are not. The split:
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 
+## Model fallback (when a tier goes unavailable mid-run)
+
+Roles reference tiers (`smart`, `fast`), and `model_tiers` maps each tier to a
+concrete model **per runtime**. When a run fails because that model cannot
+serve the account — monthly spend limit hit, model unsupported for the auth in
+use, model retired — the run steps down `model_fallbacks` instead of dying:
+
+```yaml
+model_tiers:
+  claude_code:
+    smart: fable
+    fast: sonnet
+model_fallbacks:            # the full ladder, best first
+  claude_code:
+    smart: [fable, opus]
+    fast: [sonnet, haiku]
+```
+
+Rules worth knowing:
+
+- **Only availability advances a rung.** A rate limit or an overload retries
+  the *same* model (the CLIs already back off internally); a failing gate or a
+  bad agent run never changes the model at all.
+- **Substitutions are loud.** The log says `MODEL FALLBACK: …`, and every
+  artifact the run posts — PR review comment, plan/spec comment, PR body —
+  names the model that produced it.
+- **A substitution holds for the rest of the run**, so a retry after a failed
+  gate does not walk back into a model that just refused.
+- **Empty by default.** With no `model_fallbacks` configured, a run makes
+  exactly the calls it made before.
+- `agent doctor` prints the resolved model and ladder for every role.
+
+### Refreshing the ladder
+
+The tiers self-update only in the sense that `fable`/`sonnet` are floating
+aliases — that says nothing about which model is a sensible *fallback*, and it
+rots silently when a model is retired. Check the ladder against the Models API
+rather than from memory:
+
+```sh
+# every model this account can actually use, newest first
+curl -s https://api.anthropic.com/v1/models \
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+  | jq -r '.data[] | "\(.id)\t\(.display_name)"'
+
+# capabilities and limits for one candidate rung
+curl -s https://api.anthropic.com/v1/models/claude-opus-5 \
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+  | jq '{id, max_input_tokens, max_tokens, capabilities}'
+```
+
+A rung is only worth adding if it is still listed, its context window is large
+enough for the role's prompts (review diffs are big), and it is cheaper or at
+least no more expensive than the rung above it. `config/defaults.yaml` is a
+human-reviewed file: propose ladder changes in a PR, do not let an agent land
+them.
+
 ## The aggregate view
 
 Orca IDE aggregates issues and PRs across repos, so there is no separate

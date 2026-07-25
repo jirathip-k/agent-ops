@@ -5,8 +5,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_ops.config import ProjectConfig
+from agent_ops.fallback import pin_to_model, run_with_fallback
 from agent_ops.gates import GateResult, format_failures, run_gates
-from agent_ops.runtimes import RunRequest, RunResult, Runtime
+from agent_ops.runtimes import FailureKind, RunRequest, RunResult, Runtime
 
 RETRY_TEMPLATE = """\
 A previous attempt at the task below did not pass verification.
@@ -47,6 +48,7 @@ def run_task_loop(
     feedback: str | None = None
     last_result: RunResult | None = None
     failures: list[GateResult] = []
+    current = request
 
     for attempt in range(1, config.loop.max_attempts + 1):
         prompt = (
@@ -55,9 +57,16 @@ def run_task_loop(
             else RETRY_TEMPLATE.format(task=request.prompt, feedback=feedback)
         )
         on_event(f"attempt {attempt}/{config.loop.max_attempts}: running {runtime.name}")
-        last_result = runtime.run(replace(request, prompt=prompt))
+        last_result = run_with_fallback(runtime, replace(current, prompt=prompt), on_event=on_event)
+        # A substitution sticks for the rest of the loop; a gate failure never
+        # changes the model, so this only moves when the model itself refused.
+        current = pin_to_model(current, last_result.model)
 
         if not last_result.ok:
+            if runtime.classify_failure(last_result) is FailureKind.MODEL_UNAVAILABLE:
+                # The ladder is spent — more attempts would hit the same wall.
+                on_event("no fallback model left; giving up without further attempts")
+                return LoopOutcome(False, attempt, last_result, failures)
             feedback = f"The agent runtime itself failed:\n{last_result.text}"
             on_event("runtime reported an error; retrying")
             continue
