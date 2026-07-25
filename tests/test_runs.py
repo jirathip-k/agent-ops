@@ -440,3 +440,24 @@ def test_declared_project_accepts_the_short_and_equals_forms(tmp_path: Path) -> 
     for flag in (f"-C {other}", f"--project={other}"):
         ps = f"1 00:05 agent implement 77 {flag}\n"
         assert runs.live_runs(ps, project_root=mine) == {}, flag
+
+
+def test_live_runs_attached_message_forms_do_not_phantom_match() -> None:
+    """click accepts `--message=x` and `-mx`; `ps` shows the post-quoting argv.
+
+    Matching only the detached spellings let these through, and the scan
+    resumed inside the message text — returning a phantom issue number while
+    reporting the real run as stopped. Both failures at once.
+    """
+    for args in (
+        'agent resume --message="retry 3 times" 82',
+        "agent resume -mretry 3 times 82",
+    ):
+        ps = f"1 00:05 /usr/bin/python3 /x/bin/agent {args.removeprefix('agent ')}\n"
+        assert runs.live_runs(ps) == {}, args
+
+
+def test_live_runs_still_finds_the_issue_after_a_valued_flag() -> None:
+    """The guard must not swallow ordinary value-taking options."""
+    ps = "1 00:05 /usr/bin/python3 /x/bin/agent implement --runtime codex 82\n"
+    assert runs.live_runs(ps) == {82: (1, "00:05", "implement")}
