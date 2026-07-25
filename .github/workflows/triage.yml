@@ -39,3 +39,9 @@ jobs:
       auto_merge: false   # report-only; flip to true after a trusted week
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Optional (#53): lets the pipeline push as a GitHub App instead of
+      # github-actions[bot], whose pushes produce workflow runs held on
+      # manual approval — which blocks the auto-merge gate. Unset is fine;
+      # the pipeline falls back to GITHUB_TOKEN.
+      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}
+      AGENT_APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
