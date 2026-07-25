@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -45,12 +44,17 @@ def comment_on_issue(number: int, body: str, cwd: Path) -> None:
 
 
 def pr_references_issue(pr: dict[str, Any], issue_number: int) -> bool:
-    """True if this PR's branch or title/body plausibly fixes the given issue."""
+    """True if this PR's branch matches or it will actually close the given issue.
+
+    A bare `#N` mention in the title/body (e.g. cross-referencing a related but
+    out-of-scope issue) does NOT count — only a real GitHub closing reference
+    (`Fixes`/`Closes`/`Resolves` `#N`, as GitHub itself parses it, surfaced via
+    `closingIssuesReferences`) or the conventional `fix/issue-N` branch name.
+    """
     if pr.get("headRefName") == f"fix/issue-{issue_number}":
         return True
-    pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
-    text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
-    return bool(pattern.search(text))
+    closing_refs = pr.get("closingIssuesReferences") or []
+    return any(ref.get("number") == issue_number for ref in closing_refs)
 
 
 def open_pr_numbers(base: str, cwd: Path) -> list[int]:
@@ -91,7 +95,7 @@ def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
                 "--state",
                 "open",
                 "--json",
-                "number,title,body,headRefName,url",
+                "number,title,body,headRefName,url,closingIssuesReferences",
                 "--limit",
                 "100",
             ],
