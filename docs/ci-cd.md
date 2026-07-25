@@ -104,24 +104,29 @@ token avoids this, because App-authored runs are not subject to that gate
 
 **Create the App** — <https://github.com/settings/apps/new>:
 
-- Repository permissions: Contents **R/W**, Pull requests **R/W**,
-  Issues **R/W**, Checks **Read**, Metadata **Read**.
+- Repository permissions: **Contents: Read & write** and
+  **Metadata: Read** — and nothing else. The token is consumed in exactly one
+  place, the target-repo checkout in `triage-pipeline.yml`; the orchestrator's
+  own `gh` calls run under claude-code-action's token, not this one. Issues
+  R/W, Pull requests R/W and Checks Read are *not* needed, and an App already
+  carrying them should have them trimmed — a reduction applies immediately,
+  with no installation approval to accept (only *increases* need that).
 - Webhook: uncheck **Active** — the pipeline polls; nothing is pushed to it.
 - **"Where can this GitHub App be installed?" → Any account.** Non-obvious,
   and not relaxable later without recreating the App: the repos that call
-  the pipeline span three owners (`jirathip-k`, `sendmeter`,
-  `synergy-services-cooling-tower`), so "Only on this account" can't reach
-  two of them.
+  the pipeline span several owners, so "Only on this account" cannot reach
+  most of them.
 - Remaining required-but-cosmetic fields: an App name (globally unique
   across GitHub — it becomes the commit author on pipeline pushes),
   Homepage URL, and leave Webhook URL / Callback URL / Setup URL blank with
   "Request user authorization (OAuth) during installation" unchecked.
 - Generate a private key — the `.pem` downloads once.
 
-**Install it** on all three owners, granting the repos that call the
-pipeline: `jirathip-k/agent-ops`, `sendmeter/sendmeter`,
-`synergy-services-cooling-tower/synergy-costing`,
-`synergy-services-cooling-tower/synergy-inspection`.
+**Install it** on every owner that has a calling repo, granting just those
+repos. The rule, rather than a list that goes stale: *any repo with a workflow
+that `uses:` `triage-pipeline.yml` needs the App installed on its owner and
+both secrets set.* `config/repos.yml` is the source of truth for which repos
+are managed; `agent status` shows which of them have the triage lane wired up.
 
 **Add secrets** to each of those repos:
 
