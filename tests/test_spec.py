@@ -60,8 +60,11 @@ def _stub_issue(monkeypatch: pytest.MonkeyPatch, issue_number: int = 7) -> None:
     )
 
 
-def _stub_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, bool]]:
+def _stub_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[list[tuple[str, bool]], list[str]]:
     removed: list[tuple[str, bool]] = []
+    refs: list[str] = []
 
     def fake_remove(
         project_root: Path,
@@ -73,17 +76,23 @@ def _stub_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tupl
     ) -> None:
         removed.append((task_id, force))
 
-    monkeypatch.setattr(
-        worktree,
-        "create_detached",
-        lambda project_root, worktree_dir, name, ref: tmp_path / "wt",
-    )
+    def fake_create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) -> Path:
+        refs.append(ref)
+        return tmp_path / "wt"
+
+    monkeypatch.setattr(worktree, "create_detached", fake_create_detached)
     monkeypatch.setattr(worktree, "remove", fake_remove)
-    return removed
+    return removed, refs
 
 
-def _stub_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(spec_mod, "run", lambda *args, **kwargs: None)
+def _stub_fetch(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], Path | None]]:
+    calls: list[tuple[list[str], Path | None]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> None:
+        calls.append((cmd, cwd))
+
+    monkeypatch.setattr(spec_mod, "run", fake_run)
+    return calls
 
 
 def _stub_comments(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
@@ -99,7 +108,7 @@ def test_run_spec_happy_path_posts_comment_and_removes_worktree(
 ) -> None:
     _stub_issue(monkeypatch, issue_number=7)
     _stub_fetch(monkeypatch)
-    removed = _stub_worktree(monkeypatch, tmp_path)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     posted = _stub_comments(monkeypatch)
     runtime = _FakeRuntime(text="## Summary\n\nDoes the thing")
     _stub_role_request(monkeypatch, runtime)
@@ -124,7 +133,7 @@ def test_run_spec_post_false_returns_text_without_posting(
 ) -> None:
     _stub_issue(monkeypatch)
     _stub_fetch(monkeypatch)
-    removed = _stub_worktree(monkeypatch, tmp_path)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     posted = _stub_comments(monkeypatch)
     runtime = _FakeRuntime(text="## Summary\n\nDoes the thing")
     _stub_role_request(monkeypatch, runtime)
@@ -142,7 +151,7 @@ def test_run_spec_escalate_raises_and_posts_nothing(
 ) -> None:
     _stub_issue(monkeypatch)
     _stub_fetch(monkeypatch)
-    removed = _stub_worktree(monkeypatch, tmp_path)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     posted = _stub_comments(monkeypatch)
     runtime = _FakeRuntime(text=escalation_text)
     _stub_role_request(monkeypatch, runtime)
@@ -159,7 +168,7 @@ def test_run_spec_failed_run_raises_and_posts_nothing(
 ) -> None:
     _stub_issue(monkeypatch)
     _stub_fetch(monkeypatch)
-    removed = _stub_worktree(monkeypatch, tmp_path)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     posted = _stub_comments(monkeypatch)
     runtime = _FakeRuntime(text="couldn't finish", ok=False)
     _stub_role_request(monkeypatch, runtime)
@@ -176,7 +185,7 @@ def test_run_spec_runtime_exception_still_removes_worktree(
 ) -> None:
     _stub_issue(monkeypatch)
     _stub_fetch(monkeypatch)
-    removed = _stub_worktree(monkeypatch, tmp_path)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     _stub_comments(monkeypatch)
     _stub_role_request(monkeypatch, _RaisingRuntime())
 
@@ -184,3 +193,36 @@ def test_run_spec_runtime_exception_still_removes_worktree(
         run_spec(tmp_path, 7)
 
     assert removed == [("spec-7-tmp", True)]
+
+
+def test_run_spec_fetches_then_specs_against_origin_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / ".agent"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("base_branch: develop\n")
+    order: list[str] = []
+    fetched: list[tuple[list[str], Path | None]] = []
+    refs: list[str] = []
+    _stub_issue(monkeypatch)
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> None:
+        order.append("fetch")
+        fetched.append((cmd, cwd))
+
+    def fake_create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) -> Path:
+        order.append("create_detached")
+        refs.append(ref)
+        return tmp_path / "wt"
+
+    monkeypatch.setattr(spec_mod, "run", fake_run)
+    monkeypatch.setattr(worktree, "create_detached", fake_create_detached)
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    _stub_comments(monkeypatch)
+    _stub_role_request(monkeypatch, _FakeRuntime(text="## Summary\n\nDoes the thing"))
+
+    run_spec(tmp_path, 7, post=False)
+
+    assert fetched == [(["git", "fetch", "origin", "develop"], tmp_path)]
+    assert refs == ["origin/develop"]
+    assert order == ["fetch", "create_detached"]

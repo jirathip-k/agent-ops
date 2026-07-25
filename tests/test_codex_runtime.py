@@ -86,6 +86,7 @@ def _stub_run(
     def fake_run(
         cmd: list[str], *, cwd: Path | None = None, check: bool = True
     ) -> subprocess.CompletedProcess[str]:
+        assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
         calls.append(cmd)
         return subprocess.CompletedProcess(
             args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
@@ -148,6 +149,7 @@ def test_run_forwards_cwd_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(
         cmd: list[str], *, cwd: Path | None = None, check: bool = True
     ) -> subprocess.CompletedProcess[str]:
+        assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
         captured_cwd.append(cwd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="done", stderr="")
 
