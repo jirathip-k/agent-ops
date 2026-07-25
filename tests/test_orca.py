@@ -58,6 +58,97 @@ def test_report_signals_whether_the_card_was_written(monkeypatch: pytest.MonkeyP
     assert orca.report(Path("/wt"), comment="hi") is False
 
 
+def _worktree_selector(cmd: list[str]) -> str:
+    return cmd[cmd.index("--worktree") + 1]
+
+
+def test_report_indexed_card_makes_exactly_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
+
+    assert ok is True
+    assert len(calls) == 1
+    assert _worktree_selector(calls[0]) == "path:/wt"
+
+
+def test_report_falls_back_to_project_root_when_worktree_card_is_unindexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if _worktree_selector(cmd) == "path:/repo":
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="selector_not_found")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
+
+    assert ok is True
+    assert len(calls) == 2
+    assert _worktree_selector(calls[0]) == "path:/wt"
+    assert _worktree_selector(calls[1]) == "path:/repo"
+
+
+def test_report_returns_false_when_worktree_and_fallback_both_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="selector_not_found")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
+
+    assert ok is False
+    assert len(calls) == 2
+
+
+def test_report_does_not_retry_without_a_fallback_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="selector_not_found")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    assert orca.report(Path("/wt"), comment="hi") is False
+    assert len(calls) == 1
+
+
+def test_report_does_not_retry_a_non_selector_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="permission_denied")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
+
+    assert ok is False
+    assert len(calls) == 1
+
+
 def test_await_indexed_returns_once_orca_sees_every_worktree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

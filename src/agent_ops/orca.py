@@ -23,6 +23,10 @@ STATUS_COMPLETED = "completed"
 # is enough and keeps the call to a single round trip.
 _CARD_LIMIT = 200
 
+# Orca's error code when a card's selector doesn't resolve yet (issue #20) —
+# shared with `surfaces`, which retries the same condition for terminals.
+SELECTOR_NOT_FOUND = "selector_not_found"
+
 # Orca picks up a brand-new external worktree on a periodic rescan, not
 # instantly (issue #20) — observed at 13-25s, so the budget here covers ~36s.
 # Module level so tests can monkeypatch `orca.time.sleep`.
@@ -51,7 +55,13 @@ def available() -> bool:
     return run([exe, "status", "--json"], check=False).returncode == 0
 
 
-def report(wt_path: Path, *, comment: str | None = None, status: str | None = None) -> bool:
+def report(
+    wt_path: Path,
+    *,
+    comment: str | None = None,
+    status: str | None = None,
+    fallback_path: Path | None = None,
+) -> bool:
     """Best-effort: reflect pipeline state on the worktree's Orca card.
 
     Orca resolves external (agent-ops-created) worktrees through the `path:`
@@ -59,18 +69,37 @@ def report(wt_path: Path, *, comment: str | None = None, status: str | None = No
     viewport, never a dependency — no Orca means no-op, and a failed update
     is ignored rather than failing the run.
 
-    Returns whether the card was actually updated, so callers that print a
+    `fallback_path` mirrors the retry `surfaces.OrcaSurface.spawn` already
+    does for terminals (issue #20): if the worktree card isn't indexed yet,
+    retry once against another card (typically the project root) so the
+    status lands somewhere visible rather than being dropped silently.
+
+    Returns whether a card was actually updated, so callers that print a
     summary (`agent status --sync-orca`) can tell a no-op from a write. A card
     created moments ago may not exist yet — see `await_indexed`.
     """
     if (comment is None and status is None) or not available():
         return False
-    cmd = [executable(), "worktree", "set", "--worktree", f"path:{wt_path}", "--json"]
+    ok, stderr = _set_card(wt_path, comment, status)
+    if ok:
+        return True
+    if fallback_path is None or fallback_path == wt_path or SELECTOR_NOT_FOUND not in stderr:
+        return False
+    ok, _ = _set_card(fallback_path, comment, status)
+    return ok
+
+
+def _set_card(path: Path, comment: str | None, status: str | None) -> tuple[bool, str]:
+    """One `worktree set` call; returns (ok, stderr-or-stdout on failure)."""
+    cmd = [executable(), "worktree", "set", "--worktree", f"path:{path}", "--json"]
     if comment is not None:
         cmd += ["--comment", comment]
     if status is not None:
         cmd += ["--workspace-status", status]
-    return run(cmd, check=False).returncode == 0
+    proc = run(cmd, check=False)
+    if proc.returncode == 0:
+        return True, ""
+    return False, proc.stderr.strip() or proc.stdout.strip()
 
 
 def await_indexed(paths: Sequence[Path]) -> bool:
