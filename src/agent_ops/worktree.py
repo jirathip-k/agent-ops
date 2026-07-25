@@ -78,6 +78,43 @@ def _pristine_checkout(path: Path, branch: str) -> bool:
     return status.returncode == 0 and not status.stdout.strip()
 
 
+def create_tracking(project_root: Path, worktree_dir: str, name: str, branch: str) -> Path:
+    """Worktree checked out on an existing branch, fetching it if it is remote-only.
+
+    The counterpart to `create()`: that one cuts a *new* branch for work we are
+    about to do, this one mirrors a branch someone else already pushed (e.g. a
+    PR a CI lane opened). Converges rather than duplicating — a worktree
+    already on `branch`, wherever it lives, is returned untouched.
+    """
+    for wt in list_worktrees(project_root):
+        if wt.branch == branch:
+            return wt.path
+
+    path = project_root / worktree_dir / name
+    if path.exists():
+        raise FileExistsError(
+            f"Worktree {path} already exists but is not on {branch!r} — "
+            f"remove it with `agent worktree remove {name}` before mirroring that branch."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "fetch", "origin", branch], cwd=project_root, check=False)
+    local_exists = (
+        run(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=project_root, check=False)
+    ).returncode == 0
+    cmd = (
+        ["git", "worktree", "add", str(path), branch]
+        if local_exists
+        else ["git", "worktree", "add", "--track", "-b", branch, str(path), f"origin/{branch}"]
+    )
+    proc = run(cmd, cwd=project_root, check=False)
+    if proc.returncode != 0:
+        raise CommandError(
+            f"git worktree add failed for existing branch {branch!r}:\n"
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return path
+
+
 def create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) -> Path:
     """Read-only style worktree pinned to a ref (no branch) — e.g. for triage."""
     path = project_root / worktree_dir / name
