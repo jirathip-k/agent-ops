@@ -158,6 +158,107 @@ def test_live_runs_includes_bare_invocation_without_project_flag(tmp_path: Path)
     assert runs.live_runs(ps, tmp_path / "agent-ops") == {77: (41233, "00:06:12", "implement")}
 
 
+def test_live_runs_matches_interleaved_project_option() -> None:
+    """A hand-typed `agent implement --project /repo 77` puts the issue number
+    after the option, not right after the verb — the shape a human typing by
+    hand will produce sooner or later."""
+    ps = "1 00:05 agent implement --project /repo 77\n"
+    assert runs.live_runs(ps) == {77: (1, "00:05", "implement")}
+
+
+def test_live_runs_matches_interleaved_project_equals_form() -> None:
+    ps = "1 00:05 agent implement --project=/repo 77\n"
+    assert runs.live_runs(ps) == {77: (1, "00:05", "implement")}
+
+
+def test_live_runs_matches_interleaved_short_project_flag() -> None:
+    ps = "1 00:05 agent implement -C /repo 77\n"
+    assert runs.live_runs(ps) == {77: (1, "00:05", "implement")}
+
+
+def test_live_runs_interleaved_project_still_filters_other_project(tmp_path: Path) -> None:
+    """The interleaved scan must not break the existing --project filter."""
+    other = tmp_path / "other-repo"
+    other.mkdir()
+    ps = f"1 00:05 agent implement --project {other} 77\n"
+    assert runs.live_runs(ps, tmp_path / "agent-ops") == {}
+
+
+def test_live_runs_interleaved_project_matches_when_same(tmp_path: Path) -> None:
+    project = tmp_path / "agent-ops"
+    ps = f"1 00:05 agent implement --project {project} 77\n"
+    assert runs.live_runs(ps, project) == {77: (1, "00:05", "implement")}
+
+
+def test_live_runs_message_flag_before_issue_is_ambiguous() -> None:
+    """`--message`/`-m` take free text, which `ps` hands back as however many
+    space-split tokens the message contains — there's no fixed value width to
+    skip. `agent resume --message 77 73` can't tell a one-word message from
+    an issue number that happens to come after it, so this must not guess
+    `73` (or misreport the message word `77` as the issue)."""
+    ps = "1 00:05 agent resume --message 77 73\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_short_message_flag_before_issue_is_ambiguous() -> None:
+    ps = "1 00:05 agent resume -m 77 73\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_multiword_message_before_issue_does_not_phantom_match() -> None:
+    """A quoted multi-word message survives `args.split()` as several tokens.
+    Before the fix, the scan resumed inside the message text and returned the
+    first bare digit it found there — a phantom match on the wrong issue."""
+    ps = "1 00:05 agent resume -m retry 3 times 82\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_message_flag_after_issue_still_matches() -> None:
+    """The documented usage (`docs/workflow.md`): issue number first, message
+    last. The digit is found before the ambiguous flag is ever reached."""
+    ps = '1 00:05 agent resume 82 -m "see comment 3"\n'
+    assert runs.live_runs(ps) == {82: (1, "00:05", "resume")}
+
+
+def test_live_runs_matches_shebang_expanded_argv_with_interleaved_options() -> None:
+    ps = (
+        "41233 06:12 /Users/x/.local/share/uv/tools/agent-ops/bin/python3 "
+        "/Users/x/.local/bin/agent implement --project /repo 77\n"
+    )
+    assert runs.live_runs(ps) == {77: (41233, "06:12", "implement")}
+
+
+def test_live_runs_excludes_plan() -> None:
+    """`plan` has no worktree — see the `live_runs` docstring for why it's
+    deliberately not a run verb."""
+    ps = "1 00:05 agent plan 77\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_excludes_spec() -> None:
+    """`spec` creates a detached worktree that never becomes a `discover_runs`
+    candidate — see the `live_runs` docstring."""
+    ps = "1 00:05 agent spec 77\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_excludes_review() -> None:
+    """`review` is keyed by PR number, which would collide with issue keys."""
+    ps = "1 00:05 agent review 45\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_excludes_groom() -> None:
+    """`groom` takes no issue argument — nothing to key this dict on."""
+    ps = "1 00:05 agent groom --project /repo\n"
+    assert runs.live_runs(ps) == {}
+
+
+def test_live_runs_excludes_scout() -> None:
+    ps = "1 00:05 agent scout --max 3\n"
+    assert runs.live_runs(ps) == {}
+
+
 # --- _fmt_elapsed --------------------------------------------------------------
 
 
@@ -547,3 +648,24 @@ def test_declared_project_accepts_the_short_and_equals_forms(tmp_path: Path) -> 
     for flag in (f"-C {other}", f"--project={other}"):
         ps = f"1 00:05 agent implement 77 {flag}\n"
         assert runs.live_runs(ps, project_root=mine) == {}, flag
+
+
+def test_live_runs_attached_message_forms_do_not_phantom_match() -> None:
+    """click accepts `--message=x` and `-mx`; `ps` shows the post-quoting argv.
+
+    Matching only the detached spellings let these through, and the scan
+    resumed inside the message text — returning a phantom issue number while
+    reporting the real run as stopped. Both failures at once.
+    """
+    for args in (
+        'agent resume --message="retry 3 times" 82',
+        "agent resume -mretry 3 times 82",
+    ):
+        ps = f"1 00:05 /usr/bin/python3 /x/bin/agent {args.removeprefix('agent ')}\n"
+        assert runs.live_runs(ps) == {}, args
+
+
+def test_live_runs_still_finds_the_issue_after_a_valued_flag() -> None:
+    """The guard must not swallow ordinary value-taking options."""
+    ps = "1 00:05 /usr/bin/python3 /x/bin/agent implement --runtime codex 82\n"
+    assert runs.live_runs(ps) == {82: (1, "00:05", "implement")}

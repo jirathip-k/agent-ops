@@ -186,12 +186,15 @@ agent runs
 #35  done      PR #76
 ```
 
-Liveness is a real `ps` lookup for `agent implement`/`agent resume`, never a
-terminal-buffer read (Orca terminals go empty once they exit, so that signal
-is useless once you'd actually want it) — this works whether or not Orca is
-running. `stopped` is the state that used to be invisible: a worktree with no
-live process, no self-review halt file and no open PR is a run that died
-mid-way, not one still working.
+Liveness is a real `ps` lookup for `agent implement`/`agent resume`/
+`agent dispatch`, never a terminal-buffer read (Orca terminals go empty once
+they exit, so that signal is useless once you'd actually want it) — this
+works whether or not Orca is running. `plan`, `spec`, `review`, `groom` and
+`scout` are deliberately not included: none of them owns a `fix/issue-N`
+worktree the way implement/resume/dispatch do, so a live one has no `agent
+runs` row to affect either way. `stopped` is the state that used to be
+invisible: a worktree with no live process, no self-review halt file and no
+open PR is a run that died mid-way, not one still working.
 
 `agent dispatch` is fire-and-forget, so nothing tells the caller when a run
 ends. `agent runs --wait` closes that gap by polling and blocking instead of
