@@ -151,6 +151,21 @@ _VALUE_FLAGS = {
 _FREE_TEXT_FLAGS = {"--message", "-m"}
 
 
+def _is_free_text_flag(token: str) -> bool:
+    """True for any spelling of `--message`, including click's attached forms.
+
+    `ps` gives us the shell's post-quoting argv, so a multi-word message is
+    several tokens and the scan would resume inside it. Matching only the
+    detached spellings let `--message=retry 3 times 82` through, which returned
+    `3` — a phantom row for #3 plus the real run reported `stopped`.
+    """
+    if token in _FREE_TEXT_FLAGS or token.startswith("--message="):
+        return True
+    # Attached short form (`-mretry`); `--...` is excluded so long options
+    # beginning "-m" aren't caught.
+    return token.startswith("-m") and not token.startswith("--") and len(token) > 2
+
+
 def _find_issue(tokens: list[str]) -> str | None:
     """The first bare-digit token, skipping option flags and their values.
 
@@ -170,9 +185,12 @@ def _find_issue(tokens: list[str]) -> str | None:
         token = tokens[i]
         if token.isdigit():
             return token
-        if token in _FREE_TEXT_FLAGS:
+        if _is_free_text_flag(token):
+            # Conservative on purpose: a single-word `--message=hi 82` also
+            # returns None, since the token count can't distinguish it from the
+            # multi-word case. Missing a run beats inventing one.
             return None
-        if token.startswith("-") and "=" not in token and token in _VALUE_FLAGS:
+        if token in _VALUE_FLAGS:
             i += 2
         else:
             i += 1
