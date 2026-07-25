@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, orca, worktree
+from agent_ops import github, orca, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import run_task_loop
@@ -109,6 +109,42 @@ def make_plan(
     if result.text.lstrip().upper().startswith("ESCALATE"):
         raise RuntimeError(f"Planner escalated:\n{result.text}")
     return request, result
+
+
+def plan_command(
+    project_root: Path,
+    issue_number: int,
+    *,
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> list[str]:
+    """Argv that re-runs this plan inline, for spawning onto a surface."""
+    command = ["agent", "plan", str(issue_number)]
+    if post_comment:
+        command.append("--post")
+    if runtime_name:
+        command += ["--runtime", runtime_name]
+    return command + ["--project", str(project_root)]
+
+
+def dispatch_plan(
+    project_root: Path,
+    issue_number: int,
+    *,
+    surface_name: str = "auto",
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> str:
+    """Spawn `agent plan` on a visible surface; return a 'where it went' string.
+
+    Like a review, a plan is read-only and has no task worktree, so it attaches
+    to the project's own card — no `attach_path`.
+    """
+    chosen = surfaces.pick(surface_name)
+    command = plan_command(
+        project_root, issue_number, post_comment=post_comment, runtime_name=runtime_name
+    )
+    return chosen.spawn(f"agent-plan-issue-{issue_number}", command, project_root)
 
 
 def run_implement(
