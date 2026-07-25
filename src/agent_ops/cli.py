@@ -227,6 +227,7 @@ def resume(
     ] = None,
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+    keep_worktree: Annotated[bool, typer.Option(help="Keep worktree after success")] = False,
     surface: Annotated[
         str,
         typer.Option(help="Where to run: auto | orca | background | inline"),
@@ -246,6 +247,7 @@ def resume(
                 message_file=message_file,
                 runtime_name=runtime,
                 open_pr=not no_pr,
+                keep_worktree=keep_worktree,
             )
         except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
             _err(str(exc))
@@ -261,6 +263,7 @@ def resume(
             message_file=message_file,
             runtime_name=runtime,
             open_pr=not no_pr,
+            keep_worktree=keep_worktree,
         )
     except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
         _err(str(exc))

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -309,11 +310,46 @@ def test_empty_diff_halts_without_recording_findings_or_commenting(
 
 
 def test_ad_hoc_message_does_not_overwrite_the_halt_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--message` must not destroy the stored self-review findings."""
-    halt = implement_module._feedback_path(tmp_path, 5)
+    """`--message` must not destroy the stored self-review findings.
+
+    Exercises dispatch_resume rather than comparing the two path helpers: a
+    regression would put `--message` back into the halt file, and only a test
+    that actually runs the code path can catch that.
+    """
+    halt = implement_module._feedback_path(repo, 5)
     halt.parent.mkdir(parents=True, exist_ok=True)
     halt.write_text("the real review findings")
 
-    assert implement_module._ad_hoc_message_path(tmp_path, 5) != halt
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    monkeypatch.setattr(
+        implement_module, "_existing_worktree", lambda root, config, number: repo / "wt"
+    )
+
+    implement_module.dispatch_resume(repo, 5, message="also bump the version")
+
+    assert halt.read_text() == "the real review findings"
+    ((_, command, _, _),) = fake.calls
+    passed = Path(command[command.index("--message-file") + 1])
+    assert passed != halt
+    assert passed.read_text() == "also bump the version"
+
+
+def test_self_review_reports_nothing_to_review_for_an_empty_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer of `reviewed=False`, not just its consumer.
+
+    It early-returns before touching a runtime, so this is cheap — and without
+    it the flag's only coverage monkeypatches the function that sets it.
+    """
+    monkeypatch.setattr(
+        implement_module, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="")
+    )
+
+    review = implement_module._self_review(ProjectConfig(), tmp_path, log=lambda _: None)
+
+    assert review.reviewed is False
+    assert review.ok is False

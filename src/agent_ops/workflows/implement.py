@@ -390,6 +390,7 @@ def run_resume(
     message_file: Path | None = None,
     runtime_name: str | None = None,
     open_pr: bool = True,
+    keep_worktree: bool = False,
     log: Callable[[str], None] = flush_print,
 ) -> bool:
     """Resume the implementer role in a worktree a prior run halted on (e.g. self-review).
@@ -440,7 +441,7 @@ def run_resume(
     ):
         return False
 
-    return _finish_run(
+    ok = _finish_run(
         project_root,
         config,
         issue,
@@ -452,9 +453,16 @@ def run_resume(
         runtime,
         outcome,
         open_pr=open_pr,
-        keep_worktree=False,
+        keep_worktree=keep_worktree,
         log=log,
     )
+    if ok:
+        # The findings have been addressed. Leaving them would silently feed a
+        # later cycle on this issue the *previous* cycle's review as the thing
+        # to fix — a misdirected run with no visible cause.
+        _feedback_path(project_root, issue_number).unlink(missing_ok=True)
+        _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
+    return ok
 
 
 def resume_command(
@@ -464,6 +472,7 @@ def resume_command(
     message_file: Path,
     runtime_name: str | None = None,
     open_pr: bool = True,
+    keep_worktree: bool = False,
 ) -> list[str]:
     """Argv that re-runs this resume inline, for spawning onto a surface.
 
@@ -484,6 +493,8 @@ def resume_command(
         command += ["--runtime", runtime_name]
     if not open_pr:
         command.append("--no-pr")
+    if keep_worktree:
+        command.append("--keep-worktree")
     return command + ["--project", str(project_root)]
 
 
@@ -496,6 +507,7 @@ def dispatch_resume(
     message_file: Path | None = None,
     runtime_name: str | None = None,
     open_pr: bool = True,
+    keep_worktree: bool = False,
 ) -> str:
     """Resolve the existing task worktree and spawn `agent resume` attached to it.
 
@@ -531,6 +543,7 @@ def dispatch_resume(
         message_file=feedback_path,
         runtime_name=runtime_name,
         open_pr=open_pr,
+        keep_worktree=keep_worktree,
     )
     return chosen.spawn(
         f"agent-resume-issue-{issue_number}", command, project_root, attach_path=wt_path
@@ -627,6 +640,12 @@ def _self_review(
     log: Callable[[str], None],
     runtime_override: str | None = None,
 ) -> SelfReview:
+    # Intent-to-add first: `git diff` ignores untracked files, so an
+    # implementer whose change is only *new* files — the common shape for "add
+    # X" issues — would otherwise produce an empty diff and go unreviewed, or
+    # in the mixed case get approved on the one modified file the reviewer
+    # could see. Harmless for the later `git add -A` + commit.
+    run(["git", "add", "-A", "-N"], cwd=wt_path, check=False)
     diff = run(["git", "diff"], cwd=wt_path).stdout
     if not diff.strip():
         log("self-review skipped: empty diff")
@@ -662,8 +681,13 @@ def _review_and_maybe_halt(
     if review.ok:
         return True
     if not review.reviewed:
-        # Nothing was reviewed, so there are no findings to record and nothing
-        # to tell the issue thread. Halt without the side effects.
+        # Nothing was reviewed. Still say the worktree was kept and still mark
+        # the card — a halt that logs nothing is the failure mode this whole
+        # issue is about. Only the issue comment and the feedback file are
+        # suppressed: "(empty diff — nothing to review)" is not a finding, and
+        # storing it would hand the next run a note that says nothing.
+        log(f"self-review had nothing to review; worktree kept at {wt_path}")
+        orca.report(wt_path, comment=f"#{issue_number}: self-review had nothing to review")
         return False
     log(f"self-review requested changes; worktree kept at {wt_path}")
     orca.report(wt_path, comment=f"#{issue_number}: self-review requested changes")
