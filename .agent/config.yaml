@@ -2,18 +2,6 @@
 
 base_branch: main
 
-# Smart tier (planner + reviewer) runs on Opus 5 — CLI alias `opus`, model id
-# claude-opus-5 — rather than the platform default of fable. Planning and
-# review are the highest-leverage tokens in the pipeline, and Opus 5 is the
-# strongest tier available for agentic work that this account can reliably
-# reach: fable hit its monthly spend limit on 2026-07-25 and, with no
-# `model_fallbacks` ladder shipped yet (issue #45), every smart-tier run failed
-# outright instead of stepping down. Retire this override once #45 lands a
-# fable → opus → sonnet ladder, which gets the same behaviour without pinning.
-model_tiers:
-  claude_code:
-    smart: opus
-
 commands:
   test: uv run pytest -q
   lint: uv run ruff check . && uv run ruff format --check .
