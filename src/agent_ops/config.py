@@ -94,6 +94,12 @@ class MergeConfig(BaseModel):
     )
 
 
+class ReviewConfig(BaseModel):
+    """Budget for the diff inlined into the reviewer prompt."""
+
+    max_diff_lines: int = 5000
+
+
 class ProjectConfig(BaseModel):
     base_branch: str = "main"
     worktree_dir: str = ".worktrees"
@@ -112,6 +118,7 @@ class ProjectConfig(BaseModel):
     # See docs/workflow.md for how to refresh a ladder against the Models API.
     model_fallbacks: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
     merge: MergeConfig = Field(default_factory=MergeConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
