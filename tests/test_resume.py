@@ -308,8 +308,9 @@ def test_empty_diff_halts_without_recording_findings_or_commenting(
 
     config = ProjectConfig()
     assert config.loop.self_review  # the halt path only runs when it's enabled
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
     proceed = implement_module._review_and_maybe_halt(
-        config, tmp_path, 40, tmp_path / "wt", runtime_name=None, log=lambda _: None
+        config, tmp_path, 40, tmp_path / "wt", card=card, runtime_name=None, log=lambda _: None
     )
 
     assert proceed is False
@@ -400,6 +401,7 @@ def test_finish_run_clears_the_stored_findings_on_success(
         RunRequest(prompt="p", cwd=repo / "wt"),
         cast("Any", None),  # only used for model attribution, never called here
         LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
         open_pr=False,
         keep_worktree=False,
         log=lambda _: None,

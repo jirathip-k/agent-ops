@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_ops import github, worktree
+from agent_ops import github, orca, worktree
 from agent_ops.config import ProjectConfig
 from agent_ops.runtimes.base import RunRequest, RunResult
 from agent_ops.workflows import implement as implement_module
@@ -93,6 +93,80 @@ def test_run_implement_force_skips_the_guard(
 
     with pytest.raises(_ReachedWorktreeCreate):
         run_implement(tmp_path, 132, force=True)
+
+
+def test_card_reporter_passes_the_project_root_as_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_report(
+        wt_path: Path,
+        *,
+        comment: str | None = None,
+        status: str | None = None,
+        fallback_path: Path | None = None,
+    ) -> bool:
+        captured.update(
+            wt_path=wt_path, comment=comment, status=status, fallback_path=fallback_path
+        )
+        return True
+
+    monkeypatch.setattr(implement_module.orca, "available", lambda: True)
+    monkeypatch.setattr(implement_module.orca, "report", fake_report)
+
+    wt_path = tmp_path / ".worktrees" / "issue-1"
+    reporter = implement_module._CardReporter(tmp_path, wt_path, lambda _msg: None)
+    reporter.note("planning", status=orca.STATUS_IN_PROGRESS)
+
+    assert captured == {
+        "wt_path": wt_path,
+        "comment": "planning",
+        "status": orca.STATUS_IN_PROGRESS,
+        "fallback_path": tmp_path,
+    }
+
+
+def test_card_reporter_warns_exactly_once_when_every_card_is_unindexed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(implement_module.orca, "available", lambda: True)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: False)
+
+    messages: list[str] = []
+    reporter = implement_module._CardReporter(tmp_path, tmp_path / "wt", messages.append)
+    reporter.note("setting up")
+    reporter.note("planning")
+    reporter.note("implementing")
+
+    assert len(messages) == 1
+    assert "not indexed" in messages[0]
+
+
+def test_card_reporter_stays_silent_when_orca_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(implement_module.orca, "available", lambda: False)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: False)
+
+    messages: list[str] = []
+    reporter = implement_module._CardReporter(tmp_path, tmp_path / "wt", messages.append)
+    reporter.note("setting up")
+
+    assert messages == []
+
+
+def test_card_reporter_stays_silent_when_the_card_updates_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(implement_module.orca, "available", lambda: True)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: True)
+
+    messages: list[str] = []
+    reporter = implement_module._CardReporter(tmp_path, tmp_path / "wt", messages.append)
+    reporter.note("setting up")
+
+    assert messages == []
 
 
 def test_format_comments_returns_sentinel_when_missing_or_empty() -> None:
@@ -207,3 +281,30 @@ def test_make_plan_includes_issue_comments_in_rendered_prompt(
 
     assert "## Agent spec" in captured["prompt"]
     assert "build on this instead of re-deriving" in captured["prompt"]
+
+
+def test_card_reporter_sticks_to_the_fallback_once_it_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later notes must not drift back to a worktree card with no terminal on it.
+
+    The surface gives up on the worktree card after ~4s, but Orca indexes it at
+    13-25s — so a non-sticky reporter sends "setting up" to the root card the
+    human is watching, then silently moves "implementing" and "PR opened" to a
+    card nobody has open.
+    """
+    targets: list[Path] = []
+
+    def fake_report(path, *, comment=None, status=None, fallback_path=None):
+        targets.append(path)
+        return fallback_path if path == Path("/wt") else path
+
+    monkeypatch.setattr(implement_module.orca, "report", fake_report)
+    monkeypatch.setattr(implement_module.orca, "available", lambda: True)
+
+    reporter = implement_module._CardReporter(Path("/repo"), Path("/wt"), lambda _: None)
+    reporter.note("setting up")
+    reporter.note("implementing")
+    reporter.note("PR opened")
+
+    assert targets == [Path("/wt"), Path("/repo"), Path("/repo")]

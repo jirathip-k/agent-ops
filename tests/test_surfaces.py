@@ -129,8 +129,10 @@ def test_orca_surface_falls_back_to_project_root_after_persistent_selector_not_f
 
     assert "term_root" in where
     assert "fell back" in where
+    assert "/repo" in where  # states where the shell actually starts
     assert len(calls) == surfaces._ATTACH_ATTEMPTS + 1
     assert _worktree_selector(calls[-1]) == "path:/repo"
+    assert "project root" in calls[-1][calls[-1].index("--title") + 1]
 
 
 def test_orca_surface_raises_when_worktree_and_fallback_both_fail(
