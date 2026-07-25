@@ -150,15 +150,31 @@ jobs:
           echo "owner=${TARGET%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${TARGET##*/}" >> "$GITHUB_OUTPUT"
 
+      # continue-on-error matters here (#62): the `||` fallback below only
+      # rescues a *skipped* step. A failed one would take the whole triage job
+      # with it — and failure is most likely mid-rollout, when the secrets
+      # exist but the App isn't installed on this owner yet. Degrade to
+      # GITHUB_TOKEN instead of going hard down.
       - name: Mint a GitHub App token
         id: app_token
         if: steps.appcfg.outputs.enabled == 'true'
+        continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
           owner: ${{ steps.split.outputs.owner }}
           repositories: ${{ steps.split.outputs.name }}
+
+      # Never let the downgrade be silent — a quiet fallback is exactly what
+      # made #53 expensive to diagnose. `outcome` is 'skipped' when the
+      # credentials are unset, so this fires only on a real failure.
+      - name: Warn when the App token could not be minted
+        if: steps.app_token.outcome == 'failure'
+        env:
+          TARGET: ${{ inputs.target_repo }}
+        run: |
+          echo "::warning::AGENT_APP_ID/AGENT_APP_PRIVATE_KEY are set but no installation was found for ${TARGET} — pushing as github-actions[bot], whose runs are gated on manual approval. Install the App on this owner and grant it this repo."
 
       - name: Checkout target repo
         if: steps.precheck.outputs.count != '0'
