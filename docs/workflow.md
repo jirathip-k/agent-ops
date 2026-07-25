@@ -196,6 +196,27 @@ runs` row to affect either way. `stopped` is the state that used to be
 invisible: a worktree with no live process, no self-review halt file and no
 open PR is a run that died mid-way, not one still working.
 
+`agent dispatch` is fire-and-forget, so nothing tells the caller when a run
+ends. `agent runs --wait` closes that gap by polling and blocking instead of
+having to guess when to check back:
+
+```sh
+agent runs --wait                 # block until every currently-tracked run is terminal
+agent runs --wait 77              # block on just #77
+agent runs --wait --timeout 0     # no timeout (default is 3600s)
+agent runs --wait --interval 30   # poll every 30s instead of the 15s default (floor: 1s)
+```
+
+It prints each watched run's starting state, then only the transitions as
+they happen (`#77  running → done      PR #76`), so a caller sees progress
+without re-polling on its own. Exceeding `--timeout` exits 1 with a
+distinct "timed out" message — never silently indistinguishable from a run
+finishing, and waiting on an issue with no run at all (a typo, or one never
+dispatched) is likewise a distinct error, not a silent success. `stopped`
+only ends the wait once it holds for two consecutive polls — the moment
+right after `dispatch` and the moment `gh` is unreachable both look like a
+freshly-stopped run for a single poll.
+
 ## 4. Review & merge — humans own main
 
 ```sh
