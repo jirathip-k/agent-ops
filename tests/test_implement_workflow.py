@@ -281,3 +281,30 @@ def test_make_plan_includes_issue_comments_in_rendered_prompt(
 
     assert "## Agent spec" in captured["prompt"]
     assert "build on this instead of re-deriving" in captured["prompt"]
+
+
+def test_card_reporter_sticks_to_the_fallback_once_it_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later notes must not drift back to a worktree card with no terminal on it.
+
+    The surface gives up on the worktree card after ~4s, but Orca indexes it at
+    13-25s — so a non-sticky reporter sends "setting up" to the root card the
+    human is watching, then silently moves "implementing" and "PR opened" to a
+    card nobody has open.
+    """
+    targets: list[Path] = []
+
+    def fake_report(path, *, comment=None, status=None, fallback_path=None):
+        targets.append(path)
+        return fallback_path if path == Path("/wt") else path
+
+    monkeypatch.setattr(implement_module.orca, "report", fake_report)
+    monkeypatch.setattr(implement_module.orca, "available", lambda: True)
+
+    reporter = implement_module._CardReporter(Path("/repo"), Path("/wt"), lambda _: None)
+    reporter.note("setting up")
+    reporter.note("implementing")
+    reporter.note("PR opened")
+
+    assert targets == [Path("/wt"), Path("/repo"), Path("/repo")]

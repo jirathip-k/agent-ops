@@ -61,7 +61,7 @@ def report(
     comment: str | None = None,
     status: str | None = None,
     fallback_path: Path | None = None,
-) -> bool:
+) -> Path | None:
     """Best-effort: reflect pipeline state on the worktree's Orca card.
 
     Orca resolves external (agent-ops-created) worktrees through the `path:`
@@ -74,19 +74,26 @@ def report(
     retry once against another card (typically the project root) so the
     status lands somewhere visible rather than being dropped silently.
 
-    Returns whether a card was actually updated, so callers that print a
-    summary (`agent status --sync-orca`) can tell a no-op from a write. A card
+    Returns the card that was actually written, so callers that print a
+    summary (`agent status --sync-orca`) can tell a no-op from a write, and a
+    caller that fell back can keep writing where the human is looking. A card
     created moments ago may not exist yet — see `await_indexed`.
     """
     if (comment is None and status is None) or not available():
-        return False
+        return None
     ok, stderr = _set_card(wt_path, comment, status)
     if ok:
-        return True
+        return wt_path
     if fallback_path is None or fallback_path == wt_path or SELECTOR_NOT_FOUND not in stderr:
-        return False
-    ok, _ = _set_card(fallback_path, comment, status)
-    return ok
+        return None
+    # Relocate the comment only. `status` is the card's own workspace state —
+    # writing a run's status onto the project-root card would relabel `main`
+    # itself as in-progress. And a comment needs to say which worktree it is
+    # about once it's no longer on that worktree's card.
+    if comment is None:
+        return None
+    ok, _ = _set_card(fallback_path, f"{wt_path.name}: {comment}", None)
+    return fallback_path if ok else None
 
 
 def _set_card(path: Path, comment: str | None, status: str | None) -> tuple[bool, str]:

@@ -159,13 +159,21 @@ class _CardReporter:
     def __init__(self, project_root: Path, wt_path: Path, log: Callable[[str], None]) -> None:
         self._project_root = project_root
         self._wt_path = wt_path
+        self._card = wt_path
         self._log = log
         self._warned = False
 
     def note(self, comment: str, *, status: str | None = None) -> None:
         ok = orca.report(
-            self._wt_path, comment=comment, status=status, fallback_path=self._project_root
+            self._card, comment=comment, status=status, fallback_path=self._project_root
         )
+        # Stick to the fallback once used. The surface gives up on the worktree
+        # card after ~4s and pins the terminal to the root card, but indexing
+        # lands at 13-25s — so without this, later notes would drift back to a
+        # worktree card that has no terminal on it, leaving the human watching
+        # a stale "planning" and never seeing "PR opened".
+        if ok == self._project_root:
+            self._card = self._project_root
         if ok or self._warned or not orca.available():
             return
         self._warned = True

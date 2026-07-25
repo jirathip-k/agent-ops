@@ -55,7 +55,7 @@ def test_report_signals_whether_the_card_was_written(monkeypatch: pytest.MonkeyP
         "run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="nope"),
     )
-    assert orca.report(Path("/wt"), comment="hi") is False
+    assert orca.report(Path("/wt"), comment="hi") is None
 
 
 def _worktree_selector(cmd: list[str]) -> str:
@@ -74,7 +74,7 @@ def test_report_indexed_card_makes_exactly_one_call(monkeypatch: pytest.MonkeyPa
 
     ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
 
-    assert ok is True
+    assert ok == Path("/wt")
     assert len(calls) == 1
     assert _worktree_selector(calls[0]) == "path:/wt"
 
@@ -95,7 +95,7 @@ def test_report_falls_back_to_project_root_when_worktree_card_is_unindexed(
 
     ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
 
-    assert ok is True
+    assert ok == Path("/repo")  # the caller needs to know where it landed
     assert len(calls) == 2
     assert _worktree_selector(calls[0]) == "path:/wt"
     assert _worktree_selector(calls[1]) == "path:/repo"
@@ -115,7 +115,7 @@ def test_report_returns_false_when_worktree_and_fallback_both_fail(
 
     ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
 
-    assert ok is False
+    assert ok is None
     assert len(calls) == 2
 
 
@@ -129,7 +129,7 @@ def test_report_does_not_retry_without_a_fallback_path(monkeypatch: pytest.Monke
     monkeypatch.setattr(orca, "available", lambda: True)
     monkeypatch.setattr(orca, "run", fake_run)
 
-    assert orca.report(Path("/wt"), comment="hi") is False
+    assert orca.report(Path("/wt"), comment="hi") is None
     assert len(calls) == 1
 
 
@@ -145,7 +145,7 @@ def test_report_does_not_retry_a_non_selector_failure(monkeypatch: pytest.Monkey
 
     ok = orca.report(Path("/wt"), comment="hi", fallback_path=Path("/repo"))
 
-    assert ok is False
+    assert ok is None
     assert len(calls) == 1
 
 
@@ -316,3 +316,53 @@ def test_cards_reads_worktrees_including_external_ones(monkeypatch: pytest.Monke
 def test_cards_skips_pathless_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     _json_run(monkeypatch, {"ok": True, "result": {"worktrees": [{"branch": "refs/heads/x"}]}})
     assert orca.cards("repo-1") == []
+
+
+def test_fallback_relocates_the_comment_but_never_the_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status is the card's own workspace state.
+
+    Writing a run's status onto the project-root card would relabel `main`
+    itself as in-progress, so only the comment is relocated — and it has to
+    name the worktree it's about, since it's no longer on that card.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if _worktree_selector(cmd) == "path:/repo":
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="selector_not_found")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    landed = orca.report(
+        Path("/wt/issue-68"),
+        comment="#68: implementing",
+        status=orca.STATUS_IN_PROGRESS,
+        fallback_path=Path("/repo"),
+    )
+
+    assert landed == Path("/repo")
+    fallback_cmd = calls[1]
+    assert "--workspace-status" not in fallback_cmd
+    assert "issue-68: #68: implementing" in fallback_cmd
+
+
+def test_status_only_report_is_not_relocated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no comment there is nothing safe to move — status alone must not travel."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="selector_not_found")
+
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "run", fake_run)
+
+    landed = orca.report(Path("/wt"), status=orca.STATUS_IN_REVIEW, fallback_path=Path("/repo"))
+
+    assert landed is None
+    assert len(calls) == 1  # never attempted the fallback
