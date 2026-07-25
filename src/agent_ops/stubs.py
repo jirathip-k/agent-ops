@@ -32,7 +32,8 @@ class TriageDrift:
     error: str | None = None
 
 
-def _load_jobs(path: Path) -> dict[str, object]:
+def _load_workflow(path: Path) -> tuple[dict[str, object], object]:
+    """The workflow's `jobs:` mapping and its workflow-level `permissions:` value."""
     try:
         parsed = yaml.safe_load(path.read_text())
     except OSError as exc:
@@ -44,37 +45,46 @@ def _load_jobs(path: Path) -> dict[str, object]:
     jobs = parsed.get("jobs") if isinstance(parsed, dict) else None
     if not isinstance(jobs, dict):
         raise ValueError(f"{path} has no jobs: mapping")
-    return jobs
+    workflow_permissions = parsed.get("permissions") if isinstance(parsed, dict) else None
+    return jobs, workflow_permissions
 
 
-def _section_keys(jobs: dict[str, object], section: str) -> set[str] | None:
-    """Keys under `section:` across all jobs, or None when a blanket grant satisfies everything."""
-    keys: set[str] = set()
-    for job in jobs.values():
-        if not isinstance(job, dict):
-            continue
-        value = job.get(section)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            if value in _SATISFIES_ALL[section]:
-                return None  # `secrets: inherit` / `permissions: write-all`
-            # `permissions: read-all` grants no write scope, and the stub's
-            # permissions are mostly writes — contribute nothing so the caller
-            # reports them, rather than reading as satisfied.
-            continue
-        if not isinstance(value, dict):
-            return None
-        keys.update(value.keys())
-    return keys
+def _job_section_keys(
+    job: dict[str, object], section: str, workflow_value: object
+) -> set[str] | None:
+    """One job's keys under `section:`, or None when a blanket grant satisfies every key.
+
+    GitHub allows `permissions:` at the workflow root, applying to every job
+    that doesn't declare its own — and a job-level block *replaces* it rather
+    than merging. Without that fallback, a caller that grants everything at the
+    top level reads as granting nothing, and doctor reports all seven
+    permissions missing on a correctly-configured repo.
+    """
+    value = job.get(section)
+    if value is None and section == "permissions":
+        value = workflow_value
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        if value in _SATISFIES_ALL[section]:
+            return None  # `secrets: inherit` / `permissions: write-all`
+        # `permissions: read-all` grants no write scope, and the stub's
+        # permissions are mostly writes — contribute nothing so they're
+        # reported, rather than reading as satisfied.
+        return set()
+    if not isinstance(value, dict):
+        return None
+    return set(value.keys())
 
 
-def _ordered_stub_keys(jobs: dict[str, object], section: str) -> list[str]:
+def _ordered_stub_keys(jobs: dict[str, object], section: str, workflow_value: object) -> list[str]:
     ordered: list[str] = []
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
         value = job.get(section)
+        if value is None and section == "permissions":
+            value = workflow_value
         if not isinstance(value, dict):
             continue
         for key in value:
@@ -99,10 +109,13 @@ def triage_caller_drift(root: Path) -> TriageDrift | None:
         return None
 
     try:
-        stub_jobs = _caller_jobs(_load_jobs(TRIAGE_STUB))
-        caller_jobs = _caller_jobs(_load_jobs(caller_path))
+        stub_all, stub_perms = _load_workflow(TRIAGE_STUB)
+        caller_all, caller_perms = _load_workflow(caller_path)
     except ValueError as exc:
         return TriageDrift([], [], error=str(exc))
+
+    stub_jobs = _caller_jobs(stub_all)
+    caller_jobs = _caller_jobs(caller_all)
 
     # A triage.yml that never calls the pipeline isn't a caller at all — same
     # answer as having no file, rather than a warning about secrets it has no
@@ -112,14 +125,21 @@ def triage_caller_drift(root: Path) -> TriageDrift | None:
 
     missing: dict[str, list[str]] = {}
     for section in _DRIFT_SECTIONS:
-        stub_keys = _ordered_stub_keys(stub_jobs, section)
+        stub_keys = _ordered_stub_keys(stub_jobs, section, stub_perms)
         if not stub_keys:
             missing[section] = []
             continue
-        caller_keys = _section_keys(caller_jobs, section)
-        if caller_keys is None:
-            missing[section] = []
-            continue
-        missing[section] = [key for key in stub_keys if key not in caller_keys]
+        # Per job, then union what's *missing* — unioning the keys each job
+        # has instead lets one caller job cover for another's gap, which is
+        # the exact silent failure this check exists to catch.
+        gaps: list[str] = []
+        for job in caller_jobs.values():
+            if not isinstance(job, dict):
+                continue
+            job_keys = _job_section_keys(job, section, caller_perms)
+            if job_keys is None:
+                continue  # blanket grant — this job is fully covered
+            gaps.extend(key for key in stub_keys if key not in job_keys and key not in gaps)
+        missing[section] = [key for key in stub_keys if key in gaps]
 
     return TriageDrift(secrets=missing["secrets"], permissions=missing["permissions"])

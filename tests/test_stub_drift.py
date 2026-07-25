@@ -229,3 +229,95 @@ def test_a_second_job_cannot_mask_the_caller_job_gap(tmp_path: Path) -> None:
 
     assert drift is not None
     assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
+
+
+def test_workflow_level_permissions_are_honoured(tmp_path: Path) -> None:
+    """GitHub applies root-level `permissions:` to jobs that declare none.
+
+    Reading only job-level values made a correctly-configured caller look like
+    it granted nothing — doctor reported all seven permissions missing and told
+    the user to duplicate a block they already had.
+    """
+    caller = """
+name: Hourly Agent Triage
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  checks: read
+  statuses: read
+  actions: read
+jobs:
+  triage:
+    uses: acme/agent-ops/.github/workflows/triage-pipeline.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}
+      AGENT_APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+"""
+    _write_caller(tmp_path, caller)
+
+    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+
+
+def test_job_permissions_replace_workflow_permissions(tmp_path: Path) -> None:
+    """Job-level `permissions:` replaces the workflow-level block, never merges with it."""
+    caller = """
+name: Hourly Agent Triage
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  checks: read
+  statuses: read
+  actions: read
+jobs:
+  triage:
+    permissions:
+      contents: write
+    uses: acme/agent-ops/.github/workflows/triage-pipeline.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}
+      AGENT_APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+"""
+    _write_caller(tmp_path, caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert "issues" in drift.permissions
+    assert "contents" not in drift.permissions
+
+
+def test_two_caller_jobs_do_not_cover_for_each_other(tmp_path: Path) -> None:
+    """A second call to the pipeline must not mask the first's missing secret."""
+    caller = (
+        IN_SYNC_CALLER
+        + """
+  triage-manual:
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+      checks: read
+      statuses: read
+      actions: read
+    uses: acme/agent-ops/.github/workflows/triage-pipeline.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+"""
+    )
+    _write_caller(tmp_path, caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
