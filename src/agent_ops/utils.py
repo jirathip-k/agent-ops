@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import subprocess
+from functools import partial
 from pathlib import Path
 
 # Repo root of the agent-ops platform itself (src layout: src/agent_ops/utils.py).
 # Requires an editable install (`uv tool install --editable .`) so prompts/,
 # skills/ and config/ resolve to the checked-out repo.
 PLATFORM_ROOT = Path(__file__).resolve().parents[2]
+
+# Default `log` callable for entry points whose output must precede a
+# stderr traceback under redirection (e.g. a fallback explanation before the
+# error it explains) — plain `print` buffers and can print after it.
+flush_print = partial(print, flush=True)
 
 
 class CommandError(RuntimeError):

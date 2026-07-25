@@ -11,7 +11,7 @@ from agent_ops.loop import run_task_loop
 from agent_ops.prompts import render_task
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import CommandError, flush_print, run
 
 NO_PLAN_TEXT = "(no planning stage — analyze the root cause yourself before editing)"
 
@@ -119,7 +119,7 @@ def run_implement(
     keep_worktree: bool = False,
     plan_file: Path | None = None,
     force: bool = False,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = flush_print,
 ) -> bool:
     """Issue → worktree → plan (smart model) → implement loop → self-review → PR.
 

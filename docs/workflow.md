@@ -206,7 +206,7 @@ model_tiers:
     fast: sonnet
 model_fallbacks:            # the full ladder, best first
   claude_code:
-    smart: [fable, opus]
+    smart: [fable, opus, sonnet]
     fast: [sonnet, haiku]
 ```
 
@@ -220,8 +220,17 @@ Rules worth knowing:
   names the model that produced it.
 - **A substitution holds for the rest of the run**, so a retry after a failed
   gate does not walk back into a model that just refused.
-- **Empty by default.** With no `model_fallbacks` configured, a run makes
-  exactly the calls it made before.
+- **Inert unless a rung is unavailable.** `config/defaults.yaml` ships a
+  ladder for the `claude_code` runtime out of the box; a project can override
+  or clear it via its own `model_fallbacks`, and a run that never hits an
+  availability failure makes exactly the calls it would have made anyway.
+- **Override `model_tiers`, override `model_fallbacks` too.** The ladder is
+  trimmed to the rungs *below* the active model, but only when that model
+  actually appears on the ladder. A project that repoints, say,
+  `model_tiers.claude_code.smart` at `haiku` while inheriting the default
+  `smart: [fable, opus, sonnet]` keeps the ladder whole — so an availability
+  failure steps *up* into models it never chose and never budgeted for. Set
+  both keys together, or clear `model_fallbacks` for that tier.
 - `agent doctor` prints the resolved model and ladder for every role.
 
 ### Refreshing the ladder

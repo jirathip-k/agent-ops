@@ -8,7 +8,7 @@ from agent_ops import github, surfaces
 from agent_ops.config import load_project_config
 from agent_ops.fallback import artifact_footer, model_note, run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import CommandError
+from agent_ops.utils import CommandError, flush_print
 from agent_ops.workflows.implement import role_request
 
 
@@ -66,7 +66,7 @@ def run_review(
     *,
     runtime_name: str | None = None,
     post_comment: bool = False,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = flush_print,
 ) -> str:
     """Run the reviewer role (read-only) over a PR diff; optionally post the result."""
     config = load_project_config(project_root)
