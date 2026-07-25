@@ -41,6 +41,16 @@ def _err(message: str) -> None:
     typer.secho(message, fg=typer.colors.RED, err=True)
 
 
+GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
+
+
+def _missing_gitignore_markers(root: Path) -> list[str]:
+    """Markers absent from the project's .gitignore (all of them if it has none)."""
+    gitignore = root / ".gitignore"
+    text = gitignore.read_text() if gitignore.exists() else ""
+    return [marker for marker in GITIGNORE_MARKERS if marker not in text]
+
+
 @app.command()
 def implement(
     issue: Annotated[int, typer.Argument(help="GitHub issue number to implement")],
@@ -397,11 +407,10 @@ def init(project: ProjectOpt = Path(".")) -> None:
         typer.echo(f"wrote {template_dst}")
 
     gitignore = root / ".gitignore"
-    for marker in (".worktrees/", ".agent-runs/"):
-        if not gitignore.exists() or marker not in gitignore.read_text():
-            with gitignore.open("a") as fh:
-                fh.write(f"\n{marker}\n")
-            typer.echo(f"added {marker} to .gitignore")
+    for marker in _missing_gitignore_markers(root):
+        with gitignore.open("a") as fh:
+            fh.write(f"\n{marker}\n")
+        typer.echo(f"added {marker} to .gitignore")
 
 
 @app.command()
@@ -436,6 +445,10 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
         _err(f"✗ config error: {exc}")
         ok = False
+
+    missing = _missing_gitignore_markers(project.resolve())
+    if missing:
+        typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
 
     raise typer.Exit(0 if ok else 1)
 
