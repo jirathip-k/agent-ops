@@ -53,6 +53,28 @@ def pr_references_issue(pr: dict[str, Any], issue_number: int) -> bool:
     return bool(pattern.search(text))
 
 
+def open_pr_numbers(base: str, cwd: Path) -> list[int]:
+    """Numbers of every open PR targeting `base`, ascending."""
+    proc = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--base",
+            base,
+            "--json",
+            "number",
+            "--limit",
+            "100",
+        ],
+        cwd=cwd,
+    )
+    prs: list[dict[str, Any]] = json.loads(proc.stdout)
+    return sorted(pr["number"] for pr in prs)
+
+
 def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
     """Open PRs that already reference this issue, for the dedupe guard.
 

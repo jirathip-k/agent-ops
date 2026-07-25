@@ -1,13 +1,22 @@
+import re
 from pathlib import Path
 
 import pytest
 
 from agent_ops import github
 from agent_ops.config import ProjectConfig, load_project_config
-from agent_ops.runtimes import RunRequest, RunResult
+from agent_ops.fallback import ModelUnavailableError
+from agent_ops.runtimes import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError
 from agent_ops.workflows import review as review_mod
-from agent_ops.workflows.review import budget_diff, run_review
+from agent_ops.workflows.review import (
+    ReviewOutcome,
+    budget_diff,
+    format_summary,
+    run_review,
+    run_reviews,
+    verdict_of,
+)
 
 
 def _file_diff(path: str, body_lines: int = 0) -> str:
@@ -185,3 +194,173 @@ def test_review_config_project_override(tmp_path: Path) -> None:
     _write_max_diff_lines(tmp_path, 250)
     config = load_project_config(tmp_path)
     assert config.review.max_diff_lines == 250
+
+
+# --- verdict_of ------------------------------------------------------------
+
+
+def test_verdict_of_approve() -> None:
+    assert verdict_of("VERDICT: APPROVE\n\nlooks fine") == "approve"
+
+
+def test_verdict_of_request_changes() -> None:
+    assert verdict_of("some preamble\nVERDICT: REQUEST CHANGES\n\nfix this") == "request_changes"
+
+
+def test_verdict_of_garbage_is_unknown() -> None:
+    assert verdict_of("this review has no verdict line at all") == "unknown"
+
+
+def test_verdict_of_tolerates_markdown_decoration() -> None:
+    assert verdict_of("**VERDICT: APPROVE**") == "approve"
+
+
+# --- run_reviews (multi-PR fan-out) ----------------------------------------
+
+
+def _pr_from_prompt(prompt: str) -> int:
+    match = re.search(r"PR #(\d+)", prompt)
+    assert match is not None
+    return int(match.group(1))
+
+
+class _MultiRuntime:
+    """Fake runtime whose result is keyed by the PR number embedded in the
+    rendered prompt (`run_review`'s `context=f"PR #{pr['number']}: ..."`).
+    """
+
+    name = "fake"
+
+    def __init__(
+        self,
+        results: dict[int, tuple[bool, str]] | None = None,
+        classify: FailureKind = FailureKind.AGENT_FAILURE,
+    ) -> None:
+        self.results = results or {}
+        self.classify = classify
+        self.calls: list[int] = []
+        self.requests: list[RunRequest] = []
+
+    def available(self) -> bool:
+        return True
+
+    def run(self, request: RunRequest) -> RunResult:
+        pr = _pr_from_prompt(request.prompt)
+        self.calls.append(pr)
+        self.requests.append(request)
+        ok, text = self.results.get(pr, (True, "VERDICT: APPROVE"))
+        return RunResult(ok=ok, text=text)
+
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        return self.classify
+
+
+def _stub_multi(monkeypatch: pytest.MonkeyPatch, runtime: _MultiRuntime) -> None:
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[_MultiRuntime, RunRequest]:
+        # stream=True mirrors the config default (RuntimeConfig.stream); the
+        # fan-out is what's responsible for forcing it back to False.
+        return runtime, RunRequest(prompt=prompt, cwd=cwd, stream=True)
+
+    def fake_pr_view(number: int, cwd: Path) -> dict[str, object]:
+        return {"number": number, "title": f"t{number}", "body": ""}
+
+    monkeypatch.setattr(review_mod, "role_request", fake_role_request)
+    monkeypatch.setattr(github, "pr_view", fake_pr_view)
+    monkeypatch.setattr(github, "pr_diff", lambda number, cwd: _file_diff(f"f{number}.py", 1))
+
+
+def test_run_reviews_happy_path_returns_outcomes_in_input_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime(
+        {
+            1: (True, "VERDICT: APPROVE"),
+            2: (True, "VERDICT: REQUEST CHANGES"),
+            3: (True, "no verdict line here"),
+        }
+    )
+    _stub_multi(monkeypatch, runtime)
+
+    outcomes = run_reviews(tmp_path, [1, 2, 3], jobs=3)
+
+    assert [o.pr for o in outcomes] == [1, 2, 3]
+    assert [o.status for o in outcomes] == ["approve", "request_changes", "unknown"]
+    assert sorted(runtime.calls) == [1, 2, 3]
+
+
+def test_run_reviews_aborts_queue_on_model_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime({2: (False, "no model left")}, classify=FailureKind.MODEL_UNAVAILABLE)
+    _stub_multi(monkeypatch, runtime)
+
+    outcomes = run_reviews(tmp_path, [1, 2, 3], jobs=1)
+
+    assert [o.pr for o in outcomes] == [1, 2, 3]
+    assert [o.status for o in outcomes] == ["approve", "failed", "skipped"]
+    # PR 3 must never have reached the runtime — the abort is a hard stop,
+    # not a "mark it failed after trying" gesture.
+    assert 3 not in runtime.calls
+
+
+def test_run_reviews_ordinary_failure_does_not_abort_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime({2: (False, "agent gave up")}, classify=FailureKind.AGENT_FAILURE)
+    _stub_multi(monkeypatch, runtime)
+
+    outcomes = run_reviews(tmp_path, [1, 2, 3], jobs=1)
+
+    assert [o.status for o in outcomes] == ["approve", "failed", "approve"]
+    assert sorted(runtime.calls) == [1, 2, 3]
+
+
+def test_run_reviews_post_comment_posts_once_per_pr_with_footer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime({1: (True, "VERDICT: APPROVE"), 2: (True, "VERDICT: APPROVE")})
+    _stub_multi(monkeypatch, runtime)
+    posted: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        github, "comment_on_pr", lambda number, body, cwd: posted.append((number, body))
+    )
+
+    run_reviews(tmp_path, [1, 2], jobs=2, post_comment=True)
+
+    assert sorted(number for number, _ in posted) == [1, 2]
+    assert all("_agent-ops · model:" in body for _, body in posted)
+
+
+def test_run_reviews_forces_stream_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _MultiRuntime()
+    _stub_multi(monkeypatch, runtime)
+
+    run_reviews(tmp_path, [1, 2], jobs=2)
+
+    assert all(request.stream is False for request in runtime.requests)
+
+
+def test_format_summary_distinguishes_statuses() -> None:
+    outcomes = [
+        ReviewOutcome(1, "approve", text="ok"),
+        ReviewOutcome(2, "request_changes", text="fix it"),
+        ReviewOutcome(3, "failed", error="boom"),
+        ReviewOutcome(4, "skipped"),
+    ]
+    summary = format_summary(outcomes)
+    assert "PR #1: APPROVE" in summary
+    assert "PR #2: REQUEST CHANGES" in summary
+    assert "PR #3: run failed" in summary
+    assert "PR #4: skipped" in summary
+
+
+def test_run_review_raises_model_unavailable_error_on_exhausted_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime({42: (False, "no model left")}, classify=FailureKind.MODEL_UNAVAILABLE)
+    _stub_multi(monkeypatch, runtime)
+
+    with pytest.raises(ModelUnavailableError):
+        run_review(tmp_path, 42)
