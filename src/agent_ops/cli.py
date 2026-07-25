@@ -7,10 +7,11 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, registry, surfaces, worktree
+from agent_ops import __version__, github, registry, stubs, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
+from agent_ops.stubs import triage_caller_drift
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
@@ -520,9 +521,30 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     if missing:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
 
-    drift = _checkout_drift(PLATFORM_ROOT)
-    if drift:
-        typer.echo(f"! {drift}")
+    drift = triage_caller_drift(project.resolve())
+    if drift is not None:
+        if drift.error:
+            typer.echo(f"! triage.yml drift check skipped: {drift.error}")
+        elif drift.secrets or drift.permissions:
+            parts = []
+            if drift.secrets:
+                parts.append(f"secrets: {', '.join(drift.secrets)}")
+            if drift.permissions:
+                parts.append(f"permissions: {', '.join(drift.permissions)}")
+            # Module attribute, not a from-import: tests patch stubs.TRIAGE_STUB,
+            # and a by-value import would leave this path pointing elsewhere.
+            # relative_to raises for a stub outside PLATFORM_ROOT, which only
+            # happens when it's been pointed elsewhere — fall back to the full
+            # path rather than turning a warning into a traceback.
+            try:
+                stub_rel = stubs.TRIAGE_STUB.relative_to(PLATFORM_ROOT)
+            except ValueError:
+                stub_rel = stubs.TRIAGE_STUB
+            caller_rel = drift.path or stubs.WORKFLOWS_REL
+            typer.echo(f"! {caller_rel} is behind {stub_rel} — missing {'; '.join(parts)}")
+    checkout_note = _checkout_drift(PLATFORM_ROOT)
+    if checkout_note:
+        typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
 
