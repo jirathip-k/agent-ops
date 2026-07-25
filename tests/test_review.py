@@ -101,6 +101,9 @@ class _FakeRuntime:
         self.received_prompt = request.prompt
         return RunResult(ok=self.ok, text=self.text)
 
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        return FailureKind.AGENT_FAILURE
+
 
 def _stub_role_request(monkeypatch: pytest.MonkeyPatch, runtime: _FakeRuntime) -> None:
     def fake_role_request(
@@ -364,3 +367,57 @@ def test_run_review_raises_model_unavailable_error_on_exhausted_ladder(
 
     with pytest.raises(ModelUnavailableError):
         run_review(tmp_path, 42)
+
+
+def test_run_review_post_comment_true_comments_on_the_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pr(monkeypatch, _file_diff("a.py", 1), pr_number=42)
+    runtime = _FakeRuntime(text="VERDICT: APPROVE\n\nlooks fine")
+    _stub_role_request(monkeypatch, runtime)
+    posted: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        github, "comment_on_pr", lambda number, body, cwd: posted.append((number, body))
+    )
+
+    result = run_review(tmp_path, 42, post_comment=True)
+
+    assert result == "VERDICT: APPROVE\n\nlooks fine"
+    assert len(posted) == 1
+    number, body = posted[0]
+    assert number == 42
+    assert body.startswith("## Agent review")
+    assert "_agent-ops · model:" in body
+
+
+def test_run_review_default_does_not_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pr(monkeypatch, _file_diff("a.py", 1), pr_number=42)
+    runtime = _FakeRuntime(text="VERDICT: APPROVE")
+    _stub_role_request(monkeypatch, runtime)
+
+    def fail_comment(*args: object, **kwargs: object) -> None:
+        raise AssertionError("comment_on_pr should not be called without post_comment=True")
+
+    monkeypatch.setattr(github, "comment_on_pr", fail_comment)
+
+    result = run_review(tmp_path, 42)
+
+    assert result == "VERDICT: APPROVE"
+
+
+def test_run_review_failed_run_raises_and_never_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pr(monkeypatch, _file_diff("a.py", 1), pr_number=42)
+    runtime = _FakeRuntime(text="agent gave up", ok=False)
+    _stub_role_request(monkeypatch, runtime)
+
+    def fail_comment(*args: object, **kwargs: object) -> None:
+        raise AssertionError("comment_on_pr should not be called when the run failed")
+
+    monkeypatch.setattr(github, "comment_on_pr", fail_comment)
+
+    with pytest.raises(RuntimeError, match="Review run failed"):
+        run_review(tmp_path, 42, post_comment=True)

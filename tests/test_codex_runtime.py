@@ -1,5 +1,11 @@
-from agent_ops.runtimes.base import FailureKind, RunResult
-from agent_ops.runtimes.codex import classify_failure
+import subprocess
+from pathlib import Path
+
+import pytest
+
+import agent_ops.runtimes.codex as codex_mod
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
+from agent_ops.runtimes.codex import CodexRuntime, classify_failure
 
 # The exact envelope `codex exec` wrote to stderr when `agent review --runtime
 # codex` handed it a Claude model name (issue #39). Kept verbatim — matching is
@@ -67,3 +73,117 @@ def test_bad_request_that_is_not_about_a_model_is_an_agent_failure() -> None:
 
 def test_plain_agent_output_is_an_agent_failure() -> None:
     assert classify_failure(_result(stdout="could not fix it")) is FailureKind.AGENT_FAILURE
+
+
+# --- CodexRuntime.run --------------------------------------------------------
+
+
+def _stub_run(
+    monkeypatch: pytest.MonkeyPatch, returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    monkeypatch.setattr(codex_mod, "run", fake_run)
+    return calls
+
+
+def test_run_builds_base_command_with_prompt_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_run(monkeypatch, stdout="done")
+    request = RunRequest(prompt="fix the bug", cwd=Path("."))
+
+    CodexRuntime().run(request)
+
+    assert calls == [["codex", "exec", "--full-auto", "--skip-git-repo-check", "fix the bug"]]
+
+
+def test_run_includes_model_flag_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_run(monkeypatch, stdout="done")
+    request = RunRequest(prompt="fix the bug", cwd=Path("."), model="o3")
+
+    CodexRuntime().run(request)
+
+    cmd = calls[0]
+    assert cmd[cmd.index("--model") : cmd.index("--model") + 2] == ["--model", "o3"]
+    assert cmd[-1] == "fix the bug"
+
+
+def test_run_omits_model_flag_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_run(monkeypatch, stdout="done")
+    request = RunRequest(prompt="fix the bug", cwd=Path("."))
+
+    CodexRuntime().run(request)
+
+    assert "--model" not in calls[0]
+
+
+def test_run_concatenates_system_prompt_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_run(monkeypatch, stdout="done")
+    request = RunRequest(prompt="fix the bug", cwd=Path("."), system_prompt="you are terse")
+
+    CodexRuntime().run(request)
+
+    assert calls[0][-1] == "you are terse\n\n---\n\nfix the bug"
+
+
+def test_run_uses_bare_prompt_when_system_prompt_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_run(monkeypatch, stdout="done")
+    request = RunRequest(prompt="fix the bug", cwd=Path("."))
+
+    CodexRuntime().run(request)
+
+    assert calls[0][-1] == "fix the bug"
+
+
+def test_run_forwards_cwd_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_cwd: list[Path | None] = []
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        captured_cwd.append(cwd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="done", stderr="")
+
+    monkeypatch.setattr(codex_mod, "run", fake_run)
+    request = RunRequest(prompt="fix the bug", cwd=Path("/tmp/work"))
+
+    CodexRuntime().run(request)
+
+    assert captured_cwd == [Path("/tmp/work")]
+
+
+def test_run_zero_exit_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run(monkeypatch, returncode=0, stdout="done")
+    result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
+    assert result.ok is True
+
+
+def test_run_nonzero_exit_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run(monkeypatch, returncode=1, stdout="", stderr="boom")
+    result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
+    assert result.ok is False
+
+
+def test_run_text_prefers_stripped_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run(monkeypatch, returncode=0, stdout="  the answer  \n", stderr="ignored")
+    result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
+    assert result.text == "the answer"
+
+
+def test_run_text_falls_back_to_stderr_when_stdout_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run(monkeypatch, returncode=1, stdout="   ", stderr="  the error  ")
+    result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
+    assert result.text == "the error"
+
+
+def test_run_raw_carries_stdout_stderr_and_returncode(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run(monkeypatch, returncode=1, stdout="out", stderr="err")
+    result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
+    assert result.raw == {"stdout": "out", "stderr": "err", "returncode": 1}
