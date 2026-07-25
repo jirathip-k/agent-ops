@@ -134,10 +134,12 @@ Parallelism is free because every task gets its own worktree — run several
 a new project, use `--no-pr` and inspect the kept worktree before pushing.
 
 Both `agent dispatch` and `agent implement` refuse to start when an open PR
-already references the issue (branch `fix/issue-N` or a `#N` mention in the
-title/body) — this is what stops the local lane and the CI lane from fixing
-the same issue twice. The message names the existing PR; pass `--force` to
-implement anyway (e.g. the match was a false positive).
+already references the issue (branch `fix/issue-N`, or a real GitHub closing
+reference — `Fixes`/`Closes`/`Resolves` `#N` — as GitHub itself parses it;
+a bare `#N` mention elsewhere in the title/body does not count) — this is
+what stops the local lane and the CI lane from fixing the same issue twice.
+The message names the existing PR; pass `--force` to implement anyway (e.g.
+the match was a false positive).
 
 ## 4. Review & merge — humans own main
 

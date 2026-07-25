@@ -7,10 +7,11 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, registry, surfaces, worktree
+from agent_ops import __version__, github, registry, stubs, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
+from agent_ops.stubs import triage_caller_drift
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
@@ -49,6 +50,64 @@ def _missing_gitignore_markers(root: Path) -> list[str]:
     gitignore = root / ".gitignore"
     text = gitignore.read_text() if gitignore.exists() else ""
     return [marker for marker in GITIGNORE_MARKERS if marker not in text]
+
+
+def _checkout_drift(root: Path) -> str | None:
+    """Warn when `root` (the editable install's tree) is behind/ahead of its upstream.
+
+    Uses only already-fetched refs — never runs `git fetch` — so `doctor` stays a
+    fast, network-free diagnostic. Silent (returns None) for anything that isn't a
+    plain, tracked, attached-HEAD git checkout, so it never tracebacks.
+    """
+    try:
+        if not root.is_dir():
+            return None
+        toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+        if toplevel.returncode != 0 or Path(toplevel.stdout.strip()) != root.resolve():
+            return None
+        head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+        if head.returncode != 0:
+            return None
+        upstream_name = run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if upstream_name.returncode != 0:
+            return None
+        upstream = upstream_name.stdout.strip()
+        counts = run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if counts.returncode != 0:
+            return None
+        parts = counts.stdout.strip().split()
+        if len(parts) != 2:
+            return None
+        ahead, behind = int(parts[0]), int(parts[1])
+        if ahead == 0 and behind == 0:
+            return None
+
+        def commits(n: int) -> str:
+            return f"{n} commit{'' if n == 1 else 's'}"
+
+        if behind and not ahead:
+            return (
+                f"agent-ops checkout is {commits(behind)} behind {upstream} — the editable "
+                f"install runs this tree; git -C {root} pull "
+                "(local refs; run git fetch for a current comparison)"
+            )
+        if ahead and not behind:
+            return f"agent-ops checkout is {commits(ahead)} ahead of {upstream} ({root})"
+        return (
+            f"agent-ops checkout has diverged from {upstream}: {commits(ahead)} ahead, "
+            f"{commits(behind)} behind ({root}) "
+            "(local refs; run git fetch for a current comparison)"
+        )
+    except Exception:  # noqa: BLE001 — doctor reports, never crashes
+        return None
 
 
 @app.command()
@@ -461,6 +520,31 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     missing = _missing_gitignore_markers(project.resolve())
     if missing:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
+
+    drift = triage_caller_drift(project.resolve())
+    if drift is not None:
+        if drift.error:
+            typer.echo(f"! triage.yml drift check skipped: {drift.error}")
+        elif drift.secrets or drift.permissions:
+            parts = []
+            if drift.secrets:
+                parts.append(f"secrets: {', '.join(drift.secrets)}")
+            if drift.permissions:
+                parts.append(f"permissions: {', '.join(drift.permissions)}")
+            # Module attribute, not a from-import: tests patch stubs.TRIAGE_STUB,
+            # and a by-value import would leave this path pointing elsewhere.
+            # relative_to raises for a stub outside PLATFORM_ROOT, which only
+            # happens when it's been pointed elsewhere — fall back to the full
+            # path rather than turning a warning into a traceback.
+            try:
+                stub_rel = stubs.TRIAGE_STUB.relative_to(PLATFORM_ROOT)
+            except ValueError:
+                stub_rel = stubs.TRIAGE_STUB
+            caller_rel = drift.path or stubs.WORKFLOWS_REL
+            typer.echo(f"! {caller_rel} is behind {stub_rel} — missing {'; '.join(parts)}")
+    checkout_note = _checkout_drift(PLATFORM_ROOT)
+    if checkout_note:
+        typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
 
