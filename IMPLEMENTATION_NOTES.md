@@ -112,3 +112,55 @@ In place of execution, I did the following manual verification instead:
 This is a best-effort substitute for real execution, not a replacement for
 it — the actual gate commands should be run in CI (or a sandbox where `uv`
 and unrestricted Python execution are available) before merge.
+
+## Revision round (test fix)
+
+CI came back red: `2 failed, 421 passed` in `tests/test_resume.py`, both new
+tests this PR added —
+`test_finish_run_writes_outcome_record_with_pr_url` and
+`test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_done`.
+
+Root cause: both tests call `_finish_run(..., open_pr=True, ...)` while
+passing `cast("Any", None)` for `runtime`. `_finish_run`'s pre-existing PR-body
+code dereferences `runtime.name` inside the `if open_pr:` block, so `None`
+blows up with `AttributeError: 'NoneType' object has no attribute 'name'`.
+This is a test bug, not a bug in `implement.py`/`runs.py` — the one
+pre-existing test that passes `cast("Any", None)` for `runtime`
+(`test_finish_run_clears_the_stored_findings_on_success`) deliberately uses
+`open_pr=False`, where `runtime` is never touched.
+
+Fix: added a module-level `_fake_runtime = cast("Any", SimpleNamespace(name="fake"))`
+in `tests/test_resume.py` and swapped it in for `cast("Any", None)` in exactly
+those two `open_pr=True` tests. The other two `_finish_run` tests in the file
+(`test_finish_run_clears_the_stored_findings_on_success`,
+`test_finish_run_writes_outcome_record_without_pr`) use `open_pr=False` and
+were left untouched, still passing `cast("Any", None)`.
+
+Considered reusing `ScriptedRuntime`/`FakeRuntime`/`_FakeRuntime` from
+`tests/test_fallback.py`/`test_loop.py`/`test_spec.py` per the tester's
+suggestion, but none are imported by `test_resume.py` today and each carries
+constructor state (`unavailable`, `tmp_path`/`fail_gate_times`, `text`/`ok`)
+that's irrelevant here; a bare `SimpleNamespace(name="fake")` is the minimal
+stand-in the two tests actually need, so no new cross-test-file import was
+added.
+
+No changes to `src/agent_ops/workflows/implement.py` or
+`src/agent_ops/runs.py` in this round — the tester confirmed both are correct
+as-is.
+
+### Gate results (this round)
+
+Same sandbox constraints as before: no `uv` binary, and direct `python3`
+invocations (`python3 -m pytest`, `pip3 --version`, etc.) are blocked by this
+sandbox's approval system even non-interactively. Not fabricating a result:
+
+- `uv run pytest -q` — NOT RUN locally; relying on CI for PR #93.
+- `uv run ruff check . && uv run ruff format --check .` — NOT RUN locally.
+- `uv run pyright` — NOT RUN locally.
+
+Manual check performed instead: re-read the full new diff, confirmed
+`cast("Any", None)` remains only on the two `open_pr=False` call sites,
+confirmed `_fake_runtime` is defined once above first use and referenced by
+name (no duplication), and confirmed the diff footprint is limited to
+`tests/test_resume.py` (one new import, one new module-level constant, two
+one-line argument swaps).

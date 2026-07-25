@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -47,6 +48,11 @@ class FakeSurface:
 
 def _fake_issue(number: int, cwd: Path) -> dict:
     return {"number": number, "title": "some bug", "body": "body", "labels": []}
+
+
+# `_finish_run` only reads `.name` off `runtime` for PR-body attribution, and only
+# when `open_pr=True`. Tests that exercise that path need a stand-in exposing it.
+_fake_runtime = cast("Any", SimpleNamespace(name="fake"))
 
 
 def test_resume_dispatches_to_the_existing_worktree(
@@ -441,7 +447,7 @@ def test_finish_run_writes_outcome_record_with_pr_url(
         "fix/issue-7",
         repo / "wt",
         RunRequest(prompt="p", cwd=repo / "wt"),
-        cast("Any", None),
+        _fake_runtime,
         LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
         card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
         open_pr=True,
@@ -510,7 +516,7 @@ def test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_
         "fix/issue-7",
         wt_path,
         RunRequest(prompt="p", cwd=wt_path),
-        cast("Any", None),
+        _fake_runtime,
         LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
         card=implement_module._CardReporter(repo, wt_path, lambda _: None),
         open_pr=True,
