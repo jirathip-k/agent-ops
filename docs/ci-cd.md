@@ -92,6 +92,65 @@ with verification steps that do not belong in a fire-and-forget job.
   target platform (Supabase function secrets, SWA/Vercel env vars), never
   in the repo.
 
+### GitHub App for pipeline pushes (avoiding action_required)
+
+The triage pipeline (`.github/workflows/triage-pipeline.yml`) pushes commits
+as part of the orchestrator loop. Pushes attributed to `github-actions[bot]`
+(the default `GITHUB_TOKEN` identity) get their workflow runs held at
+`completed/action_required`, which the pipeline's own auto-merge gate then
+reads as "no green check rollup" and blocks on. A GitHub App installation
+token avoids this, because App-authored runs are not subject to that gate
+(`jirathip-k/agent-ops#53`).
+
+**Create the App** — <https://github.com/settings/apps/new>:
+
+- Repository permissions: Contents **R/W**, Pull requests **R/W**,
+  Issues **R/W**, Checks **Read**, Metadata **Read**.
+- Webhook: uncheck **Active** — the pipeline polls; nothing is pushed to it.
+- **"Where can this GitHub App be installed?" → Any account.** Non-obvious,
+  and not relaxable later without recreating the App: the repos that call
+  the pipeline span three owners (`jirathip-k`, `sendmeter`,
+  `synergy-services-cooling-tower`), so "Only on this account" can't reach
+  two of them.
+- Remaining required-but-cosmetic fields: an App name (globally unique
+  across GitHub — it becomes the commit author on pipeline pushes),
+  Homepage URL, and leave Webhook URL / Callback URL / Setup URL blank with
+  "Request user authorization (OAuth) during installation" unchecked.
+- Generate a private key — the `.pem` downloads once.
+
+**Install it** on all three owners, granting the repos that call the
+pipeline: `jirathip-k/agent-ops`, `sendmeter/sendmeter`,
+`synergy-services-cooling-tower/synergy-costing`,
+`synergy-services-cooling-tower/synergy-inspection`.
+
+**Add secrets** to each of those repos:
+
+```
+gh secret set AGENT_APP_ID --repo <repo> --body <numeric app id>
+gh secret set AGENT_APP_PRIVATE_KEY --repo <repo> < /path/to/app.pem
+```
+
+The private key must be the whole `.pem`, BEGIN/END lines included.
+
+**Verify** — a pipeline push should produce a run whose `actor` is the App,
+not `github-actions[bot]`:
+
+```
+gh run list --repo <repo> --limit 5 --json actor,conclusion
+```
+
+**Fallback / unconfigured behavior**: with the secrets unset, the pipeline
+logs `::notice::AGENT_APP_ID/AGENT_APP_PRIVATE_KEY not set — pushing as
+github-actions[bot]. Workflow runs on pushed commits will be gated on manual
+approval (jirathip-k/agent-ops#53).` and pushes via `GITHUB_TOKEN`; those
+runs land as `action_required`, which is what blocks the auto-merge gate.
+There's also a partial-failure variant: secrets set but the App not
+installed on that owner degrades the same way (`continue-on-error`), with
+`::warning::AGENT_APP_ID/AGENT_APP_PRIVATE_KEY are set but no installation
+was found for <repo> — pushing as github-actions[bot], whose runs are gated
+on manual approval. Install the App on this owner and grant it this repo.`
+— a mid-rollout repo fails safe instead of breaking the job.
+
 ## Checklist for onboarding a repo
 
 1. Branches: `staging` + `main`, mapped as above.
@@ -149,6 +208,11 @@ because agent-ops is public and does not move.
    - **Claude Code app** (github.com/apps/claude) — without it the triage
      pipeline fails with "Claude Code is not installed on this repository"
      even though the OAuth token secret transferred fine.
+   - **The pipeline's own App-push credentials** (see "GitHub App for
+     pipeline pushes" above) are subject to the same rule — installing the
+     App on the new/transferred owner is required and does not happen
+     automatically; without it, pushes silently fall back to
+     `github-actions[bot]` and `action_required` gating resumes.
    - **Vercel app**, then relink the project to the new repo slug
      (`vercel git connect` fails with a generic "make sure you have
      access" error until the app is installed). Platform-side env vars
