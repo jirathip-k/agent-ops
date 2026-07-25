@@ -147,6 +147,42 @@ def dispatch_plan(
     return chosen.spawn(f"agent-plan-issue-{issue_number}", command, project_root)
 
 
+class _CardReporter:
+    """Wraps `orca.report` for one run: same fallback, one warning if it dies.
+
+    `orca.report`'s fallback to the project-root card covers the common case
+    (see `surfaces.OrcaSurface`, issue #20/#68); if both the worktree and the
+    root card fail, every subsequent `.note()` in this run would silently
+    drop status too — warn exactly once instead of staying quiet (issue #68).
+    """
+
+    def __init__(self, project_root: Path, wt_path: Path, log: Callable[[str], None]) -> None:
+        self._project_root = project_root
+        self._wt_path = wt_path
+        self._card = wt_path
+        self._log = log
+        self._warned = False
+
+    def note(self, comment: str, *, status: str | None = None) -> None:
+        ok = orca.report(
+            self._card, comment=comment, status=status, fallback_path=self._project_root
+        )
+        # Stick to the fallback once used. The surface gives up on the worktree
+        # card after ~4s and pins the terminal to the root card, but indexing
+        # lands at 13-25s — so without this, later notes would drift back to a
+        # worktree card that has no terminal on it, leaving the human watching
+        # a stale "planning" and never seeing "PR opened".
+        if ok == self._project_root:
+            self._card = self._project_root
+        if ok or self._warned or not orca.available():
+            return
+        self._warned = True
+        self._log(
+            f"Orca card {self._wt_path} is not indexed and neither is the project root card — "
+            "status updates for this run won't appear on any card"
+        )
+
+
 def run_implement(
     project_root: Path,
     issue_number: int,
@@ -185,7 +221,8 @@ def run_implement(
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
     )
-    orca.report(wt_path, comment=f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
+    card = _CardReporter(project_root, wt_path, log)
+    card.note(f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 
     if config.commands.setup:
         log(f"setup: {config.commands.setup}")
@@ -204,7 +241,7 @@ def run_implement(
     elif config.loop.plan:
         planner_role = config.resolve_role("planner", runtime_override=runtime_name)
         log(f"planning (model: {planner_role.model or 'default'})")
-        orca.report(wt_path, comment=f"#{issue_number}: planning")
+        card.note(f"#{issue_number}: planning")
         try:
             plan_request, plan_result = make_plan(
                 config, issue, wt_path, runtime_override=runtime_name, log=log
@@ -231,7 +268,7 @@ def run_implement(
         config, "implementer", prompt, wt_path, runtime_override=runtime_name
     )
 
-    orca.report(wt_path, comment=f"#{issue_number}: implementing")
+    card.note(f"#{issue_number}: implementing")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
     if not outcome.ok:
         failing = ", ".join(g.name for g in outcome.gate_failures)
@@ -239,14 +276,14 @@ def run_implement(
             f"FAILED after {outcome.attempts} attempts; worktree kept at {wt_path} "
             f"for inspection. Failing gates: {failing}"
         )
-        orca.report(wt_path, comment=f"#{issue_number}: FAILED gates ({failing}); worktree kept")
+        card.note(f"#{issue_number}: FAILED gates ({failing}); worktree kept")
         return False
 
     if config.loop.self_review and not _self_review_ok(
         config, wt_path, log=log, runtime_override=runtime_name
     ):
         log(f"self-review requested changes; worktree kept at {wt_path}")
-        orca.report(wt_path, comment=f"#{issue_number}: self-review requested changes")
+        card.note(f"#{issue_number}: self-review requested changes")
         return False
 
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip()
@@ -272,9 +309,7 @@ def run_implement(
             )
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         log(f"opened PR: {url}")
-        orca.report(
-            wt_path, comment=f"#{issue_number}: PR opened {url}", status=orca.STATUS_IN_REVIEW
-        )
+        card.note(f"#{issue_number}: PR opened {url}", status=orca.STATUS_IN_REVIEW)
         if config.loop.auto_merge:
             from agent_ops.workflows.merge import run_merge
 

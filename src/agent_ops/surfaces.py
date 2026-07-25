@@ -16,7 +16,6 @@ from agent_ops.utils import CommandError, run
 # monkeypatch `surfaces.time.sleep` without touching class internals.
 _ATTACH_ATTEMPTS = 3
 _ATTACH_DELAY_S = 2.0
-_SELECTOR_NOT_FOUND = "selector_not_found"
 
 
 class Surface(Protocol):
@@ -69,7 +68,7 @@ def _attempt_orca_attach(path: Path, label: str, command: list[str]) -> tuple[st
     )
     if proc.returncode != 0:
         stderr = proc.stderr.strip() or proc.stdout.strip()
-        if _SELECTOR_NOT_FOUND in stderr:
+        if orca.SELECTOR_NOT_FOUND in stderr:
             return None, stderr
         raise CommandError(f"`orca terminal create` failed:\n{stderr}")
     try:
@@ -113,11 +112,18 @@ class OrcaSurface:
 
         has_fallback = attach_path is not None and attach_path != cwd
         if has_fallback:
-            handle, stderr = _attempt_orca_attach(cwd, label, command)
+            # Orca has no flag to attach a terminal to one card while running
+            # the shell in another directory, so the fallback pane's shell
+            # sits at `cwd` (the primary branch checkout) even though the
+            # card says the worktree — say so plainly rather than leaving a
+            # human to discover it via `git status` (issue #68).
+            fallback_label = f"{label} (shell: project root, not the worktree)"
+            handle, stderr = _attempt_orca_attach(cwd, fallback_label, command)
             if handle is not None:
                 return (
-                    f"orca terminal {label!r} (handle {handle}; {target} not indexed "
-                    f"yet by Orca, fell back to project root card)"
+                    f"orca terminal {label!r} (handle {handle}; {target} not indexed yet by "
+                    f"Orca, fell back to project root card — shell starts at {cwd}, not "
+                    f"the worktree)"
                 )
             last_err = stderr
 
