@@ -47,6 +47,8 @@ agent plan 123 --post          # planner only (smart model, read-only) → issue
 agent plan 123 --surface orca  # same, but on a visible Orca terminal instead of inline
 agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
+agent resume 123               # rerun the implementer in the existing worktree
+agent resume 123 -m "..."      # ...with your feedback instead of the stored self-review
 agent review 45                # read-only review of PR #45 (add --post to comment)
 agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent review --all             # review every open PR targeting base_branch, concurrently
@@ -73,6 +75,17 @@ described in `docs/workflow.md`.
 The implement loop retries up to `loop.max_attempts` times; each retry is a
 fresh session fed the original task plus the gate-failure report. On failure
 the worktree is kept for inspection.
+
+When self-review requests changes, the worktree is kept, the findings are
+saved to `.agent-runs/issue-<N>-feedback.md`, and a `## Agent self-review`
+comment is posted on the issue as a human-visible marker that it's halted
+rather than unstarted (best-effort; a missing `gh` remote won't fail the run).
+`agent queue` doesn't read that comment — a halted issue keeps its
+`agent-ready` label and still shows up there.
+`agent resume <N>` picks that worktree back up: it defaults to the stored
+findings, or takes `--message`/`--message-file` to supply different feedback,
+and attaches to a surface the same way `agent dispatch` does. Feedback always
+reaches the agent via a file, never a shell-interpolated argument.
 
 ## CI lane (scheduled triage pipeline)
 

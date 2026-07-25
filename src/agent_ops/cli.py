@@ -15,9 +15,11 @@ from agent_ops.stubs import triage_caller_drift
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
+    dispatch_resume,
     dispatch_review,
     format_summary,
     run_implement,
+    run_resume,
     run_review,
     run_reviews,
 )
@@ -210,6 +212,63 @@ def dispatch(
         )
         raise typer.Exit(1) from exc
     typer.echo(f"dispatched issue #{issue} → {where}")
+
+
+@app.command()
+def resume(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number to resume")],
+    project: ProjectOpt = Path("."),
+    message: Annotated[
+        str | None, typer.Option("--message", "-m", help="Feedback for the agent")
+    ] = None,
+    message_file: Annotated[
+        Path | None,
+        typer.Option("--message-file", help="File containing feedback for the agent"),
+    ] = None,
+    runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
+    no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+    keep_worktree: Annotated[bool, typer.Option(help="Keep worktree after success")] = False,
+    surface: Annotated[
+        str,
+        typer.Option(help="Where to run: auto | orca | background | inline"),
+    ] = "auto",
+) -> None:
+    """Run an agent in an existing task worktree — the resume path after a self-review halt."""
+    root = project.resolve()
+
+    # inline is not the default here (unlike plan/review): resume's point is
+    # to be attached to a visible surface the same way dispatch is.
+    if surface == "inline":
+        try:
+            ok = run_resume(
+                root,
+                issue,
+                message=message,
+                message_file=message_file,
+                runtime_name=runtime,
+                open_pr=not no_pr,
+                keep_worktree=keep_worktree,
+            )
+        except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        raise typer.Exit(0 if ok else 1)
+
+    try:
+        where = dispatch_resume(
+            root,
+            issue,
+            surface_name=surface,
+            message=message,
+            message_file=message_file,
+            runtime_name=runtime,
+            open_pr=not no_pr,
+            keep_worktree=keep_worktree,
+        )
+    except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"resumed issue #{issue} → {where}")
 
 
 @app.command()
