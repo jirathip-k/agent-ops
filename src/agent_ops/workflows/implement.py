@@ -356,6 +356,11 @@ def _finish_run(
     if not keep_worktree:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
+    # Both callers, not just resume: a successful implement leaves any earlier
+    # cycle's findings behind too, and a later `agent resume` on this issue
+    # would silently hand the agent a review it has already addressed.
+    _feedback_path(project_root, issue_number).unlink(missing_ok=True)
+    _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
     return True
 
 
@@ -456,12 +461,6 @@ def run_resume(
         keep_worktree=keep_worktree,
         log=log,
     )
-    if ok:
-        # The findings have been addressed. Leaving them would silently feed a
-        # later cycle on this issue the *previous* cycle's review as the thing
-        # to fix — a misdirected run with no visible cause.
-        _feedback_path(project_root, issue_number).unlink(missing_ok=True)
-        _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
     return ok
 
 

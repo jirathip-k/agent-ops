@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -211,6 +211,10 @@ def test_run_implement_halt_writes_feedback_file_and_comments_on_the_issue(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(github, "get_issue", _fake_issue)
+    # Never reach a live `gh pr list`: utils.run raises FileNotFoundError when
+    # gh isn't installed, so an unstubbed call errors instead of testing the
+    # halt path (matches tests/test_implement_workflow.py).
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
     monkeypatch.setattr(
         implement_module,
         "role_request",
@@ -247,6 +251,10 @@ def test_run_implement_halt_survives_a_failed_issue_comment(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(github, "get_issue", _fake_issue)
+    # Never reach a live `gh pr list`: utils.run raises FileNotFoundError when
+    # gh isn't installed, so an unstubbed call errors instead of testing the
+    # halt path (matches tests/test_implement_workflow.py).
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
     monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
     monkeypatch.setattr(
         implement_module,
@@ -353,3 +361,50 @@ def test_self_review_reports_nothing_to_review_for_an_empty_diff(
 
     assert review.reviewed is False
     assert review.ok is False
+
+
+def test_finish_run_clears_the_stored_findings_on_success(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale findings must not outlive the cycle that produced them.
+
+    Lives in _finish_run rather than run_resume so a successful *implement*
+    clears them too: otherwise a later `agent resume` on the same issue is
+    handed a review that was already addressed, with no visible cause.
+    """
+    for path in (
+        implement_module._feedback_path(repo, 7),
+        implement_module._ad_hoc_message_path(repo, 7),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale findings from an earlier cycle")
+
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    # _finish_run stages and commits in the worktree; this test is about what
+    # happens after that, so the git calls are stubbed rather than staged.
+    monkeypatch.setattr(
+        implement_module,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
+    )
+
+    ok = implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        repo / "wt",
+        RunRequest(prompt="p", cwd=repo / "wt"),
+        cast("Any", None),  # only used for model attribution, never called here
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        open_pr=False,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    assert not implement_module._feedback_path(repo, 7).exists()
+    assert not implement_module._ad_hoc_message_path(repo, 7).exists()
