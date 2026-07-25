@@ -684,6 +684,19 @@ def status(
 
 
 @app.command()
+def runs(project: ProjectOpt = Path(".")) -> None:
+    """Per-issue run state — running / halted / stopped / done — derived from
+    worktrees, `.agent-runs/` feedback files and open PRs. No Orca dependency."""
+    from agent_ops.runs import report_runs
+
+    try:
+        report_runs(project.resolve())
+    except (CommandError, FileNotFoundError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+
+@app.command()
 def runtimes() -> None:
     """List available runtimes and whether their CLI is installed."""
     for name in runtime_names():

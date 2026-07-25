@@ -172,6 +172,27 @@ worktree-spawning surface's argv it is only ever a path, never inlined text —
 so it can't be mangled by shell quoting the way a hand-rolled
 `orca terminal create --command "$(cat …)"` invocation can.
 
+### Checking on a dispatched run
+
+`agent dispatch` hands the run to a detached surface — nothing reports back
+when it ends. `agent runs` answers "what is happening right now" from what's
+already durable, with no state file to go stale:
+
+```sh
+agent runs
+#77  running   worktree .worktrees/issue-77, pid 41233, 6m
+#73  halted    self-review — resume with `agent resume 73`
+#68  stopped   worktree kept, no PR, no feedback — inspect or re-dispatch
+#35  done      PR #76
+```
+
+Liveness is a real `ps` lookup for `agent implement`/`agent resume`, never a
+terminal-buffer read (Orca terminals go empty once they exit, so that signal
+is useless once you'd actually want it) — this works whether or not Orca is
+running. `stopped` is the state that used to be invisible: a worktree with no
+live process, no self-review halt file and no open PR is a run that died
+mid-way, not one still working.
+
 ## 4. Review & merge — humans own main
 
 ```sh
