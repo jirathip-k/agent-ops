@@ -62,9 +62,12 @@ Run them from the target project's root, not from agent-ops.
    grooming gate already decided this isn't agent-work; dispatching anyway
    just burns a planner run on an ESCALATE. Note the CI grooming lane may add
    those labels *after* you file an issue, so re-read them at dispatch time.
-8. **The planner never sees issue comments** (#29). A spec or plan posted as
-   a comment is invisible to it. Either put the spec in the issue **body**
-   (`gh issue edit --body-file`) or pass it with `--plan-file`.
+8. **The planner reads the issue thread** (#29, fixed in #52). An approved
+   `## Agent spec` / `## Agent plan` comment reaches it — pinned even when the
+   thread is long enough to push it past the recent-comment window. So a
+   posted spec no longer forces a workaround. `--plan-file` is still the
+   stronger option when you want the plan used *verbatim*: comments inform the
+   planner, a plan file replaces it.
 9. **Write plans from verified facts, not assumed ones.** A wrong claim about
    the data model in a plan file becomes a wrong implementation that passes
    its gates — self-review catches it, but each round costs a full run. Read
@@ -116,12 +119,10 @@ available surface automatically:
 - **orca** (if the Orca app is running): a named terminal attached to the
   issue's worktree card, so the run is visible and survives your session.
   Read it with `orca terminal read --terminal <handle> --limit <n>`.
-- **herdr** (if the Herdr server is up): new tab, agent process in the pane.
-  Check with `herdr tab list` / `herdr pane read <pane_id>`.
 - **background** (last-resort fallback): detached process logging to
   `<project>/.agent-runs/agent-issue-<N>.log`.
 
-Force one with `--surface orca|herdr|background`. New surfaces are one class
+Force one with `--surface orca|background`. New surfaces are one class
 in `src/agent_ops/surfaces.py`.
 
 **`dispatch` forwards `--plan-file`**, so an approved plan is never a reason
