@@ -51,11 +51,19 @@ The durable signals, all derivable:
 | stopped (died) | present | gone | absent | — |
 | done | removed | gone | absent | open |
 
-`agent runs` assembles these into one command (#78). Two traps it had to
-survive: `agent` is a console-script entry point, so a live run appears in `ps`
-as `python3 …/agent implement <N>`, never `agent`; and issue numbers collide
-across managed repos, so liveness must be scoped by the `--project` argument
-the dispatched argv already carries.
+`agent runs` assembles these into one command (#78). Building it took three
+self-review rounds, each finding a way the liveness signal lied:
+
+| Round | Failure | Why it was invisible |
+|---|---|---|
+| 1 | Matched a process named `agent`, which never exists | `agent` is a console-script entry point, so the shebang loader rewrites argv — a live run is `python3 …/agent implement <N>`. Every running dispatch would have reported `stopped` |
+| 2 | Matched machine-wide, on issue number alone | Issue numbers are small and collide across managed repos, so a live `agent implement 68 --project ~/Projects/sendmeter` would be reported as *this* repo's #68, with a foreign pid. The disambiguator was already in the argv: `--project` |
+| 3 | The `--project` filter dropped *true* positives | `args.split()` breaks a path containing a space into several tokens, so the declared root never matched and a live run reported `stopped`. An unreadable value means "unknown", not "elsewhere" |
+| 3 | A healthy in-flight `dispatch` reported `stopped`, advising "re-dispatch" | `dispatch` creates the worktree, then retries the Orca attach for ~4s before the child execs. Following that advice re-enters `worktree.create(reuse=True)`, which accepts the pristine checkout — putting **a second agent in the same worktree** |
+| 3 | The `ps` call itself had no test | Every test stubbed it. A flag or column-order change fails silently: liveness comes back empty and every run reports `stopped` |
+
+The pattern holds even here: each of these produced a confident, plausible
+answer that was wrong, rather than an error.
 
 ## Tests
 
@@ -70,3 +78,8 @@ day:
 
 For a fix whose whole value is preventing a silent regression, revert the fix
 and watch the test fail before trusting it.
+
+The same applies to the code under test: the one unstubbed thing in `agent
+runs` — the `ps` invocation — was the one thing no test touched. Stubbing the
+boundary is right for logic tests, but something must still exercise the real
+call, or the feature's central claim rests on nothing.
