@@ -292,6 +292,214 @@ def test_cli_runs_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert "stopped" in result.output
 
 
+# --- wait_for_runs --------------------------------------------------------
+
+
+def _polls(monkeypatch: pytest.MonkeyPatch, *rounds: list) -> None:
+    """Patch `runs.discover_runs` to return `rounds` in order, one per call.
+
+    Calls beyond the given rounds keep returning the last one, so a wait loop
+    that polls once more than expected doesn't crash — it just fails an
+    assertion on the extra, unexpected log line instead.
+    """
+    it = iter(rounds)
+    last: list = rounds[-1] if rounds else []
+
+    def fake(project_root: Path, log=print) -> list:
+        nonlocal last
+        last = next(it, last)
+        return last
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+
+
+def test_wait_for_runs_finishes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _polls(
+        monkeypatch,
+        [runs.Run(77, "running", "pid 1")],
+        [runs.Run(77, "done", "PR #76")],
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any("running" in line for line in lines[:1])  # streamed before the terminal line
+    assert any("running → done" in line and "PR #76" in line for line in lines)
+
+
+def test_wait_for_runs_halts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _polls(
+        monkeypatch,
+        [runs.Run(73, "running", "pid 1")],
+        [runs.Run(73, "halted", "self-review — resume with `agent resume 73`")],
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any("running → halted" in line for line in lines)
+
+
+def test_wait_for_runs_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    clock = iter([0.0, 0.0, 100.0])
+    monkeypatch.setattr(runs.time, "monotonic", lambda: next(clock, 100.0))
+
+    result = runs.wait_for_runs(tmp_path, timeout_s=10.0, interval_s=1.0, log=lambda m: None)
+
+    assert result is False
+    assert len(sleeps) >= 1
+
+
+def test_wait_for_runs_already_terminal_never_sleeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _polls(monkeypatch, [runs.Run(77, "done", "PR #76")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+
+    result = runs.wait_for_runs(tmp_path, log=lambda m: None)
+
+    assert result is True
+    assert sleeps == []
+
+
+def test_wait_for_runs_issue_filter_ignores_other_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _polls(
+        monkeypatch,
+        [runs.Run(77, "running", "x"), runs.Run(50, "running", "y")],
+        [runs.Run(77, "done", "PR #1"), runs.Run(50, "running", "y")],
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, issue=77, log=lines.append)
+
+    assert result is True
+    assert not any("#50" in line for line in lines)
+
+
+def test_wait_for_runs_unknown_issue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Waiting on an issue with no run at all is a caller error, not a finished run."""
+    _polls(monkeypatch, [])
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    lines: list[str] = []
+
+    with pytest.raises(CommandError, match="no run found for #99"):
+        runs.wait_for_runs(tmp_path, issue=99, log=lines.append)
+
+    assert sleeps == []
+
+
+def test_wait_for_runs_stopped_requires_two_consecutive_polls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single `stopped` observation must not end the wait: `dispatch`'s pre-spawn
+    window, and a `gh` outage degrading `done` to `stopped`, look identical to a
+    genuinely stopped run for one poll."""
+    _polls(
+        monkeypatch,
+        [runs.Run(77, "stopped", "worktree kept, no PR, no feedback — inspect")],
+        [runs.Run(77, "running", "pid 1")],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    clock = iter([0.0, 0.0, 100.0])
+    monkeypatch.setattr(runs.time, "monotonic", lambda: next(clock, 100.0))
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, timeout_s=10.0, interval_s=1.0, log=lines.append)
+
+    assert result is False
+    assert any("stopped → running" in line for line in lines)
+
+
+def test_wait_for_runs_watched_run_vanishes_mid_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [])
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any("gone" in line for line in lines)
+
+
+def test_wait_for_runs_dedups_repeated_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> list:
+        calls["n"] += 1
+        log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+        if calls["n"] >= 3:
+            return [runs.Run(77, "done", "PR #1")]
+        return [runs.Run(77, "running", "pid 1")]
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert sum(1 for line in lines if line.startswith("warning:")) == 1
+
+
+def test_cli_runs_wait_finishes_once_stopped_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stopped` held across two polls (nothing on disk changes) exits 0."""
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-68", "fix/issue-68")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+
+    result = cli_runner.invoke(app, ["runs", "68", "--wait", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "#68" in result.output
+    assert "stopped" in result.output
+
+
+def test_cli_runs_wait_timeout_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-68", "fix/issue-68")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "1 00:01 agent implement 68\n")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    clock = iter([0.0, 0.0, 100.0])
+    monkeypatch.setattr(runs.time, "monotonic", lambda: next(clock, 100.0))
+
+    result = cli_runner.invoke(
+        app, ["runs", "68", "--wait", "--timeout", "10", "--project", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "timed out" in result.output
+
+
 def test_ps_output_is_parseable_and_finds_this_process() -> None:
     """The one unstubbed call: `ps -ww -eo pid=,etime=,args=` on this host.
 

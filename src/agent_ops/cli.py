@@ -684,13 +684,39 @@ def status(
 
 
 @app.command()
-def runs(project: ProjectOpt = Path(".")) -> None:
+def runs(
+    issue: Annotated[int | None, typer.Argument(help="Show/wait on only this issue")] = None,
+    project: ProjectOpt = Path("."),
+    wait: Annotated[
+        bool,
+        typer.Option("--wait", "-w", help="Block until every tracked run reaches a terminal state"),
+    ] = False,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Seconds to wait before giving up (0 = no bound)")
+    ] = 3600.0,
+    interval: Annotated[
+        float,
+        typer.Option("--interval", help="Seconds between polls while waiting (floor: 1s)"),
+    ] = 15.0,
+) -> None:
     """Per-issue run state — running / halted / stopped / done — derived from
-    worktrees, `.agent-runs/` feedback files and open PRs. No Orca dependency."""
-    from agent_ops.runs import report_runs
+    worktrees, `.agent-runs/` feedback files and open PRs. No Orca dependency.
 
+    With --wait, blocks and prints transitions until every tracked run (or
+    just `issue`, if given) reaches a terminal state."""
+    from agent_ops.runs import report_runs, wait_for_runs
+
+    root = project.resolve()
     try:
-        report_runs(project.resolve())
+        if not wait:
+            report_runs(root, issue=issue)
+            return
+        timeout_s = None if timeout <= 0 else timeout
+        if wait_for_runs(root, issue=issue, timeout_s=timeout_s, interval_s=interval):
+            return
+        target = f"#{issue}" if issue is not None else "runs"
+        _err(f"timed out after {timeout:g}s waiting for {target}")
+        raise typer.Exit(1)
     except (CommandError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc

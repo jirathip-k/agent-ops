@@ -8,6 +8,7 @@ go stale or to reconcile after a crash.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,10 @@ _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
 _FEEDBACK_RE = re.compile(r"^issue-(\d+)-feedback\.md$")
 _LOG_RE = re.compile(r"^agent-issue-(\d+)\.log$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
+
+TERMINAL_STATES = ("done", "halted", "stopped")
+_POLL_INTERVAL_S = 15.0
+_DEFAULT_TIMEOUT_S = 3600.0
 
 
 @dataclass(frozen=True)
@@ -237,10 +242,113 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
     return runs
 
 
-def report_runs(project_root: Path, log: Callable[[str], None] = print) -> None:
+def report_runs(
+    project_root: Path, log: Callable[[str], None] = print, issue: int | None = None
+) -> None:
     runs = discover_runs(project_root, log=log)
+    if issue is not None:
+        runs = [r for r in runs if r.issue == issue]
     if not runs:
-        log("no agent runs found")
+        log(f"no run found for #{issue}" if issue is not None else "no agent runs found")
         return
     for r in runs:
         log(f"#{r.issue}  {r.state:<8}  {r.detail}")
+
+
+def _dedup_warnings(log: Callable[[str], None]) -> Callable[[str], None]:
+    """Wrap `log` so a warning repeated across polls (e.g. `gh` being down) prints once."""
+    seen: set[str] = set()
+
+    def wrapped(message: str) -> None:
+        if message.startswith("warning:"):
+            if message in seen:
+                return
+            seen.add(message)
+        log(message)
+
+    return wrapped
+
+
+def wait_for_runs(
+    project_root: Path,
+    *,
+    issue: int | None = None,
+    timeout_s: float | None = _DEFAULT_TIMEOUT_S,
+    interval_s: float = _POLL_INTERVAL_S,
+    log: Callable[[str], None] = print,
+) -> bool:
+    """Block until every watched run reaches a terminal state, printing transitions.
+
+    The watch set is fixed on the first poll: `issue` if given, else every
+    issue `discover_runs` finds at that moment. Runs that appear later are not
+    added — a caller waits for what existed when it asked. A watched issue
+    that later disappears entirely (worktree removed, PR merged) transitions
+    to `gone`, which counts as terminal.
+
+    `stopped` is not trusted on a single observation: `dispatch` leaves the
+    same signature (worktree exists, nothing live yet) for the few seconds
+    before the child `agent implement` execs, and a `gh` outage degrades a
+    real `done` to `stopped` too (`discover_runs`'s `prs = []` fallback). Both
+    look identical to a genuinely abandoned run for one poll. `stopped` only
+    counts as terminal once it has held for two consecutive polls; `done`,
+    `halted` and `gone` come from positive evidence and count immediately.
+
+    Returns True once every watched issue is terminal (including the
+    nothing-to-watch case), False if `timeout_s` elapses first. `timeout_s`
+    of None waits forever. One poll always happens before the deadline is
+    checked, so a run already terminal returns immediately without sleeping.
+    Raises CommandError if an explicitly named `issue` has no run at all —
+    unlike the no-issue case, there is nothing to wait on, which a caller
+    should not mistake for a run finishing.
+    """
+    log = _dedup_warnings(log)
+    interval_s = max(1.0, interval_s)
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+
+    watch: set[int] | None = None
+    states: dict[int, str] = {}
+    stopped_streak: dict[int, int] = {}
+
+    def is_terminal(i: int) -> bool:
+        state = states[i]
+        if state == "stopped":
+            return stopped_streak.get(i, 0) >= 2
+        return state in TERMINAL_STATES or state == "gone"
+
+    while True:
+        found = {r.issue: r for r in discover_runs(project_root, log=log)}
+
+        if watch is None:
+            if issue is not None:
+                if issue not in found:
+                    raise CommandError(f"no run found for #{issue} — nothing to wait on")
+                watch = {issue}
+            else:
+                watch = set(found)
+                if not watch:
+                    log("no agent runs found")
+                    return True
+            for i in sorted(watch):
+                r = found[i]
+                log(f"#{i}  {r.state:<8}  {r.detail}")
+                states[i] = r.state
+                stopped_streak[i] = 1 if r.state == "stopped" else 0
+        else:
+            for i in sorted(watch):
+                r = found.get(i)
+                state = r.state if r is not None else "gone"
+                stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
+                if state != states[i]:
+                    line = f"#{i}  {states[i]} → {state:<8}"
+                    if r is not None:
+                        line += f"  {r.detail}"
+                    log(line)
+                    states[i] = state
+
+        if all(is_terminal(i) for i in watch):
+            return True
+
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return False
+        time.sleep(interval_s if remaining is None else min(interval_s, remaining))
