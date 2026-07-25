@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +43,34 @@ class ClaudeCodeRuntime:
             stderr=subprocess.PIPE,
             text=True,
         )
-        assert proc.stdin is not None and proc.stdout is not None
-        proc.stdin.write(request.prompt)
-        proc.stdin.close()
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        stdin = proc.stdin
+        stdout = proc.stdout
+        stderr_pipe = proc.stderr
+
+        def _write_stdin() -> None:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                stdin.write(request.prompt)
+                stdin.close()
+
+        stderr_chunks: list[str] = [""]
+
+        def _read_stderr() -> None:
+            # Unlike `_write_stdin`, a *read* here has no BrokenPipeError hazard:
+            # the child holds its stderr write-end open for its whole life, so
+            # there's no early-exit race to suppress. `OSError` is still guarded
+            # defensively (e.g. the fd getting torn down from elsewhere) so a
+            # rare, unrelated failure here can't crash this daemon thread.
+            with contextlib.suppress(OSError):
+                stderr_chunks[0] = stderr_pipe.read()
+
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stdin_thread.start()
+        stderr_thread.start()
 
         final: dict[str, Any] | None = None
-        for line in proc.stdout:
+        for line in stdout:
             line = line.strip()
             if not line:
                 continue
@@ -62,7 +86,9 @@ class ClaudeCodeRuntime:
                 print(summary, flush=True)
 
         returncode = proc.wait()
-        stderr = proc.stderr.read() if proc.stderr else ""
+        stdin_thread.join()
+        stderr_thread.join()
+        stderr = stderr_chunks[0]
         if final is None:
             return RunResult(ok=returncode == 0, text=stderr.strip())
         return result_from_json(final, returncode)

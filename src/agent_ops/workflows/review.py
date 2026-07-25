@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_ops import github
+from agent_ops import github, surfaces
 from agent_ops.config import load_project_config
 from agent_ops.prompts import render_task
 from agent_ops.utils import CommandError
@@ -107,3 +107,40 @@ def run_review(
         github.comment_on_pr(pr_number, f"## Agent review\n\n{result.text}", cwd=project_root)
         log(f"posted review comment on PR #{pr_number}")
     return result.text
+
+
+def review_command(
+    project_root: Path,
+    pr_number: int,
+    *,
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> list[str]:
+    """Argv that re-runs this review inline, for spawning onto a surface."""
+    command = ["agent", "review", str(pr_number)]
+    if post_comment:
+        command.append("--post")
+    if runtime_name:
+        command += ["--runtime", runtime_name]
+    return command + ["--project", str(project_root)]
+
+
+def dispatch_review(
+    project_root: Path,
+    pr_number: int,
+    *,
+    surface_name: str = "auto",
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> str:
+    """Spawn `agent review` on a visible surface; return a 'where it went' string.
+
+    Unlike `agent dispatch` there is no task worktree to attach to — a review
+    is read-only and runs against the project root — so the run is shown on the
+    project's own card.
+    """
+    chosen = surfaces.pick(surface_name)
+    command = review_command(
+        project_root, pr_number, post_comment=post_comment, runtime_name=runtime_name
+    )
+    return chosen.spawn(f"agent-review-pr-{pr_number}", command, project_root)
