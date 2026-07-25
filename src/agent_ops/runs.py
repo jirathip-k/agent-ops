@@ -50,13 +50,35 @@ def _fmt_elapsed(etime: str) -> str:
 
 
 def live_runs(ps_output: str, project_root: Path | None = None) -> dict[int, tuple[int, str, str]]:
-    """issue number → (pid, etime) for every `agent implement|resume <N>` process.
+    """issue number → (pid, etime, verb) for every live `agent implement|resume|dispatch` process.
 
     Matches when `agent` (or `agent.exe`) is the invoked program itself — either
     the first argv token, or the second when the kernel has expanded the
     `#!.../python` shebang of the `agent` console-script and put the interpreter
     first. Not merely present somewhere in the command line, which would also
     catch something like `grep agent implement 77`.
+
+    The verb and issue number are found by scanning rather than by position,
+    since click accepts options interleaved with the issue argument (e.g.
+    `agent implement --project /repo 77`, a shape a human typing by hand will
+    produce sooner or later).
+
+    `plan`, `spec`, `review`, `groom` and `scout` are deliberately excluded,
+    not merely unimplemented:
+    - `classify()` maps liveness onto a `fix/issue-N` worktree row, so
+      `running` means "that worktree has an owner". Only implement/resume/
+      dispatch ever own one; a read-only `plan` or `review` process would
+      mask a genuinely dead implement worktree — the same stopped-while-live
+      inversion this command exists to prevent, pointed the other way.
+    - `review` is keyed by PR number, which would collide with issue keys in
+      this function's return type.
+    - `spec` and `groom` do create worktrees, but detached ones
+      (`worktree.create_detached`), which `worktree.list_worktrees` doesn't
+      surface, and they write nothing under `.agent-runs/`, so they produce
+      no `_FEEDBACK_RE`/`_LOG_RE` candidate either — a live one is not a
+      `discover_runs` candidate in the first place and has no row to report.
+    - `plan` has no worktree and `scout` and `groom` take no issue argument,
+      so none of the three has an issue number to key this dict on regardless.
 
     Issue numbers are per-repo and small, so they collide across the repos
     this tool manages. Every dispatched run carries `--project <root>`
@@ -75,18 +97,18 @@ def live_runs(ps_output: str, project_root: Path | None = None) -> dict[int, tup
             continue
         tokens = args.split()
         start = 1 if tokens and Path(tokens[0]).name.startswith("python") else 0
-        if len(tokens) < start + 3:
+        if len(tokens) < start + 2:
             continue
-        program, verb, issue_s = (
-            Path(tokens[start]).name,
-            tokens[start + 1],
-            tokens[start + 2],
-        )
-        if program not in ("agent", "agent.exe") or verb not in _RUN_VERBS:
+        program = Path(tokens[start]).name
+        if program not in ("agent", "agent.exe"):
             continue
-        if not issue_s.isdigit():
+        rest = tokens[start + 1 :]
+        verb = rest[0]
+        if verb not in _RUN_VERBS:
             continue
-        rest = tokens[start + 3 :]
+        issue_s = _find_issue(rest[1:])
+        if issue_s is None:
+            continue
         declared = _declared_project(rest)
         # Exclude only when the declared root is confidently parsed and differs.
         # A path containing a space survives `args.split()` as several tokens, so
@@ -105,7 +127,56 @@ def live_runs(ps_output: str, project_root: Path | None = None) -> dict[int, tup
 # `dispatch` counts as live: it creates the worktree, then retries the Orca
 # attach for up to ~4s before the child `agent implement` execs. Excluding it
 # reports a healthy in-flight run as `stopped` for those seconds.
+#
+# `plan`, `spec`, `review`, `groom` and `scout` are deliberately excluded —
+# see the `live_runs` docstring for why each one is out.
 _RUN_VERBS = ("implement", "resume", "dispatch")
+
+# Flags of implement/resume/dispatch that take a value in the following
+# token, so the scan for the issue number must skip both. `=`-forms (e.g.
+# `--project=/repo`) carry their own value and don't need this table.
+_VALUE_FLAGS = {
+    "--project",
+    "-C",
+    "--runtime",
+    "--plan-file",
+    "--message-file",
+    "--surface",
+}
+
+# `--message`/`-m` take free text, which `ps`'s `args` survives as however
+# many space-split tokens the message contains — not the single token
+# `_VALUE_FLAGS` skips. Handled separately in `_find_issue`: reaching one of
+# these before a digit makes everything after it ambiguous.
+_FREE_TEXT_FLAGS = {"--message", "-m"}
+
+
+def _find_issue(tokens: list[str]) -> str | None:
+    """The first bare-digit token, skipping option flags and their values.
+
+    An unrecognized `-`-prefixed token is treated as boolean (skip only
+    itself) rather than dropping the scan — that direction keeps the digit
+    reachable and so fails toward `running`, matching this module's existing
+    bias against false negatives.
+
+    `--message`/`-m` is the opposite case: a quoted message arrives here as
+    several tokens, not one, so there is no fixed number of tokens to skip.
+    If one of them is reached before any bare digit, the rest of the scan is
+    unreliable — return None rather than keying the run off a stray digit
+    inside the message text.
+    """
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.isdigit():
+            return token
+        if token in _FREE_TEXT_FLAGS:
+            return None
+        if token.startswith("-") and "=" not in token and token in _VALUE_FLAGS:
+            i += 2
+        else:
+            i += 1
+    return None
 
 
 def _declared_project(rest: list[str]) -> Path | None:
