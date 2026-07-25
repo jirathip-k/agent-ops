@@ -7,6 +7,7 @@ go stale or to reconcile after a crash.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from agent_ops.utils import CommandError, run
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
 _FEEDBACK_RE = re.compile(r"^issue-(\d+)-feedback\.md$")
 _LOG_RE = re.compile(r"^agent-issue-(\d+)\.log$")
+_OUTCOME_RE = re.compile(r"^issue-(\d+)-outcome\.json$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 
 TERMINAL_STATES = ("done", "halted", "stopped")
@@ -30,6 +32,7 @@ _DEFAULT_TIMEOUT_S = 3600.0
 # the default interval: comfortably above the 2-poll dispatch debounce, far
 # short of the hour-long default timeout.
 _MAX_DEGRADED_POLLS = 4
+_OUTCOME_TTL_S = 7 * 24 * 3600.0  # 7 days — a recent-activity view, not a log
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,13 @@ class Run:
     issue: int
     state: str  # running | halted | stopped | done
     detail: str
+
+
+@dataclass(frozen=True)
+class Outcome:
+    state: str
+    pr_url: str | None
+    reason: str | None
 
 
 def _fmt_elapsed(etime: str) -> str:
@@ -238,6 +248,17 @@ def _ps_output(log: Callable[[str], None]) -> str:
     return proc.stdout
 
 
+def _outcome_detail(outcome: Outcome) -> str:
+    """Render an `Outcome` the same way `classify` renders a live open PR."""
+    if outcome.pr_url is not None:
+        try:
+            number = int(outcome.pr_url.rstrip("/").rsplit("/", 1)[-1])
+        except ValueError:
+            return outcome.pr_url
+        return f"PR #{number} — {outcome.pr_url}"
+    return outcome.reason or "(recorded)"
+
+
 def classify(
     issue: int,
     *,
@@ -245,12 +266,19 @@ def classify(
     live: tuple[int, str, str] | None,
     has_feedback: bool,
     pr: dict[str, Any] | None,
+    outcome: Outcome | None = None,
 ) -> Run | None:
     """One issue's state from its signals, in the precedence the issue lays out.
 
     A live process outranks a halt file: `agent resume` leaves the feedback
     file in place while it runs, so without this order a live resume would
     misreport as still-halted.
+
+    A durable `outcome` record (written by `_finish_run` on the way out, issue
+    #87) outranks a feedback file: without this, a stale halt file left behind
+    by a run that was never cleanly resumed through `_finish_run` would report
+    `halted` forever, even after the outcome it recorded (e.g. a merged PR)
+    supersedes it (issue #78).
     """
     if live is not None:
         pid, etime, verb = live
@@ -262,6 +290,8 @@ def classify(
         if verb == "dispatch":
             detail = f"dispatching — {detail}"
         return Run(issue, "running", detail)
+    if outcome is not None:
+        return Run(issue, outcome.state, _outcome_detail(outcome))
     if has_feedback:
         return Run(issue, "halted", f"self-review — resume with `agent resume {issue}`")
     if pr is not None:
@@ -283,6 +313,39 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
     return issues
 
 
+def _load_outcomes(
+    run_files: list[Path], now: float, log: Callable[[str], None]
+) -> dict[int, Outcome]:
+    """Parse every `issue-N-outcome.json`, pruning ones older than `_OUTCOME_TTL_S`.
+
+    Pruning is keyed on the file's own mtime, not the JSON's `finished_at`
+    field, so a corrupt file still ages out instead of lingering forever —
+    this is a recent-activity view, not an audit log.
+    """
+    outcomes: dict[int, Outcome] = {}
+    for path in run_files:
+        match = _OUTCOME_RE.match(path.name)
+        if match is None:
+            continue
+        issue = int(match.group(1))
+        try:
+            age = now - path.stat().st_mtime
+        except OSError as exc:
+            log(f"warning: could not stat outcome record {path}: {exc}")
+            continue
+        if age > _OUTCOME_TTL_S:
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            data = json.loads(path.read_text())
+            outcomes[issue] = Outcome(
+                state=data["state"], pr_url=data.get("pr_url"), reason=data.get("reason")
+            )
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            log(f"warning: could not read outcome record {path}: {exc}")
+    return outcomes
+
+
 def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tuple[list[Run], bool]:
     """Every issue with a run signal, newest first, plus whether this poll's
     signals are trustworthy.
@@ -292,6 +355,10 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     that shape is indistinguishable from a genuinely stopped/gone run, so a
     caller comparing across polls (`wait_for_runs`) needs to know not to
     trust it as positive evidence of either.
+
+    Outcome records are not part of that judgement: they are read straight off
+    the local `.agent-runs/` directory, with no `gh`/`git` call that could
+    degrade, so a poll that finds one is as trustworthy as the filesystem.
     """
     trustworthy = True
 
@@ -311,8 +378,9 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     run_files = list(runs_dir.iterdir()) if runs_dir.is_dir() else []
     feedback_issues = _matches(_FEEDBACK_RE, run_files)
     log_issues = _matches(_LOG_RE, run_files)
+    outcomes = _load_outcomes(run_files, time.time(), log)
 
-    candidates = set(worktree_by_issue) | feedback_issues | log_issues
+    candidates = set(worktree_by_issue) | feedback_issues | log_issues | set(outcomes)
     if not candidates:
         return [], trustworthy
 
@@ -346,6 +414,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
             live=live.get(issue),
             has_feedback=issue in feedback_issues,
             pr=pr_by_issue.get(issue),
+            outcome=outcomes.get(issue),
         )
         if found is not None:
             runs.append(found)

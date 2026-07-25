@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -5,7 +6,7 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import github, surfaces, worktree
+from agent_ops import github, runs, surfaces, worktree
 from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
 from agent_ops.loop import LoopOutcome
@@ -410,6 +411,120 @@ def test_finish_run_clears_the_stored_findings_on_success(
     assert ok is True
     assert not implement_module._feedback_path(repo, 7).exists()
     assert not implement_module._ad_hoc_message_path(repo, 7).exists()
+
+
+def _stub_finish_run_git_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
+    )
+
+
+def test_finish_run_writes_outcome_record_with_pr_url(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #87: the durable record is what lets a finished run still show
+    `done` once the worktree/feedback/open-PR signals it normally reads are
+    gone."""
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
+
+    ok = implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        repo / "wt",
+        RunRequest(prompt="p", cwd=repo / "wt"),
+        cast("Any", None),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    outcome_path = implement_module._outcome_path(repo, 7)
+    assert outcome_path.is_file()
+    data = json.loads(outcome_path.read_text())
+    assert data["state"] == "done"
+    assert data["pr_url"] == "https://x/pull/76"
+
+
+def test_finish_run_writes_outcome_record_without_pr(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+
+    ok = implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        repo / "wt",
+        RunRequest(prompt="p", cwd=repo / "wt"),
+        cast("Any", None),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
+        open_pr=False,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    data = json.loads(implement_module._outcome_path(repo, 7).read_text())
+    assert data["state"] == "done"
+    assert data["pr_url"] is None
+
+
+def test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_done(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: once `_finish_run` really removes the worktree, `agent runs`
+    must still report `done` for the issue instead of no row at all."""
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
+    )
+    monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
+
+    wt_path = worktree.create(repo, ".worktrees", "issue-7", "fix/issue-7", "main")
+
+    ok = implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        wt_path,
+        RunRequest(prompt="p", cwd=wt_path),
+        cast("Any", None),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, wt_path, lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+    assert ok is True
+    assert not wt_path.exists()
+
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, _trustworthy = runs.discover_runs(repo)
+
+    assert result == [runs.Run(7, "done", "PR #76 — https://x/pull/76")]
 
 
 def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

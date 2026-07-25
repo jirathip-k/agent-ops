@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,49 @@ def _ad_hoc_message_path(project_root: Path, issue_number: int) -> Path:
     replay the note instead of the review it was meant to address.
     """
     return project_root / ".agent-runs" / f"issue-{issue_number}-resume-message.md"
+
+
+def _outcome_path(project_root: Path, issue_number: int) -> Path:
+    """Where a durable "this run finished" record is written on the way out.
+
+    Read by `runs.discover_runs` for issues whose other signals (worktree,
+    feedback file, open PR) have since been cleared/consumed — see issue #87:
+    without this, a successfully finished run vanishes from `agent runs`
+    instead of showing `done`.
+    """
+    return project_root / ".agent-runs" / f"issue-{issue_number}-outcome.json"
+
+
+def _write_outcome(
+    project_root: Path,
+    issue_number: int,
+    *,
+    state: str,
+    pr_url: str | None,
+    reason: str | None,
+    log: Callable[[str], None],
+) -> None:
+    """Best-effort durable record of a run's outcome; never crashes a successful run.
+
+    Written via a temp-file-then-`os.replace` so a crash mid-write never leaves
+    a torn/partial JSON file for `runs._load_outcomes` to trip over. Mirrors
+    `_record_halt`'s best-effort philosophy: a failed status write must not
+    turn a successful run into a crash.
+    """
+    path = _outcome_path(project_root, issue_number)
+    payload = {
+        "state": state,
+        "pr_url": pr_url,
+        "reason": reason,
+        "finished_at": time.time(),
+    }
+    try:
+        path.parent.mkdir(exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload))
+        tmp_path.replace(path)
+    except OSError as exc:
+        log(f"could not write outcome record at {path}: {exc}")
 
 
 def _existing_worktree(project_root: Path, config: ProjectConfig, issue_number: int) -> Path:
@@ -365,6 +410,7 @@ def _finish_run(
     run(["git", "add", "-A"], cwd=wt_path)
     run(["git", "commit", "-m", title], cwd=wt_path)
 
+    pr_url: str | None = None
     if open_pr:
         run(["git", "push", "-u", "origin", branch], cwd=wt_path)
         used_model = (outcome.last_result.model if outcome.last_result else None) or request.model
@@ -380,6 +426,7 @@ def _finish_run(
                 f"unavailable, so this was implemented by `{used_model}` instead."
             )
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
+        pr_url = url
         log(f"opened PR: {url}")
         card.note(f"#{issue_number}: PR opened {url}", status=orca.STATUS_IN_REVIEW)
         if config.loop.auto_merge:
@@ -389,6 +436,14 @@ def _finish_run(
             log("auto-merge enabled — applying merge rules")
             # never overrides: a blocked PR stays open for a human
             run_merge(project_root, pr_number, log=log)
+
+    # Durable record of success, written before the signals below are cleared:
+    # `discover_runs` falls back to this once the worktree/feedback/open-PR
+    # signals it normally reads are gone (issue #87). Order matters — if the
+    # process is interrupted between this write and the feedback-file unlink,
+    # both files briefly coexist, and the outcome record takes precedence over
+    # a stale feedback file in `runs.classify`, so that's safe.
+    _write_outcome(project_root, issue_number, state="done", pr_url=pr_url, reason=None, log=log)
 
     # Both callers, not just resume: a successful implement leaves any earlier
     # cycle's findings behind too, and a later `agent resume` on this issue
