@@ -11,7 +11,7 @@ from agent_ops import __version__, github, registry, stubs, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
-from agent_ops.stubs import TRIAGE_CALLER_REL, triage_caller_drift
+from agent_ops.stubs import triage_caller_drift
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
@@ -470,7 +470,8 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
                 stub_rel = stubs.TRIAGE_STUB.relative_to(PLATFORM_ROOT)
             except ValueError:
                 stub_rel = stubs.TRIAGE_STUB
-            typer.echo(f"! {TRIAGE_CALLER_REL} is behind {stub_rel} — missing {'; '.join(parts)}")
+            caller_rel = drift.path or stubs.WORKFLOWS_REL
+            typer.echo(f"! {caller_rel} is behind {stub_rel} — missing {'; '.join(parts)}")
 
     raise typer.Exit(0 if ok else 1)
 

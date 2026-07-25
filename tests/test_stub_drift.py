@@ -31,6 +31,13 @@ jobs:
 """
 
 
+def _fields(drift: TriageDrift | None) -> tuple[list[str], list[str]]:
+    """secrets/permissions of a drift that parsed cleanly — path varies per test."""
+    assert drift is not None
+    assert drift.error is None
+    return drift.secrets, drift.permissions
+
+
 def _write_caller(root: Path, text: str) -> None:
     workflows = root / ".github" / "workflows"
     workflows.mkdir(parents=True, exist_ok=True)
@@ -39,7 +46,7 @@ def _write_caller(root: Path, text: str) -> None:
 
 def test_in_sync_caller_has_no_drift(tmp_path: Path) -> None:
     _write_caller(tmp_path, IN_SYNC_CALLER)
-    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
 
 
 def test_missing_secret_keys_are_reported(tmp_path: Path) -> None:
@@ -52,7 +59,7 @@ def test_missing_secret_keys_are_reported(tmp_path: Path) -> None:
 
     drift = triage_caller_drift(tmp_path)
 
-    assert drift == TriageDrift(["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"], [])
+    assert _fields(drift) == (["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"], [])
 
 
 def test_missing_permission_key_is_reported(tmp_path: Path) -> None:
@@ -61,7 +68,7 @@ def test_missing_permission_key_is_reported(tmp_path: Path) -> None:
 
     drift = triage_caller_drift(tmp_path)
 
-    assert drift == TriageDrift([], ["actions"])
+    assert _fields(drift) == ([], ["actions"])
 
 
 def test_customised_values_never_warn(tmp_path: Path) -> None:
@@ -94,7 +101,7 @@ jobs:
 """
     _write_caller(tmp_path, caller)
 
-    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
 
 
 def test_no_triage_yml_returns_none(tmp_path: Path) -> None:
@@ -140,7 +147,7 @@ def test_secrets_inherit_satisfies_every_key(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
 
 
 def test_read_all_permissions_does_not_pass_as_satisfied(tmp_path: Path) -> None:
@@ -184,7 +191,7 @@ def test_write_all_permissions_satisfies_every_key(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
 
 
 def test_unrelated_triage_workflow_is_not_a_caller(tmp_path: Path) -> None:
@@ -260,7 +267,7 @@ jobs:
 """
     _write_caller(tmp_path, caller)
 
-    assert triage_caller_drift(tmp_path) == TriageDrift([], [])
+    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
 
 
 def test_job_permissions_replace_workflow_permissions(tmp_path: Path) -> None:
@@ -321,3 +328,63 @@ def test_two_caller_jobs_do_not_cover_for_each_other(tmp_path: Path) -> None:
 
     assert drift is not None
     assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
+
+
+def _write_named(root: Path, name: str, text: str) -> None:
+    workflows = root / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / name).write_text(text)
+
+
+def test_caller_is_found_under_any_filename(tmp_path: Path) -> None:
+    """F1: callers are detected by their `uses:`, not by being named triage.yml.
+
+    status.detect_lanes is content-based for this reason — a repo may call the
+    pipeline from agent-triage.yml or fold it into a larger workflow, and a
+    filename-only check is silently blind to both.
+    """
+    caller = IN_SYNC_CALLER.replace("      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}\n", "")
+    _write_named(tmp_path, "agent-triage.yaml", caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.secrets == ["AGENT_APP_ID"]
+    assert drift.path == Path(".github/workflows/agent-triage.yaml")
+
+
+def test_non_dict_section_is_not_treated_as_satisfied(tmp_path: Path) -> None:
+    """F3: a list-valued section declares no keys, so it must not read as a blanket grant."""
+    caller = IN_SYNC_CALLER.replace(
+        "    secrets:\n"
+        "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n"
+        "      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}\n"
+        "      AGENT_APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}\n",
+        "    secrets:\n      - CLAUDE_CODE_OAUTH_TOKEN\n",
+    )
+    _write_caller(tmp_path, caller)
+
+    drift = triage_caller_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.secrets == ["CLAUDE_CODE_OAUTH_TOKEN", "AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
+
+
+def test_a_pipeline_reference_in_a_comment_is_not_a_caller(tmp_path: Path) -> None:
+    """The text prefilter can match a comment; the YAML parse is the authority."""
+    _write_caller(
+        tmp_path,
+        """
+name: Not really a caller
+on:
+  workflow_dispatch: {}
+# see acme/agent-ops/.github/workflows/triage-pipeline.yml@main for the real one
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+""",
+    )
+
+    assert triage_caller_drift(tmp_path) is None

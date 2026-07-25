@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import yaml
 from agent_ops.utils import PLATFORM_ROOT
 
 TRIAGE_STUB = PLATFORM_ROOT / "stubs" / "managed-repo-triage.yml"
-TRIAGE_CALLER_REL = Path(".github") / "workflows" / "triage.yml"
+WORKFLOWS_REL = Path(".github") / "workflows"
 
 _DRIFT_SECTIONS = ("secrets", "permissions")
 
@@ -20,7 +21,14 @@ _SATISFIES_ALL = {"secrets": {"inherit"}, "permissions": {"write-all"}}
 # only the jobs that actually call it — otherwise an unrelated workflow gets
 # told to add App-token secrets, and a second job's `secrets: inherit` masks a
 # genuine gap in the caller job itself.
-_PIPELINE_REF = "triage-pipeline.yml"
+#
+# Detection is content-based for the same reason status.detect_lanes is: caller
+# filenames vary per repo, but every caller must `uses:` the reusable pipeline.
+# Any owner prefix keeps forks working; `.` is the local form the control repo
+# itself would use; `.yaml` is as valid as `.yml`.
+_PIPELINE_USES_RE = re.compile(
+    r"(?:[\w.-]+/agent-ops|\.)/\.github/workflows/triage-pipeline\.ya?ml(?:@\S+)?"
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,8 @@ class TriageDrift:
     secrets: list[str]
     permissions: list[str]
     error: str | None = None
+    path: Path | None = None
+    """The caller file this drift was found in, relative to the repo root."""
 
 
 def _load_workflow(path: Path) -> tuple[dict[str, object], object]:
@@ -73,7 +83,10 @@ def _job_section_keys(
         # reported, rather than reading as satisfied.
         return set()
     if not isinstance(value, dict):
-        return None
+        # Any other shape (a list, a number) declares no keys we can credit.
+        # Reading it as a blanket grant would make the check silently blind,
+        # which is the failure this check exists to prevent.
+        return set()
     return set(value.keys())
 
 
@@ -98,28 +111,48 @@ def _caller_jobs(jobs: dict[str, object]) -> dict[str, object]:
     return {
         name: job
         for name, job in jobs.items()
-        if isinstance(job, dict) and _PIPELINE_REF in str(job.get("uses", ""))
+        if isinstance(job, dict) and _PIPELINE_USES_RE.search(str(job.get("uses", "")))
     }
 
 
-def triage_caller_drift(root: Path) -> TriageDrift | None:
-    """Structural drift in root's triage.yml vs. the stub, or None if the repo has no caller."""
-    caller_path = root / TRIAGE_CALLER_REL
-    if not caller_path.exists():
-        return None
+def _caller_files(root: Path) -> list[Path]:
+    """Every workflow file that calls the triage pipeline, in a stable order.
 
+    Filenames vary per repo — a caller may be `triage.yml`, `agent-triage.yml`,
+    or folded into a larger workflow — so the reference to the reusable
+    pipeline is the only reliable marker. A cheap text search prefilters before
+    the YAML parse.
+    """
+    workflows = root / WORKFLOWS_REL
+    if not workflows.is_dir():
+        return []
+    found: list[Path] = []
+    for path in sorted(workflows.iterdir()):
+        if path.suffix not in (".yml", ".yaml") or not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if _PIPELINE_USES_RE.search(text):
+            found.append(path)
+    return found
+
+
+def _drift_in(caller_path: Path, root: Path) -> TriageDrift | None:
+    """Drift in one caller file, or None if it turns out not to call the pipeline."""
+    rel = caller_path.relative_to(root)
     try:
         stub_all, stub_perms = _load_workflow(TRIAGE_STUB)
         caller_all, caller_perms = _load_workflow(caller_path)
     except ValueError as exc:
-        return TriageDrift([], [], error=str(exc))
+        return TriageDrift([], [], error=str(exc), path=rel)
 
     stub_jobs = _caller_jobs(stub_all)
     caller_jobs = _caller_jobs(caller_all)
 
-    # A triage.yml that never calls the pipeline isn't a caller at all — same
-    # answer as having no file, rather than a warning about secrets it has no
-    # use for.
+    # The text prefilter can match a reference in a comment; the parse is the
+    # authority. No caller job means this file isn't a caller after all.
     if not caller_jobs:
         return None
 
@@ -142,4 +175,23 @@ def triage_caller_drift(root: Path) -> TriageDrift | None:
             gaps.extend(key for key in stub_keys if key not in job_keys and key not in gaps)
         missing[section] = [key for key in stub_keys if key in gaps]
 
-    return TriageDrift(secrets=missing["secrets"], permissions=missing["permissions"])
+    return TriageDrift(secrets=missing["secrets"], permissions=missing["permissions"], path=rel)
+
+
+def triage_caller_drift(root: Path) -> TriageDrift | None:
+    """Structural drift in the repo's triage-pipeline caller vs. the stub.
+
+    Returns the first caller file that has drift (or an error), so a repo with
+    several callers surfaces them one fix at a time rather than merging their
+    gaps into one confusing message. None when the repo has no caller at all,
+    or every caller is in sync.
+    """
+    in_sync: TriageDrift | None = None
+    for caller_path in _caller_files(root):
+        drift = _drift_in(caller_path, root)
+        if drift is None:
+            continue
+        if drift.error or drift.secrets or drift.permissions:
+            return drift
+        in_sync = in_sync or drift
+    return in_sync
