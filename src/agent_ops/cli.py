@@ -11,7 +11,7 @@ from agent_ops import __version__, github, registry, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
-from agent_ops.workflows import run_implement, run_review
+from agent_ops.workflows import dispatch_review, run_implement, run_review
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 
@@ -170,10 +170,30 @@ def review(
     project: ProjectOpt = Path("."),
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     post: Annotated[bool, typer.Option("--post", help="Post the review as a PR comment")] = False,
+    surface: Annotated[
+        str,
+        typer.Option(
+            help="Where to run: inline (print here) | auto | orca | background",
+        ),
+    ] = "inline",
 ) -> None:
     """Run a read-only review agent over a PR diff."""
+    root = project.resolve()
+    # inline is the default on purpose: scripted callers and the docs' usage
+    # (`agent review 45 --post`) consume the review text on stdout.
+    if surface != "inline":
+        try:
+            where = dispatch_review(
+                root, pr, surface_name=surface, post_comment=post, runtime_name=runtime
+            )
+        except (ValueError, CommandError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo(f"dispatched review of PR #{pr} → {where}")
+        return
+
     try:
-        text = run_review(project.resolve(), pr, runtime_name=runtime, post_comment=post)
+        text = run_review(root, pr, runtime_name=runtime, post_comment=post)
     except (CommandError, RuntimeError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc

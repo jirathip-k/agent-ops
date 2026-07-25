@@ -47,6 +47,7 @@ agent plan 123 --post          # planner only (smart model, read-only) → issue
 agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
 agent review 45                # read-only review of PR #45 (add --post to comment)
+agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent worktree list            # see in-flight task worktrees
 agent status --sync-orca       # mirror active agent lanes onto Orca cards (read-only)
 agent runtimes                 # claude_code / codex availability

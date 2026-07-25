@@ -1,8 +1,15 @@
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
-from agent_ops.runtimes.base import RunRequest
-from agent_ops.runtimes.claude_code import build_command, format_event, parse_result
+from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.runtimes.claude_code import (
+    ClaudeCodeRuntime,
+    build_command,
+    format_event,
+    parse_result,
+)
 
 
 def _proc(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -161,3 +168,155 @@ def test_build_command_includes_allowed_tools_and_model() -> None:
 def test_build_command_stream_uses_stream_json_verbose() -> None:
     cmd = build_command(RunRequest(prompt="x", cwd=Path("."), stream=True))
     assert cmd[-3:] == ["--output-format", "stream-json", "--verbose"]
+
+
+# --- _run_streaming deadlock regression tests -------------------------------
+#
+# These spawn a real `sys.executable -c <script>` child process to exercise
+# the pipe plumbing in `_run_streaming` directly (no mocking of subprocess).
+# Each call is wrapped in a helper-thread timeout guard: if the fix regresses
+# and the adapter deadlocks against its child again, the test fails fast
+# instead of hanging the whole suite forever.
+
+_LARGE_PROMPT = "p" * 100_000  # well past the ~64 KiB OS pipe buffer
+
+# Writes a large filler line to stdout *before* touching stdin at all. With
+# the old synchronous `proc.stdin.write(...)` this reproduces the deadlock:
+# the parent blocks writing a >64 KiB prompt while the child blocks writing
+# >64 KiB of stdout that nobody is reading yet.
+_CHILD_STDOUT_BEFORE_STDIN = """
+import sys
+sys.stdout.write("f" * 200000 + "\\n")
+sys.stdout.flush()
+sys.stdin.read()
+sys.stdout.write('{"type": "result", "result": "large-prompt-ok", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+# Drains stdin normally, then writes >64 KiB to stderr *before* emitting the
+# stdout result line. With the old code stderr is only read after stdout EOF,
+# so the child blocks on the stderr write and never reaches the result line.
+_CHILD_CHATTY_STDERR = """
+import sys
+sys.stdin.read()
+sys.stderr.write("e" * 262144)
+sys.stderr.flush()
+sys.stdout.write('{"type": "result", "result": "stderr-ok", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+# Combines both hazards in one run.
+_CHILD_LARGE_PROMPT_AND_CHATTY_STDERR = """
+import sys
+sys.stdout.write("f" * 200000 + "\\n")
+sys.stdout.flush()
+sys.stdin.read()
+sys.stderr.write("e" * 262144)
+sys.stderr.flush()
+sys.stdout.write('{"type": "result", "result": "combined-ok", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+# No result event at all, short stderr message, non-zero exit.
+_CHILD_NO_RESULT_NONZERO_EXIT = """
+import sys
+sys.stdin.read()
+sys.stderr.write("boom")
+sys.exit(1)
+"""
+
+# No result event *and* >64 KiB of stderr, non-zero exit. Exercises the
+# `final is None` fallback path (`RunResult(text=stderr.strip())`) together
+# with the large-stderr pipe-draining behavior, which the other chatty-stderr
+# tests only ever pair with a successful result event.
+_CHILD_CHATTY_STDERR_NO_RESULT_NONZERO_EXIT = """
+import sys
+sys.stdin.read()
+sys.stderr.write("e" * 262144)
+sys.stderr.flush()
+sys.exit(1)
+"""
+
+# Exits immediately without ever reading stdin, despite a >64 KiB prompt
+# waiting to be written.
+_CHILD_EARLY_EXIT_NO_STDIN_READ = """
+import sys
+print('{"type": "result", "result": "early-exit-ok", "is_error": false}')
+"""
+
+
+def _run_streaming_with_timeout(
+    cmd: list[str], request: RunRequest, timeout: float = 30.0
+) -> RunResult:
+    runtime = ClaudeCodeRuntime()
+    results: list[RunResult] = []
+    errors: list[Exception] = []
+
+    def _target() -> None:
+        try:
+            results.append(runtime._run_streaming(cmd, request))
+        except Exception as exc:  # surfaced via re-raise in the caller below
+            errors.append(exc)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    assert not thread.is_alive(), "_run_streaming did not return within timeout (deadlock?)"
+    if errors:
+        raise errors[0]
+    return results[0]
+
+
+def test_streaming_survives_large_prompt_written_before_child_drains_stdin() -> None:
+    cmd = [sys.executable, "-c", _CHILD_STDOUT_BEFORE_STDIN]
+    request = RunRequest(prompt=_LARGE_PROMPT, cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert result.ok
+    assert result.text == "large-prompt-ok"
+
+
+def test_streaming_survives_chatty_stderr_mid_run() -> None:
+    cmd = [sys.executable, "-c", _CHILD_CHATTY_STDERR]
+    request = RunRequest(prompt="small prompt", cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert result.ok
+    assert result.text == "stderr-ok"
+
+
+def test_streaming_survives_large_prompt_and_chatty_stderr_combined() -> None:
+    cmd = [sys.executable, "-c", _CHILD_LARGE_PROMPT_AND_CHATTY_STDERR]
+    request = RunRequest(prompt=_LARGE_PROMPT, cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert result.ok
+    assert result.text == "combined-ok"
+
+
+def test_streaming_no_result_event_and_nonzero_exit_returns_stderr() -> None:
+    cmd = [sys.executable, "-c", _CHILD_NO_RESULT_NONZERO_EXIT]
+    request = RunRequest(prompt="small prompt", cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert not result.ok
+    assert result.text == "boom"
+
+
+def test_streaming_chatty_stderr_no_result_and_nonzero_exit_returns_full_stderr() -> None:
+    cmd = [sys.executable, "-c", _CHILD_CHATTY_STDERR_NO_RESULT_NONZERO_EXIT]
+    request = RunRequest(prompt="small prompt", cwd=Path("."), stream=True)
+    result = _run_streaming_with_timeout(cmd, request)
+    assert not result.ok
+    assert result.text == "e" * 262144
+
+
+def test_streaming_early_exit_child_does_not_leak_broken_pipe_error() -> None:
+    captured: list[threading.ExceptHookArgs] = []
+    original_hook = threading.excepthook
+    threading.excepthook = captured.append
+    try:
+        cmd = [sys.executable, "-c", _CHILD_EARLY_EXIT_NO_STDIN_READ]
+        request = RunRequest(prompt=_LARGE_PROMPT, cwd=Path("."), stream=True)
+        result = _run_streaming_with_timeout(cmd, request)
+    finally:
+        threading.excepthook = original_hook
+    assert result.ok
+    assert result.text == "early-exit-ok"
+    assert not captured, f"unexpected exception escaped a background thread: {captured}"
