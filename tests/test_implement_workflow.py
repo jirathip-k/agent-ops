@@ -121,6 +121,40 @@ def test_format_comments_preserves_spec_comment_verbatim() -> None:
     assert "## Agent spec\n\nsome elaborated details" in text
 
 
+def test_format_comments_pins_spec_comment_beyond_recency_cutoff() -> None:
+    leading_filler = [
+        {
+            "author": {"login": f"early{i}"},
+            "createdAt": f"2024-01-{i + 1:02d}",
+            "body": f"filler {i}",
+        }
+        for i in range(2)
+    ]
+    spec_comment = {
+        "author": {"login": "agent-ops-bot"},
+        "createdAt": "2024-01-03T00:00:00Z",
+        "body": "## Agent spec\n\nEARLY SPEC MARKER",
+    }
+    trailing_filler = [
+        {
+            "author": {"login": f"late{i}"},
+            "createdAt": f"2024-02-{i + 1:02d}",
+            "body": f"filler {i}",
+        }
+        for i in range(25)
+    ]
+    comments = leading_filler + [spec_comment] + trailing_filler
+    issue = {"comments": comments}
+
+    # sanity-check the fixture actually exercises the bug: more than the cap,
+    # and the spec comment falls outside a pure `comments[-20:]` tail slice.
+    assert len(comments) > 20
+    assert spec_comment not in comments[-20:]
+
+    text = _format_comments(issue)
+    assert "EARLY SPEC MARKER" in text
+
+
 def test_format_comments_preserves_chronological_order() -> None:
     issue = {
         "comments": [

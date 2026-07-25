@@ -273,27 +273,53 @@ def _labels(issue: dict[str, Any]) -> str:
 
 
 _MAX_COMMENTS = 20
+_PINNED_PREFIXES = ("## Agent spec", "## Agent plan")
+
+
+def _is_pinned(comment: dict[str, Any]) -> bool:
+    """A `## Agent spec` / `## Agent plan` comment must never be dropped by the cap."""
+    body = (comment.get("body") or "").lstrip()
+    return body.startswith(_PINNED_PREFIXES)
+
+
+def _render_comment(comment: dict[str, Any]) -> str:
+    author = (comment.get("author") or {}).get("login") or "unknown"
+    created_at = comment.get("createdAt", "")
+    body = comment.get("body", "")
+    return f"**{author}** ({created_at}):\n{body}"
 
 
 def _format_comments(issue: dict[str, Any]) -> str:
-    """Render recent issue comments for the planner prompt.
+    """Render issue comments for the planner prompt.
 
     The CI-lane planner (prompts/agents/planner.md) gets the full issue thread
     so it can build on an approved `## Agent spec` / `## Agent plan` comment;
     this mirrors that for the local lane. Capped to the most recent
-    `_MAX_COMMENTS` (tail, not head) so a long thread can't blow up the prompt.
+    `_MAX_COMMENTS` (tail, not head) so a long thread can't blow up the prompt —
+    but any `## Agent spec` / `## Agent plan` comment outside that tail is
+    pinned and included anyway, since the whole point of this issue is that
+    the planner must see an approved spec/plan even on long-lived threads
+    where it's since scrolled out of the recent window.
     """
     comments = issue.get("comments") or []
     if not comments:
         return "(no comments)"
+
     recent = comments[-_MAX_COMMENTS:]
-    rendered: list[str] = []
-    for comment in recent:
-        author = (comment.get("author") or {}).get("login") or "unknown"
-        created_at = comment.get("createdAt", "")
-        body = comment.get("body", "")
-        rendered.append(f"**{author}** ({created_at}):\n{body}")
-    return "\n\n---\n\n".join(rendered)
+    older = comments[:-_MAX_COMMENTS]  # empty when len(comments) <= _MAX_COMMENTS
+    pinned_older = [c for c in older if _is_pinned(c)]
+
+    if not pinned_older:
+        return "\n\n---\n\n".join(_render_comment(c) for c in recent)
+
+    pinned_section = "\n\n---\n\n".join(_render_comment(c) for c in pinned_older)
+    recent_section = "\n\n---\n\n".join(_render_comment(c) for c in recent)
+    return (
+        "### Pinned spec/plan comments (older than the recent window below)\n\n"
+        f"{pinned_section}\n\n"
+        "### Recent comments\n\n"
+        f"{recent_section}"
+    )
 
 
 def _self_review_ok(
