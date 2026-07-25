@@ -79,6 +79,25 @@ def open_pr_numbers(base: str, cwd: Path) -> list[int]:
     return sorted(pr["number"] for pr in prs)
 
 
+def open_prs(cwd: Path) -> list[dict[str, Any]]:
+    """Every open PR in this repo, with the fields `pr_references_issue` needs."""
+    proc = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,body,headRefName,url,closingIssuesReferences",
+            "--limit",
+            "100",
+        ],
+        cwd=cwd,
+    )
+    return json.loads(proc.stdout)
+
+
 def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
     """Open PRs that already reference this issue, for the dedupe guard.
 
@@ -87,21 +106,7 @@ def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
     exist, and the run would fail later at push/PR anyway.
     """
     try:
-        proc = run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,title,body,headRefName,url,closingIssuesReferences",
-                "--limit",
-                "100",
-            ],
-            cwd=cwd,
-        )
+        prs = open_prs(cwd)
     except CommandError:
         return []
-    prs: list[dict[str, Any]] = json.loads(proc.stdout)
     return [pr for pr in prs if pr_references_issue(pr, issue_number)]
