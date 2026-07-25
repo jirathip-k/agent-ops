@@ -244,3 +244,32 @@ does, so the rule is: **agent-ops orchestrates, Orca observes.**
 Orca replaces scattered terminal windows; it doesn't replace the platform's
 gates — a run only becomes a PR when tests, lint, and self-review pass,
 regardless of which terminal it ran in.
+
+### Mirroring the CI lanes into Orca
+
+Locally dispatched runs push to their own cards, but the scheduled CI lanes
+run on a GitHub Actions runner and leave nothing behind locally. `agent status
+--sync-orca` closes that gap: it reads open agent PRs and `agent-ready` issues
+across every registered repo, checks out each PR's branch under the repo's
+`.worktrees/` so the diff is reviewable in the app, and sets each card's
+comment and status from the PR's check results.
+
+    agent status --sync-orca
+
+- **Read-only towards GitHub.** It never comments, labels, merges, or pushes;
+  the only things it writes are local checkouts and Orca card metadata.
+- **Idempotent.** Cards are keyed by branch, so re-running adopts what exists
+  rather than duplicating it, and a card that already says the right thing is
+  left untouched. Run it as often as you like — e.g. from an
+  `orca automations` job while the app is open.
+- **A no-op without Orca.** Closed app or no `orca` CLI prints one line and
+  exits 0.
+- Statuses map from checks: green → `in-review`, failing/running/draft →
+  `in-progress`, queued issue → `todo`.
+- It never *removes* a card and never touches a card for a queued issue: a
+  live local `agent implement` run may own that card, and the viewer must not
+  fight the thing it is watching. Clean up merged lanes with
+  `agent worktree remove <task-id>` as usual.
+- First run for a new lane pauses ~15-30s: Orca notices external worktrees on
+  a periodic rescan, so the sync waits once per batch. If it still reports
+  `not indexed by Orca yet`, just re-run it.

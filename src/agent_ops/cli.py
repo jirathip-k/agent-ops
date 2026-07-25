@@ -381,14 +381,28 @@ def status(
             help="Show per-repo CI lane coverage (triage/groom/...) instead of PRs and issues",
         ),
     ] = False,
+    sync_orca: Annotated[
+        bool,
+        typer.Option(
+            "--sync-orca",
+            help="Mirror active agent lanes onto Orca worktree cards (read-only towards GitHub)",
+        ),
+    ] = False,
 ) -> None:
     """Fleet overview: open PRs and issue buckets for every registered repo."""
     from agent_ops.status import fleet_status, pipeline_coverage
 
+    if pipelines and sync_orca:
+        _err("--pipelines and --sync-orca are separate views; pass one at a time")
+        raise typer.Exit(1)
     try:
         config = registry.load_registry()
         if pipelines:
             pipeline_coverage(config)
+        elif sync_orca:
+            from agent_ops.orca_sync import sync_orca as run_sync
+
+            run_sync(config)
         else:
             fleet_status(config)
     except (CommandError, FileNotFoundError) as exc:
