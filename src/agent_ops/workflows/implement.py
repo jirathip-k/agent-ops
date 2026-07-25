@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, orca, worktree
+from agent_ops import github, orca, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import run_task_loop
@@ -98,6 +98,7 @@ def make_plan(
         issue_title=issue["title"],
         issue_body=issue.get("body") or "(no description)",
         issue_labels=_labels(issue),
+        issue_comments=_format_comments(issue),
     )
     runtime, request = role_request(
         config, "planner", prompt, cwd, runtime_override=runtime_override
@@ -108,6 +109,42 @@ def make_plan(
     if result.text.lstrip().upper().startswith("ESCALATE"):
         raise RuntimeError(f"Planner escalated:\n{result.text}")
     return request, result
+
+
+def plan_command(
+    project_root: Path,
+    issue_number: int,
+    *,
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> list[str]:
+    """Argv that re-runs this plan inline, for spawning onto a surface."""
+    command = ["agent", "plan", str(issue_number)]
+    if post_comment:
+        command.append("--post")
+    if runtime_name:
+        command += ["--runtime", runtime_name]
+    return command + ["--project", str(project_root)]
+
+
+def dispatch_plan(
+    project_root: Path,
+    issue_number: int,
+    *,
+    surface_name: str = "auto",
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+) -> str:
+    """Spawn `agent plan` on a visible surface; return a 'where it went' string.
+
+    Like a review, a plan is read-only and has no task worktree, so it attaches
+    to the project's own card — no `attach_path`.
+    """
+    chosen = surfaces.pick(surface_name)
+    command = plan_command(
+        project_root, issue_number, post_comment=post_comment, runtime_name=runtime_name
+    )
+    return chosen.spawn(f"agent-plan-issue-{issue_number}", command, project_root)
 
 
 def run_implement(
@@ -269,6 +306,56 @@ def _abort_cleanly(
 
 def _labels(issue: dict[str, Any]) -> str:
     return ", ".join(lbl["name"] for lbl in issue.get("labels", [])) or "none"
+
+
+_MAX_COMMENTS = 20
+_PINNED_PREFIXES = ("## Agent spec", "## Agent plan")
+
+
+def _is_pinned(comment: dict[str, Any]) -> bool:
+    """A `## Agent spec` / `## Agent plan` comment must never be dropped by the cap."""
+    body = (comment.get("body") or "").lstrip()
+    return body.startswith(_PINNED_PREFIXES)
+
+
+def _render_comment(comment: dict[str, Any]) -> str:
+    author = (comment.get("author") or {}).get("login") or "unknown"
+    created_at = comment.get("createdAt", "")
+    body = comment.get("body", "")
+    return f"**{author}** ({created_at}):\n{body}"
+
+
+def _format_comments(issue: dict[str, Any]) -> str:
+    """Render issue comments for the planner prompt.
+
+    The CI-lane planner (prompts/agents/planner.md) gets the full issue thread
+    so it can build on an approved `## Agent spec` / `## Agent plan` comment;
+    this mirrors that for the local lane. Capped to the most recent
+    `_MAX_COMMENTS` (tail, not head) so a long thread can't blow up the prompt —
+    but any `## Agent spec` / `## Agent plan` comment outside that tail is
+    pinned and included anyway, since the whole point of this issue is that
+    the planner must see an approved spec/plan even on long-lived threads
+    where it's since scrolled out of the recent window.
+    """
+    comments = issue.get("comments") or []
+    if not comments:
+        return "(no comments)"
+
+    recent = comments[-_MAX_COMMENTS:]
+    older = comments[:-_MAX_COMMENTS]  # empty when len(comments) <= _MAX_COMMENTS
+    pinned_older = [c for c in older if _is_pinned(c)]
+
+    if not pinned_older:
+        return "\n\n---\n\n".join(_render_comment(c) for c in recent)
+
+    pinned_section = "\n\n---\n\n".join(_render_comment(c) for c in pinned_older)
+    recent_section = "\n\n---\n\n".join(_render_comment(c) for c in recent)
+    return (
+        "### Pinned spec/plan comments (older than the recent window below)\n\n"
+        f"{pinned_section}\n\n"
+        "### Recent comments\n\n"
+        f"{recent_section}"
+    )
 
 
 def _self_review_ok(

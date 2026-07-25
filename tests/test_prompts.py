@@ -10,6 +10,7 @@ TASK_FIELDS = {
         "issue_title": "t",
         "issue_body": "b",
         "issue_labels": "none",
+        "issue_comments": "some comment",
     },
     "spec": {
         "issue_number": "1",

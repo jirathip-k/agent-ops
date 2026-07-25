@@ -10,7 +10,7 @@ from agent_ops.utils import CommandError, run
 
 def get_issue(number: int, cwd: Path) -> dict[str, Any]:
     proc = run(
-        ["gh", "issue", "view", str(number), "--json", "number,title,body,labels,url"],
+        ["gh", "issue", "view", str(number), "--json", "number,title,body,labels,url,comments"],
         cwd=cwd,
     )
     return json.loads(proc.stdout)
