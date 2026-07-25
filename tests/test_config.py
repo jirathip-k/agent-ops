@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_ops.config import ModelTierError, load_project_config, role_reports
+from agent_ops.config import ROLE_NAMES, ModelTierError, load_project_config, role_reports
 
 
 def _write_config(tmp_path: Path, body: str) -> None:
@@ -107,11 +107,23 @@ def test_concrete_models_are_not_treated_as_tiers(tmp_path: Path) -> None:
     assert config.resolve_role("reviewer").model == "gpt-5-codex"
 
 
-def test_no_fallbacks_configured_by_default(tmp_path: Path) -> None:
-    """The mechanism ships inert: defaults.yaml carries no ladder."""
+def test_shipped_defaults_resolve_a_non_empty_ladder_for_every_role(tmp_path: Path) -> None:
+    """Regression for #45: defaults.yaml must configure a real ladder, or
+    run_with_fallback has nowhere to step down and every role's fallback
+    silently becomes a no-op again."""
     config = load_project_config(tmp_path)
-    assert config.model_fallbacks == {}
-    assert all(config.resolve_role(role).fallbacks == [] for role in ("planner", "reviewer"))
+
+    for role in ROLE_NAMES:
+        resolved = config.resolve_role(role)
+        fallbacks = resolved.fallbacks
+        assert fallbacks, f"{role} has no configured fallbacks"
+        assert resolved.model not in fallbacks
+        assert len(fallbacks) == len(set(fallbacks))
+
+    reports = {r.name: r for r in role_reports(config)}
+    for role in ROLE_NAMES:
+        assert reports[role].error is None
+        assert reports[role].fallbacks
 
 
 def test_project_can_configure_a_fallback_ladder(tmp_path: Path) -> None:

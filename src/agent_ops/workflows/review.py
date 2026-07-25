@@ -17,7 +17,7 @@ from agent_ops.fallback import (
 )
 from agent_ops.prompts import render_task
 from agent_ops.runtimes.base import FailureKind
-from agent_ops.utils import CommandError
+from agent_ops.utils import CommandError, flush_print
 from agent_ops.workflows.implement import role_request
 
 DEFAULT_JOBS = 3
@@ -103,7 +103,7 @@ def run_review(
     runtime_name: str | None = None,
     post_comment: bool = False,
     stream: bool | None = None,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = flush_print,
 ) -> str:
     """Run the reviewer role (read-only) over a PR diff; optionally post the result.
 
@@ -180,7 +180,7 @@ def run_reviews(
     jobs: int = DEFAULT_JOBS,
     post_comment: bool = False,
     runtime_name: str | None = None,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = flush_print,
 ) -> list[ReviewOutcome]:
     """Review multiple PRs concurrently; abort the queue if the model ladder is exhausted.
 
