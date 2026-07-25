@@ -1,15 +1,51 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_ops import github, surfaces
 from agent_ops.config import load_project_config
-from agent_ops.fallback import artifact_footer, model_note, run_with_fallback
+from agent_ops.fallback import (
+    ModelUnavailableError,
+    artifact_footer,
+    model_note,
+    run_with_fallback,
+)
 from agent_ops.prompts import render_task
+from agent_ops.runtimes.base import FailureKind
 from agent_ops.utils import CommandError
 from agent_ops.workflows.implement import role_request
+
+DEFAULT_JOBS = 3
+
+Verdict = str  # "approve" | "request_changes" | "unknown" | "failed" | "skipped"
+
+_VERDICT_RE = re.compile(r"^\s*[`*_]*VERDICT:\s*(APPROVE|REQUEST CHANGES)", re.IGNORECASE)
+
+
+def verdict_of(text: str) -> Verdict:
+    """Read the `VERDICT: ...` line the review prompt requires (see prompts/tasks/review.md).
+
+    Tolerates leading markdown/backtick decoration; an unrecognised or absent
+    verdict is `"unknown"`, not a failure — the run still produced a review.
+    """
+    for line in text.splitlines():
+        match = _VERDICT_RE.match(line)
+        if match:
+            return "approve" if match.group(1).upper() == "APPROVE" else "request_changes"
+    return "unknown"
+
+
+@dataclass(frozen=True)
+class ReviewOutcome:
+    pr: int
+    status: Verdict
+    text: str = ""
+    error: str = ""
 
 
 def budget_diff(diff: str, max_lines: int) -> tuple[str, list[tuple[str, int]]]:
@@ -66,9 +102,15 @@ def run_review(
     *,
     runtime_name: str | None = None,
     post_comment: bool = False,
+    stream: bool | None = None,
     log: Callable[[str], None] = print,
 ) -> str:
-    """Run the reviewer role (read-only) over a PR diff; optionally post the result."""
+    """Run the reviewer role (read-only) over a PR diff; optionally post the result.
+
+    `stream` overrides the configured runtime streaming behaviour; the
+    multi-PR fan-out in `run_reviews` forces it off so concurrent runs don't
+    interleave their output into unreadable mush.
+    """
     config = load_project_config(project_root)
     pr = github.pr_view(pr_number, cwd=project_root)
     diff = github.pr_diff(pr_number, cwd=project_root)
@@ -100,8 +142,12 @@ def run_review(
     runtime, request = role_request(
         config, "reviewer", prompt, project_root, runtime_override=runtime_name
     )
+    if stream is not None:
+        request = replace(request, stream=stream)
     result = run_with_fallback(runtime, request, on_event=log)
     if not result.ok:
+        if runtime.classify_failure(result) is FailureKind.MODEL_UNAVAILABLE:
+            raise ModelUnavailableError(f"Review run failed: {result.text}")
         raise RuntimeError(f"Review run failed: {result.text}")
     log(f"review complete ({model_note(request, result)})")
 
@@ -114,15 +160,84 @@ def run_review(
     return result.text
 
 
+_SUMMARY_LABELS = {
+    "approve": "APPROVE",
+    "request_changes": "REQUEST CHANGES",
+    "unknown": "unknown verdict",
+    "failed": "run failed",
+    "skipped": "skipped (queue aborted after a model-unavailable failure)",
+}
+
+# Statuses that mean "this PR does not have a review to show" — either the
+# run itself failed, or it never got a chance to (aborted queue).
+FAILED_STATUSES = ("failed", "skipped")
+
+
+def run_reviews(
+    project_root: Path,
+    pr_numbers: list[int],
+    *,
+    jobs: int = DEFAULT_JOBS,
+    post_comment: bool = False,
+    runtime_name: str | None = None,
+    log: Callable[[str], None] = print,
+) -> list[ReviewOutcome]:
+    """Review multiple PRs concurrently; abort the queue if the model ladder is exhausted.
+
+    Each worker buffers its own log lines and flushes them as one block under
+    a lock when it finishes, so concurrent runs never interleave. A
+    `ModelUnavailableError` from any run means the model ladder itself is
+    spent — a config-wide gap, not a per-PR problem — so it sets an abort flag
+    and every PR still queued comes back `"skipped"` rather than burning a run
+    on the same wall. Runs already in flight when the flag is set still finish.
+    Results are returned in input order, not completion order.
+    """
+    abort = threading.Event()
+    log_lock = threading.Lock()
+
+    def review_one(pr: int) -> ReviewOutcome:
+        if abort.is_set():
+            return ReviewOutcome(pr, "skipped")
+        buffer: list[str] = []
+        try:
+            text = run_review(
+                project_root,
+                pr,
+                runtime_name=runtime_name,
+                post_comment=post_comment,
+                stream=False,
+                log=buffer.append,
+            )
+        except ModelUnavailableError as exc:
+            abort.set()
+            outcome = ReviewOutcome(pr, "failed", error=str(exc))
+        except (CommandError, RuntimeError) as exc:
+            outcome = ReviewOutcome(pr, "failed", error=str(exc))
+        else:
+            outcome = ReviewOutcome(pr, verdict_of(text), text=text)
+        with log_lock:
+            for line in buffer:
+                log(f"[PR #{pr}] {line}")
+        return outcome
+
+    with ThreadPoolExecutor(max_workers=min(jobs, len(pr_numbers))) as pool:
+        return list(pool.map(review_one, pr_numbers))
+
+
+def format_summary(outcomes: list[ReviewOutcome]) -> str:
+    """One line per PR: verdict, or a distinct line for runs with no review to show."""
+    return "\n".join(f"PR #{o.pr}: {_SUMMARY_LABELS[o.status]}" for o in outcomes)
+
+
 def review_command(
     project_root: Path,
-    pr_number: int,
+    pr_numbers: list[int],
     *,
     post_comment: bool = False,
     runtime_name: str | None = None,
 ) -> list[str]:
-    """Argv that re-runs this review inline, for spawning onto a surface."""
-    command = ["agent", "review", str(pr_number)]
+    """Argv that re-runs these reviews inline, for spawning onto a surface."""
+    command = ["agent", "review", *(str(n) for n in pr_numbers)]
     if post_comment:
         command.append("--post")
     if runtime_name:
@@ -132,7 +247,7 @@ def review_command(
 
 def dispatch_review(
     project_root: Path,
-    pr_number: int,
+    pr_numbers: list[int],
     *,
     surface_name: str = "auto",
     post_comment: bool = False,
@@ -142,10 +257,17 @@ def dispatch_review(
 
     Unlike `agent dispatch` there is no task worktree to attach to — a review
     is read-only and runs against the project root — so the run is shown on the
-    project's own card.
+    project's own card. All PRs go through a single spawned command, not one
+    per PR — that keeps the abort-on-model-unavailable rule and the summary
+    aggregation working even off the inline path.
     """
     chosen = surfaces.pick(surface_name)
     command = review_command(
-        project_root, pr_number, post_comment=post_comment, runtime_name=runtime_name
+        project_root, pr_numbers, post_comment=post_comment, runtime_name=runtime_name
     )
-    return chosen.spawn(f"agent-review-pr-{pr_number}", command, project_root)
+    label = (
+        f"agent-review-pr-{pr_numbers[0]}"
+        if len(pr_numbers) == 1
+        else f"agent-review-{len(pr_numbers)}-prs"
+    )
+    return chosen.spawn(label, command, project_root)

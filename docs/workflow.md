@@ -147,6 +147,13 @@ gh pr checkout 45           # your own look
 gh pr merge 45 --squash
 ```
 
+Reviewing everything open before a promote is one command, not a shell loop:
+`agent review --all` (or `agent review 169 168 167`) runs the reviews
+concurrently (`--jobs`, default 3) and prints one summary line per PR —
+`APPROVE` / `REQUEST CHANGES` / `run failed`. If a run fails because the
+model ladder itself is exhausted, the rest of the queue aborts rather than
+burning it on the same wall.
+
 The agent review is a pre-filter, never the approval. Merge is always yours.
 
 ## 5. Background — the CI lane

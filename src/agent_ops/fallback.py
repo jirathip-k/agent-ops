@@ -6,6 +6,15 @@ from dataclasses import replace
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, Runtime
 
 
+class ModelUnavailableError(RuntimeError):
+    """The model ladder is exhausted: no configured or fallback model answered.
+
+    Distinct from a plain run failure so callers that fan out multiple runs
+    (e.g. `agent review --all`) can tell a config-wide gap apart from one bad
+    run and abort the rest of the queue instead of burning it on the same wall.
+    """
+
+
 def model_ladder(request: RunRequest) -> list[str | None]:
     """The configured model first, then each fallback rung in order."""
     return [request.model, *request.fallback_models]

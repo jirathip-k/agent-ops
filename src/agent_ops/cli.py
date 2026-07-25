@@ -12,9 +12,16 @@ from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_repor
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
-from agent_ops.workflows import dispatch_review, run_implement, run_review
+from agent_ops.workflows import (
+    dispatch_review,
+    format_summary,
+    run_implement,
+    run_review,
+    run_reviews,
+)
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
+from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
 
 app = typer.Typer(
     name="agent",
@@ -170,10 +177,17 @@ def spec(
 
 @app.command()
 def review(
-    pr: Annotated[int, typer.Argument(help="PR number to review")],
+    prs: Annotated[list[int] | None, typer.Argument(help="PR number(s) to review")] = None,
     project: ProjectOpt = Path("."),
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     post: Annotated[bool, typer.Option("--post", help="Post the review as a PR comment")] = False,
+    all_open: Annotated[
+        bool,
+        typer.Option("--all", help="Review every open PR targeting the project's base_branch"),
+    ] = False,
+    jobs: Annotated[
+        int, typer.Option("--jobs", help="Max concurrent reviews when reviewing multiple PRs")
+    ] = DEFAULT_JOBS,
     surface: Annotated[
         str,
         typer.Option(
@@ -181,27 +195,63 @@ def review(
         ),
     ] = "inline",
 ) -> None:
-    """Run a read-only review agent over a PR diff."""
+    """Run a read-only review agent over one or more PR diffs."""
     root = project.resolve()
+
+    if all_open and prs:
+        _err("pass either PR numbers or --all, not both")
+        raise typer.Exit(1)
+    if not all_open and not prs:
+        _err("specify at least one PR number, or --all")
+        raise typer.Exit(1)
+
+    if all_open:
+        config = load_project_config(root)
+        try:
+            pr_numbers = github.open_pr_numbers(config.base_branch, cwd=root)
+        except CommandError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        if not pr_numbers:
+            typer.echo(f"no open PRs targeting {config.base_branch!r}")
+            return
+    else:
+        assert prs is not None  # guarded above
+        pr_numbers = prs
+
     # inline is the default on purpose: scripted callers and the docs' usage
     # (`agent review 45 --post`) consume the review text on stdout.
     if surface != "inline":
         try:
             where = dispatch_review(
-                root, pr, surface_name=surface, post_comment=post, runtime_name=runtime
+                root, pr_numbers, surface_name=surface, post_comment=post, runtime_name=runtime
             )
         except (ValueError, CommandError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
-        typer.echo(f"dispatched review of PR #{pr} → {where}")
+        label = f"PR #{pr_numbers[0]}" if len(pr_numbers) == 1 else f"{len(pr_numbers)} PRs"
+        typer.echo(f"dispatched review of {label} → {where}")
         return
 
-    try:
-        text = run_review(root, pr, runtime_name=runtime, post_comment=post)
-    except (CommandError, RuntimeError) as exc:
-        _err(str(exc))
-        raise typer.Exit(1) from exc
-    typer.echo(text)
+    if len(pr_numbers) == 1:
+        # Single-PR inline path is unchanged: no summary, just the review text.
+        try:
+            text = run_review(root, pr_numbers[0], runtime_name=runtime, post_comment=post)
+        except (CommandError, RuntimeError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo(text)
+        return
+
+    outcomes = run_reviews(
+        root, pr_numbers, jobs=jobs, post_comment=post, runtime_name=runtime, log=typer.echo
+    )
+    for outcome in outcomes:
+        if outcome.text:
+            typer.echo(f"\n=== PR #{outcome.pr} ===\n{outcome.text}")
+    typer.echo("\n" + format_summary(outcomes))
+    if any(o.status in FAILED_STATUSES for o in outcomes):
+        raise typer.Exit(1)
 
 
 @app.command()
