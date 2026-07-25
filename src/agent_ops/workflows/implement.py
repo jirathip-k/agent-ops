@@ -353,14 +353,15 @@ def _finish_run(
             # never overrides: a blocked PR stays open for a human
             run_merge(project_root, pr_number, log=log)
 
+    # Both callers, not just resume: a successful implement leaves any earlier
+    # cycle's findings behind too, and a later `agent resume` on this issue
+    # would silently hand the agent a review it has already addressed. Before
+    # the worktree removal, so a failure there can't strand them.
+    _feedback_path(project_root, issue_number).unlink(missing_ok=True)
+    _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
     if not keep_worktree:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
-    # Both callers, not just resume: a successful implement leaves any earlier
-    # cycle's findings behind too, and a later `agent resume` on this issue
-    # would silently hand the agent a review it has already addressed.
-    _feedback_path(project_root, issue_number).unlink(missing_ok=True)
-    _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
     return True
 
 
@@ -707,8 +708,13 @@ def _record_halt(
     or scratch repos) must not turn a halt into a crash.
     """
     path = _feedback_path(project_root, issue_number)
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(feedback)
+    try:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(feedback)
+    except OSError as exc:
+        # Outside the try this would crash the halt before the comment that
+        # makes it visible — the opposite of best-effort.
+        log(f"could not stash halt feedback at {path}: {exc}")
     try:
         github.comment_on_issue(
             issue_number,

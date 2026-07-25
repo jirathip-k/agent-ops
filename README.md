@@ -47,8 +47,8 @@ agent plan 123 --post          # planner only (smart model, read-only) → issue
 agent plan 123 --surface orca  # same, but on a visible Orca terminal instead of inline
 agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
-agent resume 123                       # rerun the implementer in an existing worktree
-agent resume 123 -m "add a test for X" # ...with feedback instead of the stored self-review
+agent resume 123               # rerun the implementer in the existing worktree
+agent resume 123 -m "..."      # ...with your feedback instead of the stored self-review
 agent review 45                # read-only review of PR #45 (add --post to comment)
 agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent review --all             # review every open PR targeting base_branch, concurrently
