@@ -52,6 +52,64 @@ def _missing_gitignore_markers(root: Path) -> list[str]:
     return [marker for marker in GITIGNORE_MARKERS if marker not in text]
 
 
+def _checkout_drift(root: Path) -> str | None:
+    """Warn when `root` (the editable install's tree) is behind/ahead of its upstream.
+
+    Uses only already-fetched refs — never runs `git fetch` — so `doctor` stays a
+    fast, network-free diagnostic. Silent (returns None) for anything that isn't a
+    plain, tracked, attached-HEAD git checkout, so it never tracebacks.
+    """
+    try:
+        if not root.is_dir():
+            return None
+        toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+        if toplevel.returncode != 0 or Path(toplevel.stdout.strip()) != root.resolve():
+            return None
+        head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+        if head.returncode != 0:
+            return None
+        upstream_name = run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if upstream_name.returncode != 0:
+            return None
+        upstream = upstream_name.stdout.strip()
+        counts = run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            cwd=root,
+            check=False,
+        )
+        if counts.returncode != 0:
+            return None
+        parts = counts.stdout.strip().split()
+        if len(parts) != 2:
+            return None
+        ahead, behind = int(parts[0]), int(parts[1])
+        if ahead == 0 and behind == 0:
+            return None
+
+        def commits(n: int) -> str:
+            return f"{n} commit{'' if n == 1 else 's'}"
+
+        if behind and not ahead:
+            return (
+                f"agent-ops checkout is {commits(behind)} behind {upstream} — the editable "
+                f"install runs this tree; git -C {root} pull "
+                "(local refs; run git fetch for a current comparison)"
+            )
+        if ahead and not behind:
+            return f"agent-ops checkout is {commits(ahead)} ahead of {upstream} ({root})"
+        return (
+            f"agent-ops checkout has diverged from {upstream}: {commits(ahead)} ahead, "
+            f"{commits(behind)} behind ({root}) "
+            "(local refs; run git fetch for a current comparison)"
+        )
+    except Exception:  # noqa: BLE001 — doctor reports, never crashes
+        return None
+
+
 @app.command()
 def implement(
     issue: Annotated[int, typer.Argument(help="GitHub issue number to implement")],
@@ -90,6 +148,10 @@ def dispatch(
     project: ProjectOpt = Path("."),
     surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+    plan_file: Annotated[
+        Path | None,
+        typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Dispatch even if an open PR already references it")
     ] = False,
@@ -99,12 +161,20 @@ def dispatch(
     command = ["agent", "implement", str(issue), "--project", str(root)]
     if no_pr:
         command.append("--no-pr")
+    if plan_file:
+        # Absolute: the surface may spawn the command from the worktree rather
+        # than the caller's cwd, and a relative plan path would resolve wrong.
+        command.extend(["--plan-file", str(plan_file.resolve())])
     if force:
         command.append("--force")
 
     # Pre-create the worktree implement will reuse, so the surface can attach
     # the run to the issue's worktree card instead of the project root's.
     try:
+        # Check before the worktree exists — implement would only fail after
+        # dispatch had already created one, leaving it behind to clean up.
+        if plan_file and not plan_file.is_file():
+            raise CommandError(f"plan file not found: {plan_file}")
         if not force:
             existing = github.open_prs_for_issue(issue, cwd=root)
             if existing:
@@ -472,6 +542,9 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
                 stub_rel = stubs.TRIAGE_STUB
             caller_rel = drift.path or stubs.WORKFLOWS_REL
             typer.echo(f"! {caller_rel} is behind {stub_rel} — missing {'; '.join(parts)}")
+    checkout_note = _checkout_drift(PLATFORM_ROOT)
+    if checkout_note:
+        typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
 
