@@ -53,6 +53,7 @@ agent review 45                # read-only review of PR #45 (add --post to comme
 agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent review --all             # review every open PR targeting base_branch, concurrently
 agent worktree list            # see in-flight task worktrees
+agent runs                     # per-issue state: running / halted / stopped / done
 agent status --sync-orca       # mirror active agent lanes onto Orca cards (read-only)
 agent runtimes                 # claude_code / codex availability
 ```
