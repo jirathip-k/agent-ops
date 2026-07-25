@@ -54,8 +54,29 @@ Run them from the target project's root, not from agent-ops.
    `agent worktree remove issue-<N> --force` only after reporting.
 5. **A worktree already exists** for a task → a previous run is in flight or
    left over; check `agent worktree list` and ask/inspect before removing.
-6. **Parallel runs** are safe (worktree per task) — start each
-   `agent implement` in its own background shell or Herdr pane.
+6. **Parallel runs** are safe (worktree per task) — dispatch each one; they
+   get separate worktrees and branches. But two issues that touch the same
+   files will conflict on merge, and `.pbxproj` merges especially badly:
+   sequence those instead of racing them.
+7. **Check labels before dispatching.** `needs-human` / `blocked` mean the
+   grooming gate already decided this isn't agent-work; dispatching anyway
+   just burns a planner run on an ESCALATE. Note the CI grooming lane may add
+   those labels *after* you file an issue, so re-read them at dispatch time.
+8. **The planner never sees issue comments** (#29). A spec or plan posted as
+   a comment is invisible to it. Either put the spec in the issue **body**
+   (`gh issue edit --body-file`) or pass it with `--plan-file`.
+9. **Write plans from verified facts, not assumed ones.** A wrong claim about
+   the data model in a plan file becomes a wrong implementation that passes
+   its gates — self-review catches it, but each round costs a full run. Read
+   the type/field/call site first; cite `file:line` in the plan so the
+   implementer and reviewer can both check you.
+10. **A self-review REQUEST CHANGES is signal, not noise.** Read the findings
+   before re-running, and verify the blocking ones yourself — they are as
+   often defects in the *plan* as in the code, and re-running an unchanged
+   plan reproduces them exactly.
+11. **The dedupe guard has a false positive** (#64): any PR whose body merely
+   mentions `#N` blocks issue N. Confirm the PR actually closes the issue
+   before believing the message; `--force` overrides.
 
 ## Onboarding a new project (repeatable procedure)
 
@@ -88,21 +109,34 @@ When the user asks to set up a project for agents, do all of these:
 
 ## Spawning runs on a visible surface
 
-Start long runs with `agent dispatch <N> --project <path>` instead of
-running `agent implement` in a plain background shell. Dispatch picks the
-most visible available surface automatically:
+**Always use `agent dispatch <N> --project <path>`. Never run `agent
+implement` in a plain background shell.** Dispatch picks the most visible
+available surface automatically:
 
-- **herdr** (if the Herdr server is up): new tab, agent process in the
-  pane → sidebar shows working/blocked/done and the run survives your
-  session. Check with `herdr tab list` / `herdr pane read <pane_id>`.
-- **background** (fallback, works everywhere incl. Claude Code UI): detached
-  process logging to `<project>/.agent-runs/agent-issue-<N>.log` — tell the
-  user the tail command.
+- **orca** (if the Orca app is running): a named terminal attached to the
+  issue's worktree card, so the run is visible and survives your session.
+  Read it with `orca terminal read --terminal <handle> --limit <n>`.
+- **herdr** (if the Herdr server is up): new tab, agent process in the pane.
+  Check with `herdr tab list` / `herdr pane read <pane_id>`.
+- **background** (last-resort fallback): detached process logging to
+  `<project>/.agent-runs/agent-issue-<N>.log`.
 
-Force one with `--surface herdr|background`. Background shells inside a
-Claude session are invisible to Herdr — never use them for runs the user
-wants to watch. New surfaces (Orca IDE, tmux, ...) are one class in
-`src/agent_ops/surfaces.py`.
+Force one with `--surface orca|herdr|background`. New surfaces are one class
+in `src/agent_ops/surfaces.py`.
+
+**`dispatch` forwards `--plan-file`**, so an approved plan is never a reason
+to drop to a raw shell. Use it whenever the spec lives outside the issue body
+(see the grooming note below).
+
+Two traps, both learned the hard way:
+
+- A `nohup ... &` shell inside a Claude session is invisible to Orca **and**
+  detaches from the harness, so the assistant never receives a completion
+  signal — the wrapper exits immediately and the run finishes silently. Poll
+  `orca terminal read` instead of inventing your own background wrapper.
+- `dispatch` pre-creates the worktree from `origin/<base>`. Dispatching an
+  issue whose work depends on an unmerged PR gives the agent a tree without
+  that PR's files. Merge the dependency first, or expect a wasted run.
 
 ## Configuration facts
 
