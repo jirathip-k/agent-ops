@@ -89,6 +89,10 @@ def dispatch(
     project: ProjectOpt = Path("."),
     surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
+    plan_file: Annotated[
+        Path | None,
+        typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Dispatch even if an open PR already references it")
     ] = False,
@@ -98,12 +102,20 @@ def dispatch(
     command = ["agent", "implement", str(issue), "--project", str(root)]
     if no_pr:
         command.append("--no-pr")
+    if plan_file:
+        # Absolute: the surface may spawn the command from the worktree rather
+        # than the caller's cwd, and a relative plan path would resolve wrong.
+        command.extend(["--plan-file", str(plan_file.resolve())])
     if force:
         command.append("--force")
 
     # Pre-create the worktree implement will reuse, so the surface can attach
     # the run to the issue's worktree card instead of the project root's.
     try:
+        # Check before the worktree exists — implement would only fail after
+        # dispatch had already created one, leaving it behind to clean up.
+        if plan_file and not plan_file.is_file():
+            raise CommandError(f"plan file not found: {plan_file}")
         if not force:
             existing = github.open_prs_for_issue(issue, cwd=root)
             if existing:

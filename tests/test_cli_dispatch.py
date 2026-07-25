@@ -195,3 +195,35 @@ def test_dispatch_force_bypasses_open_pr_guard_and_forwards_flag(
     assert result.exit_code == 0
     ((_, command, _, _),) = fake.calls
     assert "--force" in command
+
+
+def test_dispatch_forwards_plan_file_as_absolute_path(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative --plan-file must reach implement absolutized: the surface may
+    spawn from the worktree, where a caller-relative path resolves wrong."""
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    plan = tmp_path / "plan.md"
+    plan.write_text("approved plan")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["dispatch", "5", "--project", str(repo), "--plan-file", "plan.md"])
+
+    assert result.exit_code == 0
+    ((_, command, _, _),) = fake.calls
+    assert "--plan-file" in command
+    assert command[command.index("--plan-file") + 1] == str(plan.resolve())
+
+
+def test_dispatch_rejects_missing_plan_file_before_creating_a_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+
+    result = runner.invoke(app, ["dispatch", "5", "--project", str(repo), "--plan-file", "nope.md"])
+
+    assert result.exit_code == 1
+    assert not (repo.resolve() / ".worktrees" / "issue-5").exists()
+    assert fake.calls == []
