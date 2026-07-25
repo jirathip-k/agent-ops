@@ -25,6 +25,11 @@ _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 TERMINAL_STATES = ("done", "halted", "stopped")
 _POLL_INTERVAL_S = 15.0
 _DEFAULT_TIMEOUT_S = 3600.0
+# Consecutive untrustworthy polls `wait_for_runs` tolerates before giving up
+# rather than risk reporting a degraded "stopped"/"gone" as real. ~1 minute at
+# the default interval: comfortably above the 2-poll dispatch debounce, far
+# short of the hour-long default timeout.
+_MAX_DEGRADED_POLLS = 4
 
 
 @dataclass(frozen=True)
@@ -278,10 +283,26 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
     return issues
 
 
-def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> list[Run]:
-    """Every issue with a run signal, newest first."""
+def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tuple[list[Run], bool]:
+    """Every issue with a run signal, newest first, plus whether this poll's
+    signals are trustworthy.
+
+    The second element is `False` whenever `git worktree list` or `gh` (PR
+    listing) failed this round and had to be degraded to "treat as empty" —
+    that shape is indistinguishable from a genuinely stopped/gone run, so a
+    caller comparing across polls (`wait_for_runs`) needs to know not to
+    trust it as positive evidence of either.
+    """
+    trustworthy = True
+
     worktree_by_issue: dict[int, Path] = {}
-    for wt in worktree.list_worktrees(project_root):
+    try:
+        worktrees = worktree.list_worktrees(project_root)
+    except CommandError as exc:
+        log(f"warning: could not list worktrees ({exc}); runs may be misreported as stopped")
+        worktrees = []
+        trustworthy = False
+    for wt in worktrees:
         match = _BRANCH_RE.match(wt.branch)
         if match is not None:
             worktree_by_issue[int(match.group(1))] = wt.path
@@ -293,7 +314,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
 
     candidates = set(worktree_by_issue) | feedback_issues | log_issues
     if not candidates:
-        return []
+        return [], trustworthy
 
     live = live_runs(_ps_output(log), project_root)
 
@@ -302,6 +323,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
     except CommandError as exc:
         log(f"warning: could not list open PRs ({exc}); runs may be misreported as stopped")
         prs = []
+        trustworthy = False
     pr_by_issue: dict[int, dict[str, Any]] = {}
     for issue in candidates:
         for pr in prs:
@@ -328,13 +350,15 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
         if found is not None:
             runs.append(found)
     runs.sort(key=lambda r: r.issue, reverse=True)
-    return runs
+    return runs, trustworthy
 
 
 def report_runs(
     project_root: Path, log: Callable[[str], None] = print, issue: int | None = None
 ) -> None:
-    runs = discover_runs(project_root, log=log)
+    # A one-shot snapshot has no other poll to compare against, and the
+    # warning (if any) is already logged by `discover_runs` itself.
+    runs, _trustworthy = discover_runs(project_root, log=log)
     if issue is not None:
         runs = [r for r in runs if r.issue == issue]
     if not runs:
@@ -376,11 +400,26 @@ def wait_for_runs(
 
     `stopped` is not trusted on a single observation: `dispatch` leaves the
     same signature (worktree exists, nothing live yet) for the few seconds
-    before the child `agent implement` execs, and a `gh` outage degrades a
-    real `done` to `stopped` too (`discover_runs`'s `prs = []` fallback). Both
-    look identical to a genuinely abandoned run for one poll. `stopped` only
-    counts as terminal once it has held for two consecutive polls; `done`,
-    `halted` and `gone` come from positive evidence and count immediately.
+    before the child `agent implement` execs, and a `gh`/`git worktree list`
+    outage degrades a real `done` to `stopped` too (`discover_runs`'s
+    untrustworthy-poll fallback). Both look identical to a genuinely
+    abandoned run for one poll. `stopped` only counts as terminal once it has
+    held for two consecutive *trustworthy* polls; `done`, `halted` and `gone`
+    come from positive evidence and count immediately — except that a watched
+    issue missing from an untrustworthy poll's results is never read as
+    `gone`: its previous state carries forward unchanged until a trustworthy
+    poll confirms it one way or the other, the same "unknown is not evidence
+    of death" reasoning `stopped`'s debounce already relies on.
+
+    An untrustworthy poll also resets every watched issue's `stopped`-streak
+    to 0, so a `gh`/worktree blip can never itself advance a run toward the
+    2-poll `stopped` threshold. If polls come back untrustworthy for more
+    than `_MAX_DEGRADED_POLLS` in a row, this raises `CommandError` instead of
+    ever reporting `stopped`/`gone` off degraded data — a sustained outage
+    should surface as "we don't know", not as a false terminal verdict. Any
+    degradation seen during an otherwise-successful wait is summarized in one
+    final log line before returning, since the per-poll `warning:` line is
+    deduped down to a single, possibly long-scrolled-away occurrence.
 
     Returns True once every watched issue is terminal (including the
     nothing-to-watch case), False if `timeout_s` elapses first. `timeout_s`
@@ -390,13 +429,27 @@ def wait_for_runs(
     unlike the no-issue case, there is nothing to wait on, which a caller
     should not mistake for a run finishing.
     """
-    log = _dedup_warnings(log)
+    last_warning: str | None = None
+    deduped_log = _dedup_warnings(log)
+
+    def capture(message: str) -> None:
+        # Remember the raw warning even if `_dedup_warnings` goes on to
+        # suppress it from the printed output — the degraded-streak error
+        # message below still needs the latest one.
+        nonlocal last_warning
+        if message.startswith("warning:"):
+            last_warning = message
+        deduped_log(message)
+
     interval_s = max(1.0, interval_s)
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
 
     watch: set[int] | None = None
     states: dict[int, str] = {}
     stopped_streak: dict[int, int] = {}
+    degraded_streak = 0
+    degraded_polls = 0
+    total_polls = 0
 
     def is_terminal(i: int) -> bool:
         state = states[i]
@@ -405,7 +458,22 @@ def wait_for_runs(
         return state in TERMINAL_STATES or state == "gone"
 
     while True:
-        found = {r.issue: r for r in discover_runs(project_root, log=log)}
+        polled, trustworthy = discover_runs(project_root, log=capture)
+        found = {r.issue: r for r in polled}
+        total_polls += 1
+
+        if trustworthy:
+            degraded_streak = 0
+        else:
+            degraded_streak += 1
+            degraded_polls += 1
+            if degraded_streak > _MAX_DEGRADED_POLLS:
+                last = last_warning or "no warning text captured"
+                raise CommandError(
+                    f"gh/worktree data has been unreliable for {degraded_streak} consecutive "
+                    f"polls (last: {last}) — refusing to report stopped/gone; check gh "
+                    "auth/network and re-run --wait"
+                )
 
         if watch is None:
             if issue is not None:
@@ -415,26 +483,41 @@ def wait_for_runs(
             else:
                 watch = set(found)
                 if not watch:
-                    log("no agent runs found")
+                    capture("no agent runs found")
                     return True
             for i in sorted(watch):
                 r = found[i]
-                log(f"#{i}  {r.state:<8}  {r.detail}")
+                capture(f"#{i}  {r.state:<8}  {r.detail}")
                 states[i] = r.state
                 stopped_streak[i] = 1 if r.state == "stopped" else 0
         else:
             for i in sorted(watch):
                 r = found.get(i)
+                if r is None and not trustworthy:
+                    # An unexplained disappearance during a degraded poll is not
+                    # trustworthy evidence the run is actually gone: hold its
+                    # state and streak steady and wait for a clean poll.
+                    continue
                 state = r.state if r is not None else "gone"
-                stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
+                if not trustworthy:
+                    # An unknown observation is not evidence of death: never let
+                    # a degraded poll advance the debounce toward terminal.
+                    stopped_streak[i] = 0
+                else:
+                    stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
                 if state != states[i]:
                     line = f"#{i}  {states[i]} → {state:<8}"
                     if r is not None:
                         line += f"  {r.detail}"
-                    log(line)
+                    capture(line)
                     states[i] = state
 
         if all(is_terminal(i) for i in watch):
+            if degraded_polls:
+                capture(
+                    f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                    f"{total_polls} polls in this wait"
+                )
             return True
 
         remaining = None if deadline is None else deadline - time.monotonic()

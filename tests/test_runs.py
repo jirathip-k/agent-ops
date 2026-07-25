@@ -299,8 +299,9 @@ def test_discover_runs_unions_sources_dedupes_and_sorts(
     monkeypatch.setattr(runs, "_ps_output", lambda log: "1 00:06:00 agent implement 77\n")
     monkeypatch.setattr(github, "open_prs", lambda cwd: [_pr(76, issue=35)])
 
-    result = runs.discover_runs(tmp_path)
+    result, trustworthy = runs.discover_runs(tmp_path)
 
+    assert trustworthy is True
     assert [r.issue for r in result] == [77, 73, 35]
     by_issue = {r.issue: r for r in result}
     assert by_issue[77].state == "running"
@@ -319,9 +320,10 @@ def test_discover_runs_empty_agent_runs_dir(
     monkeypatch.setattr(runs, "_ps_output", lambda log: "")
     monkeypatch.setattr(github, "open_prs", lambda cwd: [])
 
-    result = runs.discover_runs(tmp_path)
+    result, trustworthy = runs.discover_runs(tmp_path)
 
     assert result == [runs.Run(68, "stopped", STOPPED_DETAIL)]
+    assert trustworthy is True
 
 
 def test_discover_runs_pr_lookup_failure_still_yields_rows(
@@ -340,17 +342,42 @@ def test_discover_runs_pr_lookup_failure_still_yields_rows(
     monkeypatch.setattr(github, "open_prs", boom)
     warnings: list[str] = []
 
-    result = runs.discover_runs(tmp_path, log=warnings.append)
+    result, trustworthy = runs.discover_runs(tmp_path, log=warnings.append)
 
     assert result == [runs.Run(68, "stopped", STOPPED_DETAIL)]
+    assert trustworthy is False
     assert any("could not list open PRs" in w for w in warnings)
+
+
+def test_discover_runs_worktree_listing_failure_still_yields_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git worktree list` failing must degrade like the `gh` PR lookup does
+    (empty + untrustworthy), not raise `CommandError` straight out of
+    `discover_runs` and kill an hour-long wait over one transient hiccup."""
+    (tmp_path / ".agent-runs").mkdir()
+    (tmp_path / ".agent-runs" / "issue-68-feedback.md").write_text("findings")
+
+    def boom(root: Path) -> list[worktree.Worktree]:
+        raise CommandError("git worktree list: fatal: not a git repository")
+
+    monkeypatch.setattr(runs.worktree, "list_worktrees", boom)
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    warnings: list[str] = []
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=warnings.append)
+
+    assert result == [runs.Run(68, "halted", "self-review — resume with `agent resume 68`")]
+    assert trustworthy is False
+    assert any("could not list worktrees" in w for w in warnings)
 
 
 def test_discover_runs_no_candidates_returns_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
-    assert runs.discover_runs(tmp_path) == []
+    assert runs.discover_runs(tmp_path) == ([], True)
 
 
 # --- report_runs / CLI ---------------------------------------------------------
@@ -397,7 +424,8 @@ def test_cli_runs_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _polls(monkeypatch: pytest.MonkeyPatch, *rounds: list) -> None:
-    """Patch `runs.discover_runs` to return `rounds` in order, one per call.
+    """Patch `runs.discover_runs` to return `rounds` in order, one per call,
+    each poll marked trustworthy (`True`).
 
     Calls beyond the given rounds keep returning the last one, so a wait loop
     that polls once more than expected doesn't crash — it just fails an
@@ -406,10 +434,10 @@ def _polls(monkeypatch: pytest.MonkeyPatch, *rounds: list) -> None:
     it = iter(rounds)
     last: list = rounds[-1] if rounds else []
 
-    def fake(project_root: Path, log=print) -> list:
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
         nonlocal last
         last = next(it, last)
-        return last
+        return last, True
 
     monkeypatch.setattr(runs, "discover_runs", fake)
 
@@ -542,12 +570,14 @@ def test_wait_for_runs_dedups_repeated_warning(
 ) -> None:
     calls = {"n": 0}
 
-    def fake(project_root: Path, log=print) -> list:
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
         calls["n"] += 1
         log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+        # Trustworthy throughout: this test is specifically about the dedup
+        # wrapper's once-only printing, not the new degraded-poll handling.
         if calls["n"] >= 3:
-            return [runs.Run(77, "done", "PR #1")]
-        return [runs.Run(77, "running", "pid 1")]
+            return [runs.Run(77, "done", "PR #1")], True
+        return [runs.Run(77, "running", "pid 1")], True
 
     monkeypatch.setattr(runs, "discover_runs", fake)
     monkeypatch.setattr(runs.time, "sleep", lambda s: None)
@@ -557,6 +587,149 @@ def test_wait_for_runs_dedups_repeated_warning(
 
     assert result is True
     assert sum(1 for line in lines if line.startswith("warning:")) == 1
+
+
+# --- wait_for_runs: gh/worktree outages (issue #86) ------------------------
+
+
+def test_wait_for_runs_single_degraded_poll_resets_stopped_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single degraded poll reporting `stopped` must not count toward the
+    2-poll debounce: recovering with genuine PR data on the next poll must
+    still finish `done`, not a false `stopped` off the degraded observation."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [runs.Run(77, "stopped", STOPPED_DETAIL)], True
+        if calls["n"] == 2:
+            log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+            return [runs.Run(77, "stopped", STOPPED_DETAIL)], False
+        return [runs.Run(77, "done", "PR #76")], True
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert calls["n"] == 3  # did not falsely terminate as `stopped` at poll 2
+    assert any("→ done" in line for line in lines)
+
+
+def test_wait_for_runs_raises_after_sustained_gh_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every poll degraded: this must surface as a distinct, non-zero, non-
+    timeout failure once the degraded streak exceeds `_MAX_DEGRADED_POLLS`,
+    rather than ever reporting a `stopped`/`gone` verdict built on unreliable
+    data."""
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        log("warning: could not list open PRs (gh: rate limited); may misreport as stopped")
+        return [runs.Run(77, "stopped", STOPPED_DETAIL)], False
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    with pytest.raises(CommandError) as exc_info:
+        runs.wait_for_runs(tmp_path, log=lines.append)
+
+    message = str(exc_info.value)
+    assert "timed out" not in message
+    assert "unreliable" in message
+    assert "rate limited" in message  # names the last warning seen, per the plan
+
+
+def test_wait_for_runs_worktree_listing_failure_mid_wait_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single bad `git worktree list` mid-wait must not crash the wait, nor
+    mark the run `gone`: the previous state carries forward until a
+    trustworthy poll confirms the real outcome."""
+    wt_calls = {"n": 0}
+
+    def list_worktrees(root: Path) -> list[worktree.Worktree]:
+        wt_calls["n"] += 1
+        if wt_calls["n"] == 2:
+            raise CommandError("git worktree list: fatal: not a git repository")
+        return [worktree.Worktree(tmp_path / ".worktrees" / "issue-68", "fix/issue-68")]
+
+    monkeypatch.setattr(runs.worktree, "list_worktrees", list_worktrees)
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+
+    pr_calls = {"n": 0}
+
+    def open_prs(cwd: Path) -> list[dict]:
+        pr_calls["n"] += 1
+        return [_pr(76, issue=68)] if pr_calls["n"] >= 2 else []
+
+    monkeypatch.setattr(github, "open_prs", open_prs)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert not any("gone" in line for line in lines)
+    assert any("stopped → done" in line for line in lines)
+    assert any(line.startswith("note:") for line in lines)
+
+
+def test_wait_for_runs_untrustworthy_disappearance_is_not_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watched issue missing from an untrustworthy poll must not be read as
+    `gone` immediately — only a subsequent trustworthy poll may confirm it."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [runs.Run(77, "running", "pid 1")], True
+        if calls["n"] == 2:
+            log("warning: could not list worktrees (boom); runs may be misreported as stopped")
+            return [], False
+        return [], True  # trustworthy confirmation: genuinely gone
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert calls["n"] == 3  # the degraded poll (#2) did not end the wait early
+    assert sum(1 for line in lines if "gone" in line) == 1
+
+
+def test_wait_for_runs_logs_degradation_summary_on_clean_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wait that saw one degraded poll but still finished cleanly surfaces
+    that in a final summary line — not just the single early `warning:` line
+    that `_dedup_warnings` may have suppressed on every repeat since."""
+    calls = {"n": 0}
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+            return [runs.Run(77, "running", "pid 1")], False
+        return [runs.Run(77, "done", "PR #1")], True
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any(line.startswith("note:") and "1 of 2" in line for line in lines)
 
 
 def test_cli_runs_wait_finishes_once_stopped_holds(
