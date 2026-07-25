@@ -26,6 +26,12 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write  # claude-code-action exchanges an OIDC token
+      # Must mirror the pipeline's own block — a called workflow cannot
+      # exceed its caller, so omitting these here silently re-breaks the
+      # auto-merge gate for this repo even though the pipeline asks for them.
+      checks: read
+      statuses: read
+      actions: read
     uses: jirathip-k/agent-ops/.github/workflows/triage-pipeline.yml@main
     with:
       target_repo: ${{ github.repository }}
