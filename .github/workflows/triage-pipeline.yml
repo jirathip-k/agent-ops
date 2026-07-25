@@ -29,6 +29,14 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      # Optional GitHub App credentials used to authenticate the pipeline's
+      # git pushes (#53). Without them the pipeline falls back to
+      # GITHUB_TOKEN and behaves exactly as before — including the
+      # action_required gating that blocks auto-merge.
+      AGENT_APP_ID:
+        required: false
+      AGENT_APP_PRIVATE_KEY:
+        required: false
   workflow_dispatch:
     inputs:
       target_repo:
@@ -104,12 +112,62 @@ jobs:
           repository: jirathip-k/agent-ops
           path: agent-ops
 
+      # Why this exists (#53): actions/checkout persists its token as the git
+      # credential, so every `git push` the orchestrator makes is attributed to
+      # whoever owns that token. With the default GITHUB_TOKEN that's
+      # github-actions[bot], and GitHub holds workflow runs triggered by that
+      # identity behind a manual approval gate — they land as
+      # `completed/action_required` and never execute. The orchestrator's
+      # auto-merge gate then sees an empty check rollup, cannot confirm "CI
+      # green", and holds the PR. That is why PRs got a green run on an earlier
+      # SHA and a gated one on the head.
+      #
+      # A GitHub App installation token avoids this: App-triggered runs are not
+      # gated (the same reason claude-code-action's own App-authored PRs always
+      # ran). Credentials are optional — see docs/workflow.md for setup.
+      - name: Detect App credentials
+        id: appcfg
+        if: steps.precheck.outputs.count != '0'
+        env:
+          APP_ID: ${{ secrets.AGENT_APP_ID }}
+          APP_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AGENT_APP_ID/AGENT_APP_PRIVATE_KEY not set — pushing as github-actions[bot]. Workflow runs on pushed commits will be gated on manual approval (jirathip-k/agent-ops#53)."
+          fi
+
+      # create-github-app-token scopes the token to one repo, so it needs the
+      # owner and name separately. GitHub expressions have no split().
+      - name: Split target repo
+        id: split
+        if: steps.appcfg.outputs.enabled == 'true'
+        env:
+          TARGET: ${{ inputs.target_repo }}
+        run: |
+          echo "owner=${TARGET%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${TARGET##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a GitHub App token
+        id: app_token
+        if: steps.appcfg.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ steps.split.outputs.owner }}
+          repositories: ${{ steps.split.outputs.name }}
+
       - name: Checkout target repo
         if: steps.precheck.outputs.count != '0'
         uses: actions/checkout@v7
         with:
           repository: ${{ inputs.target_repo }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Falls back to GITHUB_TOKEN when the App isn't configured, which is
+          # today's behaviour — this change is inert until the secrets exist.
+          token: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
           path: target
           fetch-depth: 0
 
