@@ -8,6 +8,19 @@ from agent_ops import github
 from agent_ops.utils import CommandError
 
 
+def test_get_issue_requests_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"number": 1}))
+
+    monkeypatch.setattr(github, "run", fake_run)
+    github.get_issue(1, cwd=tmp_path)
+    json_index = captured["cmd"].index("--json")
+    assert "comments" in captured["cmd"][json_index + 1].split(",")
+
+
 def test_pr_references_issue_matches_branch_name() -> None:
     pr = {"headRefName": "fix/issue-132", "title": "unrelated", "body": None}
     assert github.pr_references_issue(pr, 132)

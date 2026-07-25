@@ -10,6 +10,13 @@ Labels: {issue_labels}
 
 {issue_body}
 
+## Comments
+
+If a `## Agent spec` or `## Agent plan` comment is present below, treat it as
+the source of truth to build on — do not re-derive the analysis from scratch.
+
+{issue_comments}
+
 ## Tasks
 
 1. Locate the relevant code and confirm the problem (or, for a feature,

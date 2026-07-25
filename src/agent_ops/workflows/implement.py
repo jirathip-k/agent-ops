@@ -98,6 +98,7 @@ def make_plan(
         issue_title=issue["title"],
         issue_body=issue.get("body") or "(no description)",
         issue_labels=_labels(issue),
+        issue_comments=_format_comments(issue),
     )
     runtime, request = role_request(
         config, "planner", prompt, cwd, runtime_override=runtime_override
@@ -269,6 +270,30 @@ def _abort_cleanly(
 
 def _labels(issue: dict[str, Any]) -> str:
     return ", ".join(lbl["name"] for lbl in issue.get("labels", [])) or "none"
+
+
+_MAX_COMMENTS = 20
+
+
+def _format_comments(issue: dict[str, Any]) -> str:
+    """Render recent issue comments for the planner prompt.
+
+    The CI-lane planner (prompts/agents/planner.md) gets the full issue thread
+    so it can build on an approved `## Agent spec` / `## Agent plan` comment;
+    this mirrors that for the local lane. Capped to the most recent
+    `_MAX_COMMENTS` (tail, not head) so a long thread can't blow up the prompt.
+    """
+    comments = issue.get("comments") or []
+    if not comments:
+        return "(no comments)"
+    recent = comments[-_MAX_COMMENTS:]
+    rendered: list[str] = []
+    for comment in recent:
+        author = (comment.get("author") or {}).get("login") or "unknown"
+        created_at = comment.get("createdAt", "")
+        body = comment.get("body", "")
+        rendered.append(f"**{author}** ({created_at}):\n{body}")
+    return "\n\n---\n\n".join(rendered)
 
 
 def _self_review_ok(
