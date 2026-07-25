@@ -8,8 +8,33 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import run
+
+# Claude Code reports these conditions as prose, not as codes, so matching is
+# on the phrases the CLI actually prints. Keep the fixtures in
+# tests/test_claude_runtime.py in step with anything added here.
+_MODEL_UNAVAILABLE_MARKERS = (
+    "spend limit",  # "…hit your monthly spend limit… or switch models to continue"
+    "switch models",
+    "model not found",
+    "unknown model",
+    "not supported",
+    "no longer available",
+    "has been retired",
+    "is retired",
+    "deprecated model",
+)
+_TRANSIENT_MARKERS = (
+    "rate limit",
+    "rate_limit_error",
+    "429",
+    "overloaded",
+    "overloaded_error",
+    "529",
+    "service unavailable",
+    "503",
+)
 
 
 class ClaudeCodeRuntime:
@@ -33,6 +58,9 @@ class ClaudeCodeRuntime:
             return self._run_streaming(cmd, request)
         proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False)
         return parse_result(proc)
+
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        return classify_failure(result)
 
     def _run_streaming(self, cmd: list[str], request: RunRequest) -> RunResult:
         proc = subprocess.Popen(
@@ -70,6 +98,10 @@ class ClaudeCodeRuntime:
         stderr_thread.start()
 
         final: dict[str, Any] | None = None
+        # Non-JSON lines are how the CLI reports refusals ("You've hit your
+        # monthly spend limit…"). Dropping them would hide exactly the text
+        # failure classification needs, so keep them for the fallback path.
+        plain: list[str] = []
         for line in stdout:
             line = line.strip()
             if not line:
@@ -77,6 +109,8 @@ class ClaudeCodeRuntime:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                plain.append(line)
+                print(line, flush=True)
                 continue
             if event.get("type") == "result":
                 final = event
@@ -90,7 +124,11 @@ class ClaudeCodeRuntime:
         stderr_thread.join()
         stderr = stderr_chunks[0]
         if final is None:
-            return RunResult(ok=returncode == 0, text=stderr.strip())
+            return RunResult(
+                ok=returncode == 0,
+                text="\n".join(plain).strip() or stderr.strip(),
+                raw={"stderr": stderr, "returncode": returncode},
+            )
         return result_from_json(final, returncode)
 
 
@@ -162,6 +200,26 @@ def result_from_json(data: dict[str, Any], returncode: int) -> RunResult:
         cost_usd=data.get("total_cost_usd"),
         raw=data,
     )
+
+
+def classify_failure(result: RunResult) -> FailureKind:
+    """Read Claude Code's prose error into a provider-neutral failure kind.
+
+    Transient markers win over model-availability ones: a rate-limited call
+    should wait for the same model, never spend the ladder on a hiccup.
+    """
+    haystack = " ".join(
+        [
+            result.text,
+            str((result.raw or {}).get("stderr", "")),
+            str((result.raw or {}).get("error", "")),
+        ]
+    ).lower()
+    if any(marker in haystack for marker in _TRANSIENT_MARKERS):
+        return FailureKind.TRANSIENT
+    if any(marker in haystack for marker in _MODEL_UNAVAILABLE_MARKERS):
+        return FailureKind.MODEL_UNAVAILABLE
+    return FailureKind.AGENT_FAILURE
 
 
 def parse_result(proc: subprocess.CompletedProcess[str]) -> RunResult:

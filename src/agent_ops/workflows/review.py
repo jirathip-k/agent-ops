@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent_ops import github, surfaces
 from agent_ops.config import load_project_config
+from agent_ops.fallback import artifact_footer, model_note, run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import CommandError
 from agent_ops.workflows.implement import role_request
@@ -99,12 +100,16 @@ def run_review(
     runtime, request = role_request(
         config, "reviewer", prompt, project_root, runtime_override=runtime_name
     )
-    result = runtime.run(request)
+    result = run_with_fallback(runtime, request, on_event=log)
     if not result.ok:
         raise RuntimeError(f"Review run failed: {result.text}")
+    log(f"review complete ({model_note(request, result)})")
 
     if post_comment:
-        github.comment_on_pr(pr_number, f"## Agent review\n\n{result.text}", cwd=project_root)
+        # The footer is not decoration: a review written by a fallback model is
+        # a different review, and the reader has to be able to see that.
+        body = f"## Agent review\n\n{result.text}{artifact_footer(request, result)}"
+        github.comment_on_pr(pr_number, body, cwd=project_root)
         log(f"posted review comment on PR #{pr_number}")
     return result.text
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_ops import github, worktree
 from agent_ops.config import load_project_config
+from agent_ops.fallback import artifact_footer, run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import run
 from agent_ops.workflows.implement import _labels, role_request
@@ -58,7 +59,7 @@ def run_spec(
                 "Bash(gh pr view:*)",
             ),
         )
-        result = runtime.run(request)
+        result = run_with_fallback(runtime, request, on_event=log)
     finally:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
     if not result.ok:
@@ -67,6 +68,7 @@ def run_spec(
         raise RuntimeError(f"Spec agent escalated:\n{result.text}")
 
     if post:
-        github.comment_on_issue(issue_number, f"## Agent spec\n\n{result.text}", cwd=project_root)
+        body = f"## Agent spec\n\n{result.text}{artifact_footer(request, result)}"
+        github.comment_on_issue(issue_number, body, cwd=project_root)
         log(f"posted spec on issue #{issue_number}")
     return result.text

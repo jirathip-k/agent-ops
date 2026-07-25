@@ -6,9 +6,10 @@ from typing import Any
 
 from agent_ops import github, orca, worktree
 from agent_ops.config import ProjectConfig, load_project_config
+from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import run_task_loop
 from agent_ops.prompts import render_task
-from agent_ops.runtimes import RunRequest, Runtime, get_runtime
+from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
 from agent_ops.utils import CommandError, run
 
@@ -53,9 +54,14 @@ def role_request(
     runtime_override: str | None = None,
     extra_allowed_tools: tuple[str, ...] = (),
 ) -> tuple[Runtime, RunRequest]:
-    """Resolve a role (planner/implementer/reviewer) to its runtime and request."""
-    role = config.resolve_role(role_name)
-    runtime = get_runtime(runtime_override or role.runtime)
+    """Resolve a role (planner/implementer/reviewer) to its runtime and request.
+
+    The override reaches `resolve_role` so the model tier is looked up in the
+    table of the runtime that will actually run — otherwise `--runtime codex`
+    hands codex a Claude model name.
+    """
+    role = config.resolve_role(role_name, runtime_override=runtime_override)
+    runtime = get_runtime(role.runtime)
     if not runtime.available():
         raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
     request = RunRequest(
@@ -65,6 +71,7 @@ def role_request(
         max_turns=role.max_turns,
         permission_mode=role.permission_mode,
         stream=config.runtime.stream,
+        fallback_models=tuple(role.fallbacks),
         # every role may run the gates: implementer to iterate, planner to
         # reproduce, reviewer to verify — write access still differs by mode
         allowed_tools=gate_allowed_tools(config) + extra_allowed_tools,
@@ -78,8 +85,13 @@ def make_plan(
     cwd: Path,
     *,
     runtime_override: str | None = None,
-) -> str:
-    """Run the planner role. Returns the plan text; raises on ESCALATE or failure."""
+    log: Callable[[str], None] = lambda _: None,
+) -> tuple[RunRequest, RunResult]:
+    """Run the planner role.
+
+    Returns the request and its result so callers can attribute the plan to the
+    model that actually wrote it; raises on ESCALATE or failure.
+    """
     prompt = render_task(
         "plan",
         issue_number=str(issue["number"]),
@@ -90,12 +102,12 @@ def make_plan(
     runtime, request = role_request(
         config, "planner", prompt, cwd, runtime_override=runtime_override
     )
-    result = runtime.run(request)
+    result = run_with_fallback(runtime, request, on_event=log)
     if not result.ok:
         raise RuntimeError(f"Planner run failed: {result.text}")
     if result.text.lstrip().upper().startswith("ESCALATE"):
         raise RuntimeError(f"Planner escalated:\n{result.text}")
-    return result.text
+    return request, result
 
 
 def run_implement(
@@ -153,17 +165,20 @@ def run_implement(
         plan = plan_file.read_text()
         log(f"using approved plan from {plan_file} ({len(plan.splitlines())} lines)")
     elif config.loop.plan:
-        planner_role = config.resolve_role("planner")
+        planner_role = config.resolve_role("planner", runtime_override=runtime_name)
         log(f"planning (model: {planner_role.model or 'default'})")
         orca.report(wt_path, comment=f"#{issue_number}: planning")
         try:
-            plan = make_plan(config, issue, wt_path, runtime_override=runtime_name)
+            plan_request, plan_result = make_plan(
+                config, issue, wt_path, runtime_override=runtime_name, log=log
+            )
         except RuntimeError as exc:
             log(str(exc))
             _abort_cleanly(project_root, config, task_id, log)
             log("issue needs a human decision")
             return False
-        log(f"plan ready ({len(plan.splitlines())} lines)")
+        plan = plan_result.text
+        log(f"plan ready ({len(plan.splitlines())} lines, {model_note(plan_request, plan_result)})")
 
     prompt = render_task(
         "implement",
@@ -206,11 +221,18 @@ def run_implement(
 
     if open_pr:
         run(["git", "push", "-u", "origin", branch], cwd=wt_path)
+        used_model = (outcome.last_result.model if outcome.last_result else None) or request.model
         body = (
             f"Closes #{issue_number}.\n\n"
             f"Automated implementation via agent-ops "
-            f"({runtime.name}, {outcome.attempts} attempt(s), gates passed)."
+            f"({runtime.name}, model {used_model or 'runtime default'}, "
+            f"{outcome.attempts} attempt(s), gates passed)."
         )
+        if used_model != request.model:
+            body += (
+                f"\n\n> **Model fallback:** the configured model `{request.model}` was "
+                f"unavailable, so this was implemented by `{used_model}` instead."
+            )
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         log(f"opened PR: {url}")
         orca.report(
@@ -264,9 +286,12 @@ def _self_review_ok(
     runtime, request = role_request(
         config, "reviewer", prompt, wt_path, runtime_override=runtime_override
     )
-    result = runtime.run(request)
+    result = run_with_fallback(runtime, request, on_event=log)
     verdict_ok = result.ok and "APPROVE" in result.text.upper().split("REQUEST CHANGES")[0]
-    log(f"self-review verdict: {'APPROVE' if verdict_ok else 'REQUEST CHANGES'}")
+    log(
+        f"self-review verdict: {'APPROVE' if verdict_ok else 'REQUEST CHANGES'} "
+        f"({model_note(request, result)})"
+    )
     if not verdict_ok:
         log(result.text)
     return verdict_ok
