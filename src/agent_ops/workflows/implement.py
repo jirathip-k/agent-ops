@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from agent_ops import github, orca, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
-from agent_ops.loop import run_task_loop
+from agent_ops.loop import LoopOutcome, run_task_loop
 from agent_ops.prompts import render_task
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
@@ -24,6 +25,39 @@ def task_identifiers(issue_number: int) -> tuple[str, str]:
     """
     task_id = f"issue-{issue_number}"
     return task_id, f"fix/{task_id}"
+
+
+def _feedback_path(project_root: Path, issue_number: int) -> Path:
+    """Where a self-review halt's findings are stashed for `agent resume` to pick up.
+
+    Lives under the project root, never the worktree: `.agent-runs/` is the
+    existing convention for run artifacts, and a file inside the worktree
+    risks being swept up by the implementer's own `git add -A`.
+    """
+    return project_root / ".agent-runs" / f"issue-{issue_number}-feedback.md"
+
+
+def _ad_hoc_message_path(project_root: Path, issue_number: int) -> Path:
+    """Where `--message` text is staged, deliberately NOT `_feedback_path`.
+
+    That file is the halt record. Writing an ad-hoc note over it would destroy
+    the self-review findings permanently, and a later bare `agent resume` would
+    replay the note instead of the review it was meant to address.
+    """
+    return project_root / ".agent-runs" / f"issue-{issue_number}-resume-message.md"
+
+
+def _existing_worktree(project_root: Path, config: ProjectConfig, issue_number: int) -> Path:
+    """The task worktree a prior `agent dispatch`/`implement` left behind, or a clear error."""
+    task_id, branch = task_identifiers(issue_number)
+    wt_path = project_root / config.worktree_dir / task_id
+    branches = {wt.branch for wt in worktree.list_worktrees(project_root)}
+    if not wt_path.is_dir() or branch not in branches:
+        raise FileNotFoundError(
+            f"no worktree for issue #{issue_number} at {wt_path} — "
+            f"run `agent dispatch {issue_number}` to start one"
+        )
+    return wt_path
 
 
 def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
@@ -242,13 +276,49 @@ def run_implement(
         orca.report(wt_path, comment=f"#{issue_number}: FAILED gates ({failing}); worktree kept")
         return False
 
-    if config.loop.self_review and not _self_review_ok(
-        config, wt_path, log=log, runtime_override=runtime_name
+    if not _review_and_maybe_halt(
+        config, project_root, issue_number, wt_path, runtime_name=runtime_name, log=log
     ):
-        log(f"self-review requested changes; worktree kept at {wt_path}")
-        orca.report(wt_path, comment=f"#{issue_number}: self-review requested changes")
         return False
 
+    return _finish_run(
+        project_root,
+        config,
+        issue,
+        issue_number,
+        task_id,
+        branch,
+        wt_path,
+        request,
+        runtime,
+        outcome,
+        open_pr=open_pr,
+        keep_worktree=keep_worktree,
+        log=log,
+    )
+
+
+def _finish_run(
+    project_root: Path,
+    config: ProjectConfig,
+    issue: dict[str, Any],
+    issue_number: int,
+    task_id: str,
+    branch: str,
+    wt_path: Path,
+    request: RunRequest,
+    runtime: Runtime,
+    outcome: LoopOutcome,
+    *,
+    open_pr: bool,
+    keep_worktree: bool,
+    log: Callable[[str], None],
+) -> bool:
+    """Commit, push, open the PR (maybe auto-merge), and clean up the worktree.
+
+    Shared tail for `run_implement` and `run_resume`: once the loop and
+    self-review have passed, landing the change is identical either way.
+    """
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip()
     log(f"changes:\n{diff_stat}")
 
@@ -287,6 +357,184 @@ def run_implement(
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
     return True
+
+
+def _resolve_feedback(
+    project_root: Path,
+    issue_number: int,
+    *,
+    message: str | None,
+    message_file: Path | None,
+) -> str:
+    """Feedback text, in priority order: `--message`, `--message-file`, the stored halt file."""
+    if message is not None and message_file is not None:
+        raise ValueError("pass either --message or --message-file, not both")
+    if message is not None:
+        return message
+    if message_file is not None:
+        return message_file.read_text()
+    halt_path = _feedback_path(project_root, issue_number)
+    if not halt_path.is_file():
+        raise FileNotFoundError(
+            f"no feedback for issue #{issue_number} — pass --message or --message-file, "
+            f"or check {halt_path}"
+        )
+    return halt_path.read_text()
+
+
+def run_resume(
+    project_root: Path,
+    issue_number: int,
+    *,
+    message: str | None = None,
+    message_file: Path | None = None,
+    runtime_name: str | None = None,
+    open_pr: bool = True,
+    log: Callable[[str], None] = flush_print,
+) -> bool:
+    """Resume the implementer role in a worktree a prior run halted on (e.g. self-review).
+
+    Feedback comes from `message`, `message_file`, or — the common case, right
+    after a halt — the file `_record_halt` wrote. Runs the same loop →
+    self-review → PR tail as `run_implement`, on the existing worktree instead
+    of a fresh one.
+    """
+    config = load_project_config(project_root)
+    task_id, branch = task_identifiers(issue_number)
+    wt_path = _existing_worktree(project_root, config, issue_number)
+    feedback = _resolve_feedback(
+        project_root, issue_number, message=message, message_file=message_file
+    )
+
+    issue = github.get_issue(issue_number, cwd=project_root)
+    diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
+
+    prompt = render_task(
+        "resume",
+        issue_number=str(issue["number"]),
+        issue_title=issue["title"],
+        issue_body=issue.get("body") or "(no description)",
+        issue_labels=_labels(issue),
+        branch=branch,
+        diff_stat=diff_stat,
+        feedback=feedback,
+        skills=load_skills(config.skills, project_root),
+    )
+    runtime, request = role_request(
+        config, "implementer", prompt, wt_path, runtime_override=runtime_name
+    )
+
+    orca.report(wt_path, comment=f"#{issue_number}: resuming")
+    outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
+    if not outcome.ok:
+        failing = ", ".join(g.name for g in outcome.gate_failures)
+        log(
+            f"FAILED after {outcome.attempts} attempts; worktree kept at {wt_path} "
+            f"for inspection. Failing gates: {failing}"
+        )
+        orca.report(wt_path, comment=f"#{issue_number}: FAILED gates ({failing}); worktree kept")
+        return False
+
+    if not _review_and_maybe_halt(
+        config, project_root, issue_number, wt_path, runtime_name=runtime_name, log=log
+    ):
+        return False
+
+    return _finish_run(
+        project_root,
+        config,
+        issue,
+        issue_number,
+        task_id,
+        branch,
+        wt_path,
+        request,
+        runtime,
+        outcome,
+        open_pr=open_pr,
+        keep_worktree=False,
+        log=log,
+    )
+
+
+def resume_command(
+    project_root: Path,
+    issue_number: int,
+    *,
+    message_file: Path,
+    runtime_name: str | None = None,
+    open_pr: bool = True,
+) -> list[str]:
+    """Argv that re-runs this resume inline, for spawning onto a surface.
+
+    Feedback always travels as a file path here, never `--message`: the
+    surface's argv is what a hand-rolled terminal command got wrong (#73),
+    and a path is immune to shell quoting the way inline text is not.
+    """
+    command = [
+        "agent",
+        "resume",
+        str(issue_number),
+        "--surface",
+        "inline",
+        "--message-file",
+        str(message_file),
+    ]
+    if runtime_name:
+        command += ["--runtime", runtime_name]
+    if not open_pr:
+        command.append("--no-pr")
+    return command + ["--project", str(project_root)]
+
+
+def dispatch_resume(
+    project_root: Path,
+    issue_number: int,
+    *,
+    surface_name: str = "auto",
+    message: str | None = None,
+    message_file: Path | None = None,
+    runtime_name: str | None = None,
+    open_pr: bool = True,
+) -> str:
+    """Resolve the existing task worktree and spawn `agent resume` attached to it.
+
+    The worktree is resolved before anything else: a missing one must fail
+    fast with no surface spawned, not leave a dangling terminal that dies
+    seconds later the way the hand-rolled `orca terminal create` attempts did.
+    """
+    config = load_project_config(project_root)
+    wt_path = _existing_worktree(project_root, config, issue_number)
+
+    if message is not None and message_file is not None:
+        raise ValueError("pass either --message or --message-file, not both")
+    if message is not None:
+        feedback_path = _ad_hoc_message_path(project_root, issue_number)
+        feedback_path.parent.mkdir(exist_ok=True)
+        feedback_path.write_text(message)
+    elif message_file is not None:
+        feedback_path = message_file.resolve()
+        if not feedback_path.is_file():
+            raise CommandError(f"message file not found: {feedback_path}")
+    else:
+        feedback_path = _feedback_path(project_root, issue_number)
+        if not feedback_path.is_file():
+            raise FileNotFoundError(
+                f"no feedback for issue #{issue_number} — pass --message or --message-file, "
+                f"or check {feedback_path}"
+            )
+
+    chosen = surfaces.pick(surface_name)
+    command = resume_command(
+        project_root,
+        issue_number,
+        message_file=feedback_path,
+        runtime_name=runtime_name,
+        open_pr=open_pr,
+    )
+    return chosen.spawn(
+        f"agent-resume-issue-{issue_number}", command, project_root, attach_path=wt_path
+    )
 
 
 def _abort_cleanly(
@@ -358,17 +606,31 @@ def _format_comments(issue: dict[str, Any]) -> str:
     )
 
 
-def _self_review_ok(
+@dataclass(frozen=True)
+class SelfReview:
+    ok: bool
+    text: str
+    reviewed: bool = True
+    """False when there was nothing to review, which is not a rejection.
+
+    `git diff` ignores untracked files, so an implementer that only *creates*
+    files produces an empty diff. Treating that as REQUEST CHANGES would post
+    "changes requested — (empty diff)" on the issue and store it as resume
+    feedback, telling the next run to address a message that says nothing.
+    """
+
+
+def _self_review(
     config: ProjectConfig,
     wt_path: Path,
     *,
     log: Callable[[str], None],
     runtime_override: str | None = None,
-) -> bool:
+) -> SelfReview:
     diff = run(["git", "diff"], cwd=wt_path).stdout
     if not diff.strip():
         log("self-review skipped: empty diff")
-        return False
+        return SelfReview(False, "(empty diff — nothing to review)", reviewed=False)
     prompt = render_task("review", diff=diff, context="Pre-commit self-review of local changes.")
     runtime, request = role_request(
         config, "reviewer", prompt, wt_path, runtime_override=runtime_override
@@ -381,4 +643,59 @@ def _self_review_ok(
     )
     if not verdict_ok:
         log(result.text)
-    return verdict_ok
+    return SelfReview(verdict_ok, result.text)
+
+
+def _review_and_maybe_halt(
+    config: ProjectConfig,
+    project_root: Path,
+    issue_number: int,
+    wt_path: Path,
+    *,
+    runtime_name: str | None,
+    log: Callable[[str], None],
+) -> bool:
+    """Run self-review if enabled; on REQUEST CHANGES, record the halt. True means proceed."""
+    if not config.loop.self_review:
+        return True
+    review = _self_review(config, wt_path, log=log, runtime_override=runtime_name)
+    if review.ok:
+        return True
+    if not review.reviewed:
+        # Nothing was reviewed, so there are no findings to record and nothing
+        # to tell the issue thread. Halt without the side effects.
+        return False
+    log(f"self-review requested changes; worktree kept at {wt_path}")
+    orca.report(wt_path, comment=f"#{issue_number}: self-review requested changes")
+    _record_halt(project_root, issue_number, review.text, log=log)
+    return False
+
+
+def _record_halt(
+    project_root: Path,
+    issue_number: int,
+    feedback: str,
+    *,
+    log: Callable[[str], None],
+) -> None:
+    """Stash the review findings for `agent resume` and mark the issue as halted, not unstarted.
+
+    Both the file and the comment are best-effort: a missing `gh` remote (test
+    or scratch repos) must not turn a halt into a crash.
+    """
+    path = _feedback_path(project_root, issue_number)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(feedback)
+    try:
+        github.comment_on_issue(
+            issue_number,
+            "## Agent self-review — changes requested\n\n"
+            f"{feedback}\n\n"
+            f"Resume with `agent resume {issue_number}`.",
+            cwd=project_root,
+        )
+    except (CommandError, OSError) as exc:
+        # OSError too: utils.run -> subprocess.run raises FileNotFoundError when
+        # `gh` isn't on PATH, which CommandError doesn't cover — and this must
+        # never turn a halt into a crash, as the docstring promises.
+        log(f"could not post halt comment on issue #{issue_number}: {exc}")

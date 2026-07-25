@@ -141,6 +141,37 @@ what stops the local lane and the CI lane from fixing the same issue twice.
 The message names the existing PR; pass `--force` to implement anyway (e.g.
 the match was a false positive).
 
+### Resuming a self-review halt
+
+If self-review requests changes, `agent implement` stops and keeps the
+worktree instead of committing. That halt is not silent: the findings are
+saved to `.agent-runs/issue-<N>-feedback.md` under the project root (not the
+worktree, so they can't get swept into a later `git add -A`), and a `## Agent
+self-review` comment goes on the issue — a human-visible marker that work is
+already sitting in a worktree rather than not yet started. Posting the comment
+is best-effort; a repo without a `gh` remote (e.g. a test checkout) just skips
+it.
+
+`agent queue` does not read it: the queue lists open `agent-ready` issues and
+a halt doesn't remove that label, so a halted issue still appears there.
+Re-dispatching one is blocked, but by the worktree already existing — the
+error points at `agent worktree remove`, and `agent resume <N>` is what you
+usually want instead.
+
+```sh
+agent resume 123                       # implementer role, fed the stored self-review findings
+agent resume 123 -m "also cover the empty-input case"   # override with different feedback
+agent resume 123 --message-file notes.md
+```
+
+`agent resume` finds the task's existing worktree (erroring clearly, not with
+a traceback, if there isn't one), attaches to a surface the same way `agent
+dispatch` does, and runs the same loop → self-review → PR tail as
+`agent implement`. Feedback always reaches the agent as a file — inside the
+worktree-spawning surface's argv it is only ever a path, never inlined text —
+so it can't be mangled by shell quoting the way a hand-rolled
+`orca terminal create --command "$(cat …)"` invocation can.
+
 ## 4. Review & merge — humans own main
 
 ```sh
