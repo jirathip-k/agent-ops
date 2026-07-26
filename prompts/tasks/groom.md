@@ -34,10 +34,44 @@ For each issue, in this order:
      affected surface/screen (on the issue or supplied by `agent spec`) — a
      one-line criterion is not enough there; keep them `backlog` until the
      checklist exists.
+   - `plan-requested` — the issue has a real body describing a genuine
+     problem, but *how* to solve it is an open design question: more than
+     one plausible approach, an unclear blast radius, or work that spans
+     several modules. Scope is understood; the route through the code is
+     not. This routes it to the plan lane, which posts an "## Agent plan"
+     comment for a human to review.
+   - `spec-requested` — the issue is a one-line idea or a bare symptom with
+     no body worth planning against, and what it needs first is
+     elaboration: acceptance criteria, affected surfaces, a definition of
+     done. Also the right verdict for a UI-facing issue held back only by
+     the missing checklist above. This routes it to the spec lane, which
+     posts an "## Agent spec" comment.
    - `needs-human` — ambiguous intent, product/data/security decision,
-     danger zone, or not confirmable from the code.
-   - `backlog` — idea or enhancement without acceptance criteria.
+     danger zone, or not confirmable from the code. Prefer this over the
+     two gate verdicts whenever the gap is a *decision* rather than missing
+     detail: no amount of speccing or planning resolves "should we do this
+     at all", and routing it to a lane just burns tokens on a comment
+     nobody can act on.
+   - `backlog` — idea or enhancement without acceptance criteria that is
+     not worth elaborating yet: nobody is asking for it, it depends on work
+     that has not happened, or it is a nice-to-have you would not schedule
+     this quarter. The dividing line against `spec-requested` is intent to
+     act, not size.
 4. **Correctly labeled and nothing changed?** → `keep`.
+
+`spec-requested` and `plan-requested` cost tokens on the next spec/plan
+run, so emit them only once per issue. Before choosing either, read the
+issue's comments (`gh issue view <n> --comments`): an issue that already
+carries an "## Agent spec" comment has been through the spec lane, and one
+that carries "## Agent plan" has been through the plan lane. Re-requesting
+a lane that has already reported is never right — if its output was
+enough, the verdict is `agent-ready`; if it was not, the verdict is
+`needs-human`. Emit at most one gate verdict per issue per run; a single
+issue cannot be both specced and planned.
+
+A gate verdict says the issue is *not* ready to implement, so it clears an
+existing `agent-ready` label. It leaves `backlog` and `needs-human` in
+place — the issue keeps its bucket while it waits in the lane queue.
 
 Closing is the highest bar: only `close-fixed` when you verified the fix in
 the code content itself, only `close-invalid` when you can name what makes
@@ -52,6 +86,8 @@ the safer label — never close on uncertainty.
 End your final message with a block in exactly this form (nothing after it):
 
 GROOM RESULTS:
-#<number> agent-ready|needs-human|backlog|close-fixed|close-invalid|keep — <one concise sentence of reasoning>
+#<number> agent-ready|spec-requested|plan-requested|needs-human|backlog|close-fixed|close-invalid|keep — <one concise sentence of reasoning>
 
-One line per issue, every issue accounted for.
+One line per issue, every issue accounted for. Use exactly one of those
+verdicts — anything else is discarded as unrecognised and the issue is left
+untouched.

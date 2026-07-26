@@ -12,12 +12,20 @@ from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import role_request
-from agent_ops.workflows.triage import BUCKET_LABELS, LABEL_COLORS
+from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, LABEL_COLORS
 
-_RESULT_LINE = re.compile(
-    r"^#(\d+)\s+(agent-ready|needs-human|backlog|close-fixed|close-invalid|keep)"
-    r"\s*[—-]+\s*(.+)$"
-)
+# Verdicts that route an issue into a CI lane instead of bucketing it (#97).
+# They say "not ready to implement", so they clear `agent-ready` — but they
+# leave the other buckets alone: an issue keeps its bucket while it waits in
+# the spec/plan queue, and stripping it would only feed it back to triage.
+GATE_VERDICTS = frozenset(GATE_LABELS)
+
+VERDICTS = BUCKET_LABELS | GATE_VERDICTS | {"close-fixed", "close-invalid", "keep"}
+
+# Deliberately not an alternation of the known verdicts: a model that invents
+# one should be visible in the log and skipped, not silently dropped by the
+# regex — dropping every line is indistinguishable from an unparseable run.
+_RESULT_LINE = re.compile(r"^#(\d+)\s+([a-z][a-z-]*)\s*[—-]+\s*(.+)$")
 
 
 @dataclass(frozen=True)
@@ -44,7 +52,8 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
     """Re-validate every open issue against the current working branch.
 
     Closes verifiably-fixed and invalid issues (with an evidence comment),
-    promotes workable ones to agent-ready, and refreshes stale buckets.
+    promotes workable ones to agent-ready, routes the ones that need design
+    or elaboration into the plan/spec lanes, and refreshes stale buckets.
     Dispatch and merge remain the human's — groom only maintains the queue.
     """
     config = load_project_config(project_root)
@@ -111,7 +120,9 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
     if not results:
         raise RuntimeError(f"Groom produced no parseable results:\n{result.text[-500:]}")
 
-    for name, color in LABEL_COLORS.items():
+    # Gate labels included: groom can now apply them, and `gh issue edit
+    # --add-label` fails outright against a label the repo never created.
+    for name, color in (LABEL_COLORS | GATE_LABELS).items():
         run(
             ["gh", "label", "create", name, "--color", color, "--force"],
             cwd=project_root,
@@ -120,6 +131,11 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
 
     for r in results:
         current = labels_by_number.get(r.number, set())
+        if r.verdict not in VERDICTS:
+            # A verdict nobody defined is a no-op, never a crash: applying it
+            # would mean creating a label the agent invented.
+            log(f"#{r.number} skipped — unrecognised verdict {r.verdict!r}: {r.reason}")
+            continue
         if r.verdict == "keep":
             log(f"#{r.number} keep: {r.reason}")
             continue
@@ -138,7 +154,8 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
             log(f"#{r.number} closed ({r.verdict}): {r.reason}")
             continue
         edit = ["gh", "issue", "edit", str(r.number), "--add-label", r.verdict]
-        for stale in (BUCKET_LABELS - {r.verdict}) & current:
+        superseded = {"agent-ready"} if r.verdict in GATE_VERDICTS else BUCKET_LABELS
+        for stale in (superseded - {r.verdict}) & current:
             edit += ["--remove-label", stale]
         run(edit, cwd=project_root)
         if r.verdict not in current:

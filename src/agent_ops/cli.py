@@ -35,7 +35,7 @@ from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
 from agent_ops.workflows.spawn import REPORT_STATES
-from agent_ops.workflows.triage import LABEL_COLORS
+from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
 
 app = typer.Typer(
     name="agent",
@@ -58,12 +58,12 @@ GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
 
 # Every label the lanes read or write, with the colors the pipelines use.
 # The triage/groom/scout lanes create their own verdict labels at run time
-# (LABEL_COLORS, merged in below), but the gate labels are applied by a human
-# — they have to exist before anyone can request work, so `init` prints the
-# whole set at onboarding rather than leaving it to the first failed run.
+# (LABEL_COLORS, merged in below, plus the gate labels groom may now emit),
+# but a gate label is mostly applied by a human — it has to exist before
+# anyone can request work, so `init` prints the whole set at onboarding
+# rather than leaving it to the first failed run.
 ONBOARDING_LABELS: dict[str, str] = {
-    "spec-requested": "5319e7",
-    "plan-requested": "1d76db",
+    **GATE_LABELS,
     "approved-for-agent": "1d76db",
     "blocked": "b60205",
     "triage:done": "ededed",
