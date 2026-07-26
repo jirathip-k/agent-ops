@@ -45,13 +45,22 @@ Everywhere below, `BASE_BRANCH` and `STABLE_BRANCH` mean these resolved names.
 
 ## Step 1 — Fetch & Triage
 1. List open issues updated since the last run. Skip anything labeled
-   `triage:done`, `needs-human`, `blocked`, or already assigned — and skip any
-   issue that already has an open PR for it (a `fix/issue-<N>` branch or a PR
-   whose body references it): the local lane may have picked it up.
+   `triage:done`, `needs-human`, `blocked`, `agent:claimed`, or already
+   assigned — and skip any issue that already has an open PR for it (a
+   `fix/issue-<N>` branch or a PR whose body references it): the local lane
+   may have picked it up.
+   `agent:claimed` means a local agent is working on that issue *right now*,
+   which no other label says. Stale-claim rule, and it applies only to this
+   label: if the claim is older than 8 hours the run that took it died, so
+   remove the label, comment saying it was cleared as stale, and treat the
+   issue normally this run. Read the claim's age from GitHub, never guess it:
+   `gh api repos/<owner>/<repo>/issues/<N>/events --paginate --jq '.[] |
+   select(.event == "labeled" and .label.name == "agent:claimed") |
+   .created_at'` — the last line is the current claim.
    Exception: `agent-ready` or `approved-for-agent` overrides `triage:done`
    and `backlog` — that's the human's post-triage go-ahead, so the issue
    re-enters the normal lane (Step 2A). It does NOT override `needs-human`,
-   `blocked`, or the open-PR skip.
+   `blocked`, `agent:claimed`, or the open-PR skip.
    If triage exploration itself uncovers unrelated defects, file them per
    Step 5 (search for duplicates first, `found-by-audit` label, never fix).
 2. Classify each new issue and route it:

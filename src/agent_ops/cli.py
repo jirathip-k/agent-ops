@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, messages, registry, stubs, surfaces, worktree
+from agent_ops import __version__, claims, github, messages, registry, stubs, surfaces, worktree
 from agent_ops.config import (
     PROJECT_CONFIG_REL,
     ProjectConfig,
@@ -70,6 +70,11 @@ ONBOARDING_LABELS: dict[str, str] = {
     "ready-to-merge": "0e8a16",
     "hotfix-ready": "d93f0b",
     "hotfix-backmerge": "5319e7",
+    # Applied and cleared by the runs themselves, not by a human — but listed
+    # here anyway: an agent started by hand claims with `agent claim <N>`, and a
+    # repo where the label does not exist yet turns that into a failed claim
+    # rather than a visible one.
+    claims.CLAIM_LABEL: claims.CLAIM_LABEL_COLOR,
     **LABEL_COLORS,
 }
 
@@ -439,6 +444,41 @@ def report(
         )
     except Exception as exc:  # noqa: BLE001 — a status report never fails a run
         _err(f"could not report #{issue}: {exc}")
+
+
+@app.command()
+def claim(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number to claim")],
+    project: ProjectOpt = Path("."),
+    release: Annotated[
+        bool, typer.Option("--release", help="Clear the claim instead of taking it")
+    ] = False,
+) -> None:
+    """Say an agent is working on this issue right now, so other lanes skip it.
+
+    `agent implement`, `agent resume` and `agent spawn` claim and release on
+    their own — this is the manual path, and it exists for the one case they
+    cannot cover: an agent started by hand in a worktree, which is how most of
+    this platform's own work happens. No agent-ops command runs there, so
+    nothing can claim on its behalf; run this from the worktree instead, and
+    `--release` when you are done.
+
+    A claim is not permanent. The CI lane treats one older than the TTL as the
+    residue of a dead run and clears it, and `agent doctor` reports stale claims
+    long before that.
+    """
+    root = project.resolve()
+    if release:
+        ok = claims.release(root, issue, log=_err)
+        typer.echo(f"released the claim on #{issue}" if ok else f"#{issue} was not released")
+    else:
+        ok = claims.claim(root, issue, log=_err)
+        typer.echo(
+            f"claimed #{issue} — release it with `agent claim {issue} --release`"
+            if ok
+            else f"#{issue} was not claimed"
+        )
+    raise typer.Exit(0 if ok else 1)
 
 
 @app.command()
@@ -827,12 +867,45 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     if missing:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
 
+    _report_claims(project.resolve())
     _report_caller_drift(project.resolve())
     checkout_note = _checkout_drift(PLATFORM_ROOT)
     if checkout_note:
         typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
+
+
+def _report_claims(root: Path) -> None:
+    """Report claims that outlived their run, and local work nothing has claimed.
+
+    Never fails `doctor` and never crashes it. Both halves are warnings because
+    both are recoverable by hand in one command, and because this check is the
+    only thing that makes either failure visible at all: a stale claim is an
+    issue no lane will pick up and nobody is told about, which is precisely the
+    silent-blocking trade `docs/failure-modes.md` exists to keep honest.
+
+    Two shapes are deliberately *not* reported as problems: a claim with no
+    local run (another machine may hold it — see `claims.audit`), and a repo
+    with no claims at all, which is the ordinary state and does not need a line.
+    """
+    if github.remote_slug(root) is None:
+        # No shared issue tracker, so nothing claims here in the first place
+        # (`claims.claim` no-ops the same way). Reporting "could not check"
+        # for every scratch checkout would train people to ignore the line.
+        return
+    try:
+        audit = claims.audit(root)
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
+        typer.echo(f"! could not check agent claims ({exc})")
+        return
+    for stale in audit.stale:
+        typer.echo(f"! {stale.detail} — clear it with `agent claim {stale.issue} --release`")
+    for issue in audit.unclaimed:
+        typer.echo(
+            f"! #{issue} has a worktree here but no `{claims.CLAIM_LABEL}` label — the CI "
+            f"lane can still start its own run on it; claim it with `agent claim {issue}`"
+        )
 
 
 def _report_roles(config: ProjectConfig) -> bool:

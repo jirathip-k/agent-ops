@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, messages, orca, runs, surfaces, worktree
+from agent_ops import claims, github, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
@@ -237,7 +237,44 @@ def run_implement(
     reviewer roles default to a stronger model in read-only mode, the
     implementer does the bulk work (see `agents:` in config). Returns True on
     success. On implement/review failure the worktree is kept for inspection.
+
+    The issue is claimed for the duration (issue #131) so the scheduled CI lane
+    does not start a second run on it. The release is here, in a `finally`,
+    rather than at each of the terminal paths inside: there is no exit from this
+    function with an agent still working, so one unconditional release cannot
+    drift out of step with the eight ways a run can end — including an
+    exception, which none of those paths would have covered.
     """
+    claim = claims.Claim(project_root, issue_number, log=log)
+    try:
+        return _run_implement(
+            project_root,
+            issue_number,
+            claim=claim,
+            runtime_name=runtime_name,
+            open_pr=open_pr,
+            keep_worktree=keep_worktree,
+            plan_file=plan_file,
+            force=force,
+            log=log,
+        )
+    finally:
+        claim.release()
+
+
+def _run_implement(
+    project_root: Path,
+    issue_number: int,
+    *,
+    claim: claims.Claim,
+    runtime_name: str | None = None,
+    open_pr: bool = True,
+    keep_worktree: bool = False,
+    plan_file: Path | None = None,
+    force: bool = False,
+    log: Callable[[str], None] = flush_print,
+) -> bool:
+    """`run_implement`'s body, minus the claim bookkeeping that wraps it."""
     config = load_project_config(project_root)
     issue = github.get_issue(issue_number, cwd=project_root)
     task_id, branch = task_identifiers(issue_number)
@@ -260,8 +297,9 @@ def run_implement(
     )
     # A new cycle owns this issue's status from here on. Deliberately after the
     # already-has-an-open-PR bail-out above, which starts nothing and so has no
-    # business discarding the previous cycle's record.
+    # business discarding the previous cycle's record — or taking a claim.
     runs.clear_outcome(project_root, issue_number, log=log)
+    claim.take()
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 
@@ -483,7 +521,40 @@ def run_resume(
     after a halt — the file `_record_halt` wrote. Runs the same loop →
     self-review → PR tail as `run_implement`, on the existing worktree instead
     of a fresh one.
+
+    Claimed and released exactly as `run_implement` is, and for the same reason:
+    a resume is a run, and the halt that preceded it released the issue.
     """
+    claim = claims.Claim(project_root, issue_number, log=log)
+    try:
+        return _run_resume(
+            project_root,
+            issue_number,
+            claim=claim,
+            message=message,
+            message_file=message_file,
+            runtime_name=runtime_name,
+            open_pr=open_pr,
+            keep_worktree=keep_worktree,
+            log=log,
+        )
+    finally:
+        claim.release()
+
+
+def _run_resume(
+    project_root: Path,
+    issue_number: int,
+    *,
+    claim: claims.Claim,
+    message: str | None = None,
+    message_file: Path | None = None,
+    runtime_name: str | None = None,
+    open_pr: bool = True,
+    keep_worktree: bool = False,
+    log: Callable[[str], None] = flush_print,
+) -> bool:
+    """`run_resume`'s body, minus the claim bookkeeping that wraps it."""
     config = load_project_config(project_root)
     task_id, branch = task_identifiers(issue_number)
     wt_path = _existing_worktree(project_root, config, issue_number)
@@ -511,8 +582,10 @@ def run_resume(
 
     # Same as `run_implement`: whatever a previous cycle recorded, this one is
     # now the current word on the issue. Placed after `_resolve_feedback`,
-    # which raises when there is nothing to resume from — no cycle starts then.
+    # which raises when there is nothing to resume from — no cycle starts then,
+    # so there is nothing to claim either.
     runs.clear_outcome(project_root, issue_number, log=log)
+    claim.take()
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: resuming")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
