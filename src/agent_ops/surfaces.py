@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -16,6 +17,30 @@ from agent_ops.utils import CommandError, run
 # monkeypatch `surfaces.time.sleep` without touching class internals.
 _ATTACH_ATTEMPTS = 3
 _ATTACH_DELAY_S = 2.0
+
+
+@dataclass(frozen=True)
+class Spawned:
+    """Where a spawned run went, and how to address it once it is running.
+
+    `where` is the human-readable string every caller has always printed. The
+    rest is the same fact machine-readably: a dispatched run's identity used
+    to be formatted into that prose and thrown away, which left a supervisor
+    with nothing to name the run by (issue #98).
+
+    Every identity field is optional and surface-specific — `handle` for an
+    Orca terminal, `pid`/`log_path` for a detached background process — so a
+    surface with no IDE behind it satisfies the protocol by filling in what it
+    has. Nothing here is Orca-shaped: consumers treat a missing `handle` as
+    "no push channel for this run" and fall back to polling, which is the
+    permanent state of the background surface and of the CI lane.
+    """
+
+    where: str
+    surface: str
+    handle: str | None = None
+    pid: int | None = None
+    log_path: Path | None = None
 
 
 class Surface(Protocol):
@@ -32,8 +57,8 @@ class Surface(Protocol):
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
-        """Start the command from `cwd`; return a human-readable 'where it went'.
+    ) -> Spawned:
+        """Start the command from `cwd`; return where it went and how to address it.
 
         `attach_path` is where the run should be *shown* (e.g. the task's
         worktree card in an IDE); it defaults to `cwd`. Surfaces without a UI
@@ -99,13 +124,17 @@ class OrcaSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> Spawned:
         target = attach_path or cwd
         last_err = ""
         for attempt in range(_ATTACH_ATTEMPTS):
             handle, stderr = _attempt_orca_attach(target, label, command)
             if handle is not None:
-                return f"orca terminal {label!r} (handle {handle})"
+                return Spawned(
+                    where=f"orca terminal {label!r} (handle {handle})",
+                    surface=self.name,
+                    handle=handle,
+                )
             last_err = stderr
             if attempt < _ATTACH_ATTEMPTS - 1:
                 time.sleep(_ATTACH_DELAY_S)
@@ -120,10 +149,14 @@ class OrcaSurface:
             fallback_label = f"{label} (shell: project root, not the worktree)"
             handle, stderr = _attempt_orca_attach(cwd, fallback_label, command)
             if handle is not None:
-                return (
-                    f"orca terminal {label!r} (handle {handle}; {target} not indexed yet by "
-                    f"Orca, fell back to project root card — shell starts at {cwd}, not "
-                    f"the worktree)"
+                return Spawned(
+                    where=(
+                        f"orca terminal {label!r} (handle {handle}; {target} not indexed yet by "
+                        f"Orca, fell back to project root card — shell starts at {cwd}, not "
+                        f"the worktree)"
+                    ),
+                    surface=self.name,
+                    handle=handle,
                 )
             last_err = stderr
 
@@ -151,7 +184,7 @@ class BackgroundSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> Spawned:
         log_dir = cwd / ".agent-runs"
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"{label}.log"
@@ -163,7 +196,15 @@ class BackgroundSurface:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        return f"background pid {proc.pid} (watch: tail -f {log_path})"
+        # No `handle`: there is no IDE here and so no message bus to address.
+        # A run on this surface is watched by polling, exactly as before —
+        # `pid` and `log_path` are its identity instead.
+        return Spawned(
+            where=f"background pid {proc.pid} (watch: tail -f {log_path})",
+            surface=self.name,
+            pid=proc.pid,
+            log_path=log_path,
+        )
 
 
 # Detection order for --surface auto: most visible first.

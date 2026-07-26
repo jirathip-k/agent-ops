@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import worktree
+from agent_ops import messages, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
@@ -147,10 +147,22 @@ def run_triage(
 
         for r in results:
             if r.verdict == "agent-ready":
-                where = surfaces.pick("auto").spawn(
+                spawned = surfaces.pick("auto").spawn(
                     f"agent-issue-{r.number}",
                     ["agent", "implement", str(r.number), "--project", str(project_root)],
                     project_root,
                 )
-                log(f"#{r.number} dispatched → {where}")
+                # Recorded for the same reason `agent dispatch` records it:
+                # these runs are exactly what a later `agent runs --wait`
+                # watches, so they need an address too (issue #98).
+                messages.record_spawn(
+                    project_root,
+                    r.number,
+                    surface=spawned.surface,
+                    handle=spawned.handle,
+                    pid=spawned.pid,
+                    log_path=spawned.log_path,
+                    log=log,
+                )
+                log(f"#{r.number} dispatched → {spawned.where}")
     return results

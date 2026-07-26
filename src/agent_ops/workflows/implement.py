@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, orca, surfaces, worktree
+from agent_ops import github, messages, orca, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
@@ -242,11 +242,12 @@ def dispatch_plan(
     surface_name: str = "auto",
     post_comment: bool = False,
     runtime_name: str | None = None,
-) -> str:
-    """Spawn `agent plan` on a visible surface; return a 'where it went' string.
+) -> surfaces.Spawned:
+    """Spawn `agent plan` on a visible surface; return where it went.
 
     Like a review, a plan is read-only and has no task worktree, so it attaches
-    to the project's own card — no `attach_path`.
+    to the project's own card — no `attach_path`. No spawn record either: a
+    plan is not a run `agent runs` tracks, so nothing ever waits on one.
     """
     chosen = surfaces.pick(surface_name)
     command = plan_command(
@@ -389,6 +390,18 @@ def run_implement(
             f"for inspection. Failing gates: {failing}"
         )
         card.note(f"#{issue_number}: FAILED gates ({failing}); worktree kept")
+        # From the outside this exit is indistinguishable from an abandoned
+        # run — worktree kept, no PR, no feedback — so a supervisor can only
+        # reach `stopped` for it, and only after a two-poll debounce. Saying
+        # so directly is the whole point of the channel (issue #98).
+        messages.send_outcome(
+            project_root,
+            issue_number,
+            state="failed",
+            reason=f"gates failed ({failing}) after {outcome.attempts} attempts; "
+            f"worktree kept at {wt_path}",
+            log=log,
+        )
         return False
 
     if not _review_and_maybe_halt(
@@ -487,6 +500,12 @@ def _finish_run(
     if not keep_worktree:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
+    # The same facts as the durable record above, pushed to whoever is waiting
+    # rather than left to be discovered (issue #98). Last thing this run does,
+    # deliberately: a supervisor treats a pushed outcome as terminal on the
+    # spot, so announcing `done` any earlier would release it while the
+    # cleanup above was still running.
+    messages.send_outcome(project_root, issue_number, state="done", pr_url=pr_url, log=log)
     return True
 
 
@@ -570,6 +589,18 @@ def run_resume(
             f"for inspection. Failing gates: {failing}"
         )
         card.note(f"#{issue_number}: FAILED gates ({failing}); worktree kept")
+        # From the outside this exit is indistinguishable from an abandoned
+        # run — worktree kept, no PR, no feedback — so a supervisor can only
+        # reach `stopped` for it, and only after a two-poll debounce. Saying
+        # so directly is the whole point of the channel (issue #98).
+        messages.send_outcome(
+            project_root,
+            issue_number,
+            state="failed",
+            reason=f"gates failed ({failing}) after {outcome.attempts} attempts; "
+            f"worktree kept at {wt_path}",
+            log=log,
+        )
         return False
 
     if not _review_and_maybe_halt(
@@ -639,7 +670,8 @@ def dispatch_resume(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
-) -> str:
+    log: Callable[[str], None] = flush_print,
+) -> surfaces.Spawned:
     """Resolve the existing task worktree and spawn `agent resume` attached to it.
 
     The worktree is resolved before anything else: a missing one must fail
@@ -676,9 +708,22 @@ def dispatch_resume(
         open_pr=open_pr,
         keep_worktree=keep_worktree,
     )
-    return chosen.spawn(
+    spawned = chosen.spawn(
         f"agent-resume-issue-{issue_number}", command, project_root, attach_path=wt_path
     )
+    # Overwrites whatever the original dispatch recorded: this terminal is the
+    # one that owns the issue now, so it is the mailbox a supervisor should
+    # watch (issue #98).
+    messages.record_spawn(
+        project_root,
+        issue_number,
+        surface=spawned.surface,
+        handle=spawned.handle,
+        pid=spawned.pid,
+        log_path=spawned.log_path,
+        log=log,
+    )
+    return spawned
 
 
 def _abort_cleanly(
@@ -828,6 +873,15 @@ def _review_and_maybe_halt(
         # storing it would hand the next run a note that says nothing.
         log(f"self-review had nothing to review; worktree kept at {wt_path}")
         card.note(f"#{issue_number}: self-review had nothing to review")
+        # Same silent shape as the gate-failure exit: nothing was produced and
+        # nothing was stashed, so only the run itself can say what happened.
+        messages.send_outcome(
+            project_root,
+            issue_number,
+            state="failed",
+            reason=f"self-review had nothing to review; worktree kept at {wt_path}",
+            log=log,
+        )
         return False
     log(f"self-review requested changes; worktree kept at {wt_path}")
     card.note(f"#{issue_number}: self-review requested changes")
@@ -845,8 +899,8 @@ def _record_halt(
     """Stash the review findings for `agent resume` and mark the issue as halted, not unstarted.
 
     Every step here is best-effort: a missing `gh` remote (test or scratch
-    repos), or an outcome record that won't delete, must not turn a halt into
-    a crash.
+    repos), an outcome record that won't delete, or a message that cannot be
+    pushed, must not turn a halt into a crash.
     """
     # Before the feedback file, not after: `runs.classify` ranks `outcome`
     # above `has_feedback`, so a record left over from an earlier cycle would
@@ -855,6 +909,18 @@ def _record_halt(
     # of a cycle; this repeats it because a halt is the one exit where being
     # shadowed is actively harmful, and the record is cheap to remove twice.
     _clear_outcome(project_root, issue_number, log=log)
+    # Sent as an escalation rather than a plain completion: this run stopped
+    # early and cannot continue without a human, which is exactly the state a
+    # supervisor cannot tell apart from an ordinary pause by watching the
+    # terminal (issue #98). The findings themselves stay in the file below —
+    # the message carries the verdict and where to look, not the prose.
+    messages.send_outcome(
+        project_root,
+        issue_number,
+        state="halted",
+        reason=f"self-review requested changes — resume with `agent resume {issue_number}`",
+        log=log,
+    )
     path = _feedback_path(project_root, issue_number)
     try:
         path.parent.mkdir(exist_ok=True)

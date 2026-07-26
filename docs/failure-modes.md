@@ -65,6 +65,26 @@ self-review rounds, each finding a way the liveness signal lied:
 The pattern holds even here: each of these produced a confident, plausible
 answer that was wrong, rather than an error.
 
+Every row of that table is a *proxy*, which is why the same bug kept coming
+back wearing different clothes (#86, #87, #88, #92). A run that finished had no
+way to simply say so. It does now: where Orca is present, a run pushes its own
+terminal state over the orchestration bus and `agent runs --wait` wakes on it
+(#98). Two things keep that from becoming a fifth thing that can lie:
+
+- It is **only ever a shortcut.** A report can end a wait early; its absence
+  can never extend one. Drop every message and the derivation above runs on
+  exactly the cadence it always did, so no Orca — the background surface, the
+  CI lane, a forgotten terminal handle — costs latency, not correctness.
+- It is **not a record.** Messages are consumed once and are never the only
+  place a fact lives; the durable answers stay in GitHub and in the outcome
+  record (#87). That is also why the one-shot `agent runs` snapshot does not
+  read them — draining a message to render a snapshot would lose it.
+
+The one state it adds rather than hurries is `failed`: a run whose gates never
+passed leaves a worktree, no PR and no feedback, which is indistinguishable
+from an abandoned one. No table row can recover that — only the run itself
+knows.
+
 ## Tests
 
 A passing test is not evidence that a test guards anything. Two cases from one

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import github, surfaces, worktree
+from agent_ops import github, messages, surfaces, worktree
 from agent_ops.cli import app
 from agent_ops.utils import CommandError, run
 
@@ -32,9 +32,9 @@ class FakeSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         self.calls.append((label, command, cwd, attach_path))
-        return "fake surface"
+        return surfaces.Spawned(where="fake surface", surface=self.name)
 
 
 class FailingSurface:
@@ -45,7 +45,7 @@ class FailingSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         raise CommandError("spawn exploded")
 
 
@@ -227,3 +227,70 @@ def test_dispatch_rejects_missing_plan_file_before_creating_a_worktree(
     assert result.exit_code == 1
     assert not (repo.resolve() / ".worktrees" / "issue-5").exists()
     assert fake.calls == []
+
+
+def test_dispatch_records_how_to_reach_the_run(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #98: the terminal handle is a dispatched run's one stable
+    identity, and it used to be formatted into prose and dropped."""
+
+    class OrcaLikeSurface:
+        name = "orca"
+
+        def available(self) -> bool:
+            return True
+
+        def spawn(
+            self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+        ) -> surfaces.Spawned:
+            return surfaces.Spawned(where="w", surface="orca", handle="term_abc")
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": OrcaLikeSurface())
+
+    result = runner.invoke(app, ["dispatch", "5", "--project", str(repo)])
+
+    assert result.exit_code == 0
+    record = messages.load_spawn(repo.resolve(), 5)
+    assert record is not None
+    assert record.handle == "term_abc"
+
+
+def test_dispatch_records_a_handleless_surface_without_inventing_a_channel(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background surface has no message bus. The record still describes
+    the run — pid and log — but claims no handle, so nothing tries to push."""
+
+    class BackgroundLikeSurface:
+        name = "background"
+
+        def available(self) -> bool:
+            return True
+
+        def spawn(
+            self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+        ) -> surfaces.Spawned:
+            return surfaces.Spawned(
+                where="w", surface="background", pid=999, log_path=cwd / ".agent-runs" / "x.log"
+            )
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": BackgroundLikeSurface())
+
+    result = runner.invoke(app, ["dispatch", "5", "--project", str(repo)])
+
+    assert result.exit_code == 0
+    record = messages.load_spawn(repo.resolve(), 5)
+    assert record is not None
+    assert record.handle is None
+    assert record.pid == 999
+
+
+def test_dispatch_records_nothing_when_the_spawn_failed(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No run started, so there is no mailbox to point a supervisor at."""
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": FailingSurface())
+
+    result = runner.invoke(app, ["dispatch", "6", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    assert messages.load_spawn(repo.resolve(), 6) is None

@@ -1,160 +1,192 @@
-# IMPLEMENTATION_NOTES: issue #88
+# IMPLEMENTATION_NOTES: issue #98
 
-PR: https://github.com/jirathip-k/agent-ops/pull/94
-Branch: `fix/issue-88` → base `staging`
+Branch: `jirathip-k/issue-98-orchestration-messages` → base `main`
+Issue: https://github.com/jirathip-k/agent-ops/issues/98
+Design comment posted before implementing:
+https://github.com/jirathip-k/agent-ops/issues/98#issuecomment-5081282155
 
 ## What changed
 
-Test-only change, in `tests/test_runs.py`. No production code changed —
-`git diff origin/staging -- src/` is empty.
+A dispatched run can now *say* it finished instead of being inferred at.
 
-1. Added `import typer.main` and `from typer.core import TyperGroup, TyperOption`
-   (the file already imported `pytest` and `from typer.testing import CliRunner`).
-2. Added a helper `_value_taking_flags(command_name)` that introspects the live
-   typer app (`from agent_ops.cli import app`, already imported) via
-   `typer.main.get_command(app)` to get every option declared on a given command
-   (`implement`/`resume`/`dispatch`), filters out boolean flags (`is_flag`) and
-   the free-text flags in `runs._FREE_TEXT_FLAGS` (`--message`/`-m`, handled
-   separately by `runs._is_free_text_flag`), and returns the remaining option
-   spellings (`opts` + `secondary_opts`).
-3. Added `test_value_flags_mirrors_cli` (parametrized over
-   `implement`/`resume`/`dispatch`): asserts every value-taking option the CLI
-   actually declares is present in `runs._VALUE_FLAGS`. A new value-taking CLI
-   option not added to `_VALUE_FLAGS` now fails this test, naming the missing
-   option, instead of silently reintroducing the #82/#84 phantom-issue-number bug.
-4. Added `test_value_flags_excludes_boolean_options`: a sanity check on the
-   classifier itself (`--force`/`--no-pr`/`--keep-worktree` must never be
-   reported as value-taking), so test 3 can't pass vacuously.
-5. Added `test_value_flags_free_text_message_not_required_in_value_flags`:
-   confirms `--message`/`-m` are deliberately excluded from the completeness
-   check (they live in `_FREE_TEXT_FLAGS`, not `_VALUE_FLAGS`).
+**`src/agent_ops/surfaces.py`** — `Surface.spawn` returns a new frozen
+`Spawned` dataclass instead of a bare `str`: `where` (the display string every
+caller already printed, wording unchanged), `surface`, and the optional
+identity fields `handle` / `pid` / `log_path`. `OrcaSurface` fills in `handle`
+(including on the project-root fallback attach); `BackgroundSurface` fills in
+`pid` and `log_path` and leaves `handle` `None`. Nothing in the protocol is
+Orca-shaped — a missing `handle` simply means "no push channel", which is the
+permanent state of the background surface and of the CI lane.
 
-Confirmed `runs.py` names the constant `_FREE_TEXT_FLAGS`, as the plan assumed.
+**`src/agent_ops/messages.py`** (new) — the channel itself.
 
-## Why the introspection targets typer, not click
+- `record_spawn` / `load_spawn` persist `.agent-runs/issue-N-spawn.json`
+  (temp-then-replace, so a supervisor never reads a torn file). Written by
+  `agent dispatch`, `dispatch_resume` and triage's `--dispatch`. Deliberately
+  *not* one of `discover_runs`'s signal patterns — it is an address book, not
+  evidence a run exists; there is a test pinning that.
+- `send_outcome` pushes `orca orchestration send --type worker_done|escalation`
+  with a JSON payload. Resolves the target handle from the spawn record first
+  (by construction the handle the supervisor watches) and falls back to
+  `$ORCA_TERMINAL_HANDLE`.
+- `collect` drains with `--unread`; `wait_for_message` blocks with
+  `--peek --wait --timeout-ms`, so the message survives for `collect` to parse.
 
-The first push of this branch imported `click` directly and narrowed with
-`isinstance(group, click.Group)` / `isinstance(param, click.Option)`. That
-turned CI red:
+**`src/agent_ops/runs.py`** — `wait_for_runs` consults reports alongside the
+existing derivation, and `TERMINAL_STATES` gains `failed`. New `_observed`
+(report beats poll row beats `gone`) and `_wait_out` (the sleep, but wakeable).
+
+**`src/agent_ops/workflows/implement.py`** — sends at every terminal exit:
+`_finish_run` (`done`), `_record_halt` (`halted`), both gate-failure branches
+(`failed`), and the nothing-to-review halt (`failed`).
+
+**`src/agent_ops/utils.py`** — `run()` gains `timeout`, raising `CommandError`
+on expiry. Only used by the one call that blocks on purpose; without it a
+wedged `orca` would wedge `agent`.
+
+**`tests/conftest.py`** (new) — autouse fixture forcing `orca.available()`
+False and clearing `ORCA_TERMINAL_HANDLE`. See "Incidental fix" below.
+
+**`docs/failure-modes.md`** — the "is this run finished?" section documents the
+table of derived signals this issue is about; added a short subsection on the
+one signal that is no longer derived, and why it cannot become a fifth thing
+that lies.
+
+## The four design questions from the issue
+
+**Return shape / how `BackgroundSurface` complies** — above. Every identity
+field is optional and surface-specific.
+
+**Where the record lives, and bad records** — `.agent-runs/issue-N-spawn.json`.
+Missing is silent and ordinary; corrupt warns once and is treated as missing;
+a handle pointing at a terminal Orca has forgotten is answered by `check` with
+an empty list rather than an error, so it costs exactly one poll interval.
+Verified against the real CLI, not assumed (see Verification).
+
+**Push vs. polling, and who wins** — the message replaces the *sleep*, not the
+poll. `discover_runs` still runs every iteration; what changed is that the gap
+between iterations is a wakeable wait when exactly one watched run is
+outstanding. A report wins over the derived state: it is the run's own
+first-person account, so it is terminal immediately with no `stopped` debounce
+and is believed on a degraded poll (it is a local read with no `gh`/`git`
+behind it — the same argument #87 makes for the outcome record). `_finish_run`
+sends *last*, after the worktree removal, so a pushed `done` can never arrive
+while cleanup is still running.
+
+A missed message degrades rather than hangs because it is only ever consulted
+to shortcut a wait, never to justify continuing one. No state exists solely in
+a message. Concretely: `collect` returning `{}` forever leaves the loop
+byte-for-byte on its old path, and `wait_for_message` returning `False`
+instantly causes `_wait_out` to sleep the remaining budget, so a broken bus
+cannot spin the loop either.
+
+The one place a report adds an answer rather than hurrying one: a named issue
+whose run finished and swept up its own signals leaves nothing for
+`discover_runs` to find, and its unread report turns "no run found" into the
+verdict actually reached.
+
+**Payload alignment with #87** — the payload is `issue-N-outcome.json`'s record
+plus the addressing field: `state`, `pr_url`, `reason`, `finished_at`, `issue`.
+`test_send_outcome_payload_matches_the_durable_outcome_record` asserts this by
+generating both and comparing key sets, so the two cannot drift silently. The
+message vocabulary is a strict superset: `failed` exists only in messages,
+because no durable record is written on that exit today and `_record_halt`
+deliberately *clears* the outcome record (#93's design) — writing one there
+would fight it.
+
+## Constraints
+
+- **Orca optional** — every entry point checks `orca.available()` first.
+  `test_wait_for_runs_without_orca_never_touches_the_message_bus` runs the real
+  `messages` code with a subprocess stub that raises on any call.
+- **Not a state store** — messages are consumed once and never the sole record.
+  `discover_runs` / `report_runs` deliberately do *not* read them: draining to
+  render a one-shot snapshot would show a result once and lose it.
+- Workflows still depend only on the `Runtime` protocol; all subprocesses go
+  through `utils.run()`; `surfaces.py`'s `Popen` is untouched.
+- No changes to `.github/workflows/`, `prompts/orchestrator.md`,
+  `config/defaults.yaml`, `pyproject.toml` or `uv.lock`.
+
+## Base branch
+
+Retargeted to `main` mid-implementation per instruction. Note that at the time
+of writing `origin/main` is 3 commits *behind* `origin/staging` — the promotion
+has not happened yet — and this work sits on top of all three (#89's
+`discover_runs` tuple return, #93's outcome record, #94). Rebasing onto
+`origin/main` directly would have dropped the code this change is built on, so
+the branch is based on `origin/staging` and targets `main`; those three commits
+drop out of the diff once the promotion lands. Flagged rather than silently
+absorbed.
+
+## Fallback paths tested explicitly
+
+Beyond the happy path, per the issue's constraint that this is a fast path and
+never a dependency:
+
+| Scenario | Test |
+|---|---|
+| Orca absent entirely | `test_wait_for_runs_without_orca_never_touches_the_message_bus`, `test_send_outcome_is_a_no_op_without_orca`, `test_collect_is_a_no_op_without_orca` |
+| Orca present, report never arrives | `test_wait_for_runs_falls_back_to_polling_when_no_report_ever_arrives` |
+| Stale handle Orca has forgotten | `test_wait_for_runs_stale_handle_costs_one_interval_and_nothing_more` (end to end through real `messages` code), `test_wait_for_message_returns_false_for_a_stale_handle` |
+| Spawn record missing / corrupt | `test_load_spawn_is_silent_when_there_is_no_record`, `test_load_spawn_warns_and_degrades_on_a_corrupt_record` |
+| Surface with no handle at all | `test_send_outcome_is_a_no_op_without_a_handle`, `test_dispatch_records_a_handleless_surface_without_inventing_a_channel` |
+| Wedged `orca` CLI | `test_wait_for_message_returns_false_when_the_cli_wedges` |
+| Bus gone mid-halt | `test_record_halt_survives_a_message_bus_that_has_gone_away` |
+| Early-returning wait must not spin | `test_wait_for_runs_sleeps_out_the_budget_when_the_wait_returns_early` |
+| Report disagrees with the poll | `test_wait_for_runs_prefers_a_reported_outcome_over_the_derivation` |
+| Report during a `gh` outage | `test_wait_for_runs_believes_a_report_while_gh_is_down` |
+| Message for the wrong issue | `test_collect_drops_a_message_addressed_to_a_different_issue` |
+
+## Incidental fix: `tests/conftest.py`
+
+The suite had no `conftest.py` and no global Orca guard — individual tests
+patched `orca.available` as needed. That was survivable while every Orca path
+failed fast, but `messages.wait_for_message` *blocks*, so run inside an Orca
+session the `wait_for_runs` tests hung on a real `orca orchestration check
+--wait` for a poll interval each. The suite now behaves the same inside and
+outside the IDE. `ORCA_TERMINAL_HANDLE` is cleared for the same reason: it is
+set in every Orca terminal, and leaving it would make the "this run has no push
+channel" tests pass or fail depending on where the suite was started.
+
+## One thing the tests caught in review
+
+`test_record_halt_survives_a_send_that_fails` was first written asserting the
+opposite of its own docstring — and passed, which exposed that `send_outcome`
+could in principle propagate `FileNotFoundError` from `utils.run` if `orca`
+vanished after `available()` said otherwise (the same hole `_record_halt`
+already documents for a missing `gh`). `send_outcome` and `_check` now catch
+`OSError` too, and the test was rewritten to drive the real `messages` code and
+assert the halt is still stashed and commented.
+
+## Verification
+
+The CLI contract was probed against the real `orca` (v1.4.156) before designing
+against it, and the finished module was smoke-tested end to end in a scratch
+directory with a live terminal handle:
+
+- `send_outcome` → `wait_for_message` returned `True` in **0.14s** → `collect`
+  parsed `RunMessage(state='done', pr_url='https://x/pull/99')` → a second
+  `collect` returned `{}`, confirming the single-consume semantics.
+- A handle Orca does not know: `wait_for_message` blocked the **full 3.0s**
+  budget and returned `False`, `collect` returned `{}` — no error, exactly the
+  documented degradation to the poll cadence.
+- `--peek --wait` confirmed non-consuming: two consecutive peeks both saw the
+  same pending message.
+
+## Gates
+
+All three run locally in this worktree, on the final tree:
 
 ```
-tests/test_runs.py:4:8 - error: Import "click" could not be resolved (reportMissingImports)
-tests/test_runs.py:690:17 - error: Cannot access attribute "commands" for class "Command"
+$ uv run pytest -q
+489 passed in 7.17s
+
+$ uv run ruff check . && uv run ruff format --check .
+All checks passed!
+62 files already formatted
+
+$ uv run pyright
+0 errors, 0 warnings, 0 informations
 ```
 
-Root cause: this repo is on **typer 0.27.0, which no longer depends on the
-standalone `click` package** — it vendors it as `typer._click`. `click` is
-absent from `uv.lock` entirely, so `import click` resolves neither for pyright
-nor at runtime (the tests would also have failed at collection with
-`ModuleNotFoundError`; pyright just failed first). The second error was
-downstream of the first: with `click` unresolved, the `isinstance` narrowed to
-`Unknown` and `.commands` went unchecked.
-
-Adding `click` as a direct dependency was rejected — AGENTS.md says "no new
-dependencies without strong justification", and pulling in a second copy of
-click purely to introspect the CLI isn't that.
-
-The vendored `typer._click.core` exposes only the `Command` and `Parameter`
-bases; it has no `Group` or `Option` names. The concrete classes typer actually
-builds the app out of are `typer.core.TyperGroup` (subclasses
-`typer._click.core.Command`, carries `.commands`) and `typer.core.TyperOption`
-(subclasses `typer._click.core.Parameter`, carries `.is_flag`, `.opts`,
-`.secondary_opts`). Both live in the public `typer.core` module, and both
-typecheck clean. Positional arguments come through as `TyperArgument`, so
-`isinstance(param, TyperOption)` still does the job the `click.Option` check
-did — it skips the positional `issue` argument.
-
-The helper's docstring records that this is deliberately pinned to typer
-internals and may need updating on a typer major bump; that is the accepted
-tradeoff.
-
-## Review round: the guard could have gone vacuous
-
-Review note on PR #94: all three assertions were negative — `assert not missing`,
-`assert "--force" not in ...`, `assert "--message" not in ...` — so if
-`_value_taking_flags()` ever returned an empty set, every one of them would pass
-and the guard would silently stop guarding. That is exactly the silent-drift
-failure #88 exists to prevent, and the helper's own docstring warns a typer
-major bump may move `TyperGroup`/`TyperOption`.
-
-Two positive assertions were added:
-
-- **In the helper** (so all three tests inherit it, not just the parametrized
-  one — the two sanity tests are equally vacuity-prone): `assert flags, ...`
-  with a message saying the introspection is broken rather than that the CLI has
-  no options. The realistic drift scenario is not `TyperOption` disappearing —
-  that would fail at import, loudly — but `TyperOption` still importing while no
-  longer being the class typer instantiates, so the `isinstance` filter silently
-  rejects every parameter.
-- **In `test_value_flags_mirrors_cli`**: `assert {"--project", "-C"} <= declared`
-  before the negative check. `--project`/`-C` is the shared `ProjectOpt` declared
-  by all three commands, so this proves the helper is classifying real options
-  rather than returning non-empty junk that happens to satisfy `not missing`.
-
-Current detected counts, verified by introspection: `implement` 4
-(`--plan-file`, `--project`, `--runtime`, `-C`), `resume` 5 (`--message-file`,
-`--project`, `--runtime`, `--surface`, `-C`), `dispatch` 4 (`--plan-file`,
-`--project`, `--surface`, `-C`) — matching the reviewer's hand-count of 4/5/4.
-Exact counts were deliberately *not* asserted: legitimately adding a value-taking
-option (and updating `_VALUE_FLAGS`) should not require editing a magic number.
-
-## Rebases
-
-Rebased twice, as `staging` moved under this branch:
-
-- onto `f70ddb3` after #89 merged;
-- onto `b44f60c` after #93 merged (which added the outcome-record tests —
-  `test_classify_outcome_*`, `test_discover_runs_outcome_*`,
-  `test_wait_for_runs_sees_done_via_outcome_record_*`).
-
-`tests/test_runs.py` auto-merged cleanly both times — #89's and #93's additions
-land earlier in the file than the `_VALUE_FLAGS` block appended at the end.
-Verified rather than assumed: no conflict markers remain, all of #93's outcome
-tests are present, and the file has 82 `def test_` functions against staging's
-79 — staging's tests in full, plus exactly the 3 added here.
-`IMPLEMENTATION_NOTES.md` conflicted both times and was resolved in favour of
-this branch, since it's a per-PR file each implementer rewrites.
-
-## Gate results
-
-Run locally in the worktree on Python 3.12.12 (matching `mise.toml`; the default
-`uv` interpreter resolves to 3.14, so the venv was pinned with
-`uv sync --dev --python 3.12`). All three pass:
-
-- [x] `uv run pytest -q` — **444 passed** in 11.03s
-- [x] `uv run ruff check . && uv run ruff format --check .` — **All checks
-      passed!**, 59 files already formatted
-- [x] `uv run pyright` — **0 errors, 0 warnings, 0 informations**
-
-## The tests were checked against both failure modes
-
-**Does the completeness check bite?** Temporarily added a value-taking option to
-`dispatch` in `src/agent_ops/cli.py`:
-
-```python
-sentinel: Annotated[str, typer.Option("--sentinel", help="TEMP mutation probe")] = "x",
-```
-
-`test_value_flags_mirrors_cli[dispatch]` failed naming it, while the other four
-cases stayed green — so the failure is specific rather than the helper collapsing:
-
-```
-AssertionError: dispatch: ['--sentinel'] take a value in the CLI but are missing
-from runs._VALUE_FLAGS — a phantom-issue-number bug waiting to happen
-```
-
-**Does the new non-vacuity guard bite?** Simulated the drift scenario by binding
-`TyperOption` to an unrelated class (`type('TyperOption', (), {})`), so the
-`isinstance` filter rejects every parameter and the helper returns an empty set.
-Before the guard this would have been 5 green tests; now all 5 fail loudly:
-
-```
-AssertionError: resume: introspection found no value-taking options at all.
-resume really does declare some, so this means the typer internals this helper
-reads (TyperGroup/TyperOption) have moved and it is no longer classifying
-anything — fix the helper rather than trusting the green tests it would
-otherwise produce
-```
-
-Both probes were reverted; `git diff origin/staging -- src/` is empty, so this
-PR remains test-only.
+489 tests, up from 444 on the rebased base — 45 added.

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, worktree
+from agent_ops import github, messages, worktree
 from agent_ops.utils import CommandError, run
 
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
@@ -24,7 +24,10 @@ _LOG_RE = re.compile(r"^agent-issue-(\d+)\.log$")
 _OUTCOME_RE = re.compile(r"^issue-(\d+)-outcome\.json$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 
-TERMINAL_STATES = ("done", "halted", "stopped")
+# `failed` never comes from the derivation below — a run whose gates failed
+# looks exactly like an abandoned one from the outside. It only arrives when
+# the run says so itself (`messages`), which is the point of issue #98.
+TERMINAL_STATES = ("done", "halted", "stopped", "failed")
 _POLL_INTERVAL_S = 15.0
 _DEFAULT_TIMEOUT_S = 3600.0
 # Consecutive untrustworthy polls `wait_for_runs` tolerates before giving up
@@ -451,6 +454,52 @@ def _dedup_warnings(log: Callable[[str], None]) -> Callable[[str], None]:
     return wrapped
 
 
+def _observed(msg: messages.RunMessage | None, r: Run | None) -> tuple[str, str]:
+    """One watched issue's `(state, detail)` from a report and/or a poll row.
+
+    A report wins over the derivation; with neither, the issue has vanished
+    from every signal, which is `gone`.
+    """
+    if msg is not None:
+        return msg.state, msg.detail
+    if r is not None:
+        return r.state, r.detail
+    return "gone", ""
+
+
+def _wait_out(
+    project_root: Path,
+    budget_s: float,
+    *,
+    wake_on: int | None,
+    log: Callable[[str], None],
+) -> None:
+    """Spend `budget_s` before the next poll, waking early if `wake_on` reports.
+
+    The message replaces the *sleep*, not the poll: when nothing arrives this
+    returns after exactly the same interval `time.sleep` would have taken, so
+    the wait's cadence and its timeout accounting are unchanged whether or not
+    a message bus exists.
+
+    `wake_on` is only set when exactly one watched run is still outstanding —
+    `orca orchestration check` takes a single terminal handle, so a wait on
+    several runs at once keeps the plain sleep and the ordinary poll latency.
+
+    A wait that returns early having found nothing (no Orca, no handle, a
+    wedged CLI) must not turn this loop into a spin, so whatever is left of
+    the budget is slept out.
+    """
+    if wake_on is None:
+        time.sleep(budget_s)
+        return
+    started = time.monotonic()
+    if messages.wait_for_message(project_root, wake_on, budget_s, log=log):
+        return
+    remaining = budget_s - (time.monotonic() - started)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 def wait_for_runs(
     project_root: Path,
     *,
@@ -495,6 +544,24 @@ def wait_for_runs(
     final log line before returning, since the per-poll `warning:` line is
     deduped down to a single, possibly long-scrolled-away occurrence.
 
+    On top of all of that, a run that was dispatched onto a surface with a
+    message bus can *report* its own outcome rather than being inferred at
+    (issue #98). Such a report wins: it is the run's own first-person account,
+    so it overrides the derived state, counts as terminal immediately with no
+    `stopped` debounce, and is believed even mid-outage — it is a local read
+    with no `gh`/`git` call that could have degraded. `_finish_run` sends only
+    once its cleanup is done, so a pushed `done` can never arrive early.
+
+    A message is only ever consulted to *shortcut* a wait, never to justify
+    continuing one, so a missed one changes nothing: every iteration still
+    derives state from `discover_runs` on the same cadence, with the same
+    debounce and the same degraded-poll bounds. There is no state that exists
+    only in a message, and therefore nothing to hang on. The one place a
+    message adds an answer rather than hurrying one is the named-issue watch
+    set: a run that finished and cleaned up before this call started leaves no
+    signal to find, and its unread report turns "no run found" into the
+    verdict it actually reached.
+
     Returns True once every watched issue is terminal (including the
     nothing-to-watch case), False if `timeout_s` elapses first. `timeout_s`
     of None waits forever. One poll always happens before the deadline is
@@ -521,6 +588,7 @@ def wait_for_runs(
     watch: set[int] | None = None
     states: dict[int, str] = {}
     stopped_streak: dict[int, int] = {}
+    pushed: dict[int, messages.RunMessage] = {}
     degraded_streak = 0
     degraded_polls = 0
     total_polls = 0
@@ -531,10 +599,28 @@ def wait_for_runs(
             return stopped_streak.get(i, 0) >= 2
         return state in TERMINAL_STATES or state == "gone"
 
+    def refresh_pushed(targets: set[int]) -> None:
+        """Drain any self-reported outcomes for `targets` we haven't seen yet.
+
+        Deduped-logged, not `capture`d: a broken message bus is not a `gh`
+        outage, and must not end up quoted as the reason a degraded-poll
+        streak gave up.
+        """
+        pending = {i for i in targets if i not in pushed}
+        if pending:
+            pushed.update(messages.collect(project_root, pending, log=deduped_log))
+
     while True:
         polled, trustworthy = discover_runs(project_root, log=capture)
         found = {r.issue: r for r in polled}
         total_polls += 1
+
+        # Before the watch set is established there is only one issue we could
+        # possibly be waiting on by name; after it, the whole set.
+        if watch is not None:
+            refresh_pushed(watch)
+        elif issue is not None:
+            refresh_pushed({issue})
 
         if trustworthy:
             degraded_streak = 0
@@ -551,7 +637,10 @@ def wait_for_runs(
 
         if watch is None:
             if issue is not None:
-                if issue not in found:
+                # A run that finished and swept its own signals away leaves
+                # nothing for `discover_runs` to find, but its report is still
+                # sitting unread — that is an answer, not an absence.
+                if issue not in found and issue not in pushed:
                     if trustworthy:
                         if degraded_polls:
                             capture(
@@ -585,30 +674,47 @@ def wait_for_runs(
                 else:
                     watch = candidate
             if watch is not None:
+                # Watch-all mode only learns its set here, so this is the first
+                # moment those issues can be asked whether they reported.
+                refresh_pushed(watch)
                 for i in sorted(watch):
-                    r = found[i]
-                    capture(f"#{i}  {r.state:<8}  {r.detail}")
-                    states[i] = r.state
-                    stopped_streak[i] = 1 if (trustworthy and r.state == "stopped") else 0
+                    msg, r = pushed.get(i), found.get(i)
+                    state, detail = _observed(msg, r)
+                    capture(f"#{i}  {state:<8}  {detail}")
+                    states[i] = state
+                    # A self-report is never `stopped`, and a degraded poll must
+                    # not seed the debounce off an observation it can't vouch for.
+                    stopped_streak[i] = (
+                        1 if (trustworthy and msg is None and state == "stopped") else 0
+                    )
         else:
             for i in sorted(watch):
-                r = found.get(i)
-                if r is None and not trustworthy:
+                msg, r = pushed.get(i), found.get(i)
+                if msg is not None:
+                    # The run's own account of how it ended. Positive
+                    # first-person evidence outranks anything derived, needs no
+                    # debounce, and stands even on a degraded poll.
+                    state, detail = _observed(msg, r)
+                    stopped_streak[i] = 0
+                elif r is None and not trustworthy:
                     # An unexplained disappearance during a degraded poll is not
                     # trustworthy evidence the run is actually gone: hold its
                     # state and streak steady and wait for a clean poll.
                     continue
-                state = r.state if r is not None else "gone"
-                if not trustworthy:
-                    # An unknown observation is not evidence of death: never let
-                    # a degraded poll advance the debounce toward terminal.
-                    stopped_streak[i] = 0
                 else:
-                    stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
+                    state, detail = _observed(None, r)
+                    if not trustworthy:
+                        # An unknown observation is not evidence of death: never
+                        # let a degraded poll advance the debounce toward terminal.
+                        stopped_streak[i] = 0
+                    else:
+                        stopped_streak[i] = (
+                            stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
+                        )
                 if state != states[i]:
                     line = f"#{i}  {states[i]} → {state:<8}"
-                    if r is not None:
-                        line += f"  {r.detail}"
+                    if detail:
+                        line += f"  {detail}"
                     capture(line)
                     states[i] = state
 
@@ -623,4 +729,10 @@ def wait_for_runs(
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             return False
-        time.sleep(interval_s if remaining is None else min(interval_s, remaining))
+        outstanding = [i for i in sorted(watch) if not is_terminal(i)] if watch else []
+        _wait_out(
+            project_root,
+            interval_s if remaining is None else min(interval_s, remaining),
+            wake_on=outstanding[0] if len(outstanding) == 1 else None,
+            log=deduped_log,
+        )

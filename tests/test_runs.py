@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import typer.main
 from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
-from agent_ops import github, runs, worktree
+from agent_ops import github, messages, orca, runs, worktree
 from agent_ops.cli import app
 from agent_ops.utils import CommandError
 
@@ -1243,3 +1244,206 @@ def test_value_flags_free_text_message_not_required_in_value_flags() -> None:
     assert "--message" not in resume_flags
     assert "-m" not in resume_flags
     assert {"--message", "-m"} <= runs._FREE_TEXT_FLAGS
+
+
+# --- pushed outcomes (issue #98) ------------------------------------------
+
+
+def _pushes(
+    monkeypatch: pytest.MonkeyPatch,
+    reported: dict[int, messages.RunMessage] | None = None,
+    *,
+    woke: bool = False,
+) -> dict[str, list]:
+    """Stub the message bus: `reported` is what every `collect` returns.
+
+    `woke` is what the blocking wait answers — True meaning "something is
+    waiting, poll now". Records both call streams so a test can assert the bus
+    was (or was not) consulted.
+    """
+    seen: dict[str, list] = {"collect": [], "wait": []}
+
+    def fake_collect(project_root: Path, issues, *, log=print) -> dict[int, messages.RunMessage]:
+        pending = set(issues)
+        seen["collect"].append(pending)
+        return {i: m for i, m in (reported or {}).items() if i in pending}
+
+    def fake_wait(project_root: Path, issue: int, timeout_s: float, *, log=print) -> bool:
+        seen["wait"].append((issue, timeout_s))
+        return woke
+
+    monkeypatch.setattr(runs.messages, "collect", fake_collect)
+    monkeypatch.setattr(runs.messages, "wait_for_message", fake_wait)
+    return seen
+
+
+def test_wait_for_runs_prefers_a_reported_outcome_over_the_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate failure looks exactly like an abandoned run from the outside, so
+    polling can only reach `stopped` — and only after a two-poll debounce. The
+    run's own report is positive evidence and lands immediately."""
+    _polls(
+        monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "stopped", "worktree kept")]
+    )
+    _pushes(
+        monkeypatch,
+        {77: messages.RunMessage(77, "worker_done", "failed", reason="gates failed (test)")},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, issue=77, log=lines.append)
+
+    assert result is True
+    assert any("failed" in line and "gates failed (test)" in line for line in lines)
+    assert sleeps == []  # terminal on the first poll — no debounce to wait out
+
+
+def test_wait_for_runs_believes_a_report_while_gh_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report is a local read with no `gh`/`git` call behind it, so a
+    degraded poll is no reason to disbelieve it."""
+
+    def fake(project_root: Path, log=print) -> tuple[list, bool]:
+        return [], False  # untrustworthy: gh and worktree listing both failed
+
+    monkeypatch.setattr(runs, "discover_runs", fake)
+    _pushes(
+        monkeypatch,
+        {77: messages.RunMessage(77, "worker_done", "done", pr_url="https://x/pull/99")},
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    assert runs.wait_for_runs(tmp_path, issue=77, log=lines.append) is True
+    assert any("done" in line and "https://x/pull/99" in line for line in lines)
+
+
+def test_wait_for_runs_named_issue_with_no_signals_left_but_a_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that finished and swept up after itself leaves nothing to find.
+    Its unread report is an answer, not the absence `no run found` implies."""
+    _polls(monkeypatch, [])
+    _pushes(
+        monkeypatch,
+        {77: messages.RunMessage(77, "worker_done", "done", pr_url="https://x/pull/99")},
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    assert runs.wait_for_runs(tmp_path, issue=77, log=lines.append) is True
+    assert not any("no run found" in line for line in lines)
+
+
+def test_wait_for_runs_without_orca_never_touches_the_message_bus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback path in full: no Orca, real `messages` code, and the wait
+    still resolves purely from polling. `conftest` leaves Orca unavailable."""
+
+    def explode(cmd: list[str], **kwargs: object):
+        raise AssertionError(f"must not shell out without Orca: {cmd}")
+
+    monkeypatch.setattr(runs.messages, "run", explode)
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "done", "PR #76")])
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    assert runs.wait_for_runs(tmp_path, issue=77, log=lines.append) is True
+    assert any("running → done" in line for line in lines)
+
+
+def test_wait_for_runs_falls_back_to_polling_when_no_report_ever_arrives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Orca is there, the run simply never reports (old build, crash, killed
+    terminal). The derivation still gets there on the ordinary cadence."""
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "done", "PR #76")])
+    seen = _pushes(monkeypatch, {}, woke=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    lines: list[str] = []
+
+    assert runs.wait_for_runs(tmp_path, issue=77, interval_s=15.0, log=lines.append) is True
+    assert any("running → done" in line for line in lines)
+    assert seen["wait"] == [(77, 15.0)]  # asked, got nothing, kept polling
+    assert sleeps  # and paid the full interval rather than spinning
+
+
+def test_wait_for_runs_sleeps_out_the_budget_when_the_wait_returns_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale handle, a wedged CLI or an absent bus all answer instantly. The
+    poll loop must not turn that into a spin."""
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "done", "PR #76")])
+    _pushes(monkeypatch, {}, woke=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+
+    runs.wait_for_runs(tmp_path, issue=77, interval_s=15.0, log=lambda _: None)
+
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(15.0, abs=1.0)
+
+
+def test_wait_for_runs_wakes_on_a_report_instead_of_sleeping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "done", "PR #76")])
+    _pushes(monkeypatch, {}, woke=True)
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+
+    assert runs.wait_for_runs(tmp_path, issue=77, interval_s=15.0, log=lambda _: None) is True
+    assert sleeps == []  # woken by the bus, not by the clock
+
+
+def test_wait_for_runs_blocks_on_a_report_only_for_a_single_outstanding_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`orca orchestration check` takes one terminal handle, so a wait on
+    several runs keeps the plain sleep rather than picking a favourite."""
+    _polls(
+        monkeypatch,
+        [runs.Run(77, "running", "pid 1"), runs.Run(78, "running", "pid 2")],
+        [runs.Run(77, "done", "PR #76"), runs.Run(78, "done", "PR #79")],
+    )
+    seen = _pushes(monkeypatch, {}, woke=False)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+
+    assert runs.wait_for_runs(tmp_path, log=lambda _: None) is True
+    assert seen["wait"] == []
+
+
+def test_wait_for_runs_stale_handle_costs_one_interval_and_nothing_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the real `messages` code: Orca is up, the recorded
+    handle points at a terminal it has forgotten. Orca answers an unknown
+    handle with an empty list, so this degrades to exactly the poll cadence."""
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "executable", lambda: "orca")
+    messages.record_spawn(tmp_path, 77, surface="orca", handle="term_forgotten")
+
+    calls: list[list[str]] = []
+
+    def fake(cmd: list[str], **kwargs: object):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"result": {"messages": [], "count": 0}}), stderr=""
+        )
+
+    monkeypatch.setattr(messages, "run", fake)
+    _polls(monkeypatch, [runs.Run(77, "running", "pid 1")], [runs.Run(77, "done", "PR #76")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    lines: list[str] = []
+
+    assert runs.wait_for_runs(tmp_path, issue=77, interval_s=15.0, log=lines.append) is True
+    assert any("running → done" in line for line in lines)
+    assert sleeps[0] == pytest.approx(15.0, abs=1.0)
+    assert any("--wait" in cmd for cmd in calls)  # it did try the fast path
