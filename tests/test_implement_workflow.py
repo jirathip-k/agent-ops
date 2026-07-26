@@ -316,15 +316,23 @@ def test_make_plan_escalate_raises(
 
 
 def test_make_plan_returns_a_plan_that_opens_by_ruling_escalation_out(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declined_escalation_reply: str
 ) -> None:
-    """Same #128 bug as the spec lane, but here the work is a finished plan."""
-    text = "ESCALATE is not needed — no danger zones are touched.\n\n## Plan\n\n1. Edit foo.py"
-    _stub_planner_run(monkeypatch, text)
+    """Same #128/#129 bug as the spec lane, but here the work is a finished plan.
 
-    _request, result = make_plan(ProjectConfig(), _fake_issue(29, tmp_path), tmp_path)
+    Driven by the captured reply from `conftest`: same call site, same shape,
+    same exposure — so the phrasing that actually broke covers both lanes.
+    """
+    _stub_planner_run(monkeypatch, declined_escalation_reply)
+    logged: list[str] = []
 
-    assert result.text == text
+    _request, result = make_plan(
+        ProjectConfig(), _fake_issue(29, tmp_path), tmp_path, log=logged.append
+    )
+
+    assert result.text == declined_escalation_reply
+    # let through, but not in silence
+    assert any("not as the sentinel" in line for line in logged)
 
 
 def test_card_reporter_sticks_to_the_fallback_once_it_falls_back(

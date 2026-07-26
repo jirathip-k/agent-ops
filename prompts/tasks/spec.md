@@ -32,8 +32,14 @@ Labels: {issue_labels}
 
 ## Output
 
-Either a line starting with `ESCALATE:` and your reasoning, or a markdown
-spec with exactly these sections:
+Either an escalation or a spec, never both.
+
+To escalate, the FIRST line must start with `ESCALATE:` — nothing before it —
+followed by the question a human must answer. That word is a sentinel a
+script matches on, so never open a spec with it: if you weighed escalating
+and decided against it, just write the spec and say nothing about escalating.
+
+Otherwise, a markdown spec with exactly these sections:
 
 - **Summary** — one sentence restating the intent
 - **Acceptance criteria** — the checklist (one box per surface/behavior)

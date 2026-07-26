@@ -28,5 +28,10 @@ PLAN.md containing:
 - (Hotfix only) Rollback note
 
 If the issue is not reproducible or the plan would be ambiguous, open with a
-line starting with `ESCALATE:` and your findings instead of guessing. The
-colon is part of the sentinel — without it the escalation is not recognized.
+line starting with `ESCALATE:` and your findings instead of guessing, with
+nothing before it. The colon is part of the sentinel — write it, even though
+the check tolerates a sentinel that stands alone.
+
+That word is what a script watches for, so never open an ordinary plan with
+it: a plan whose first line explains why it is *not* escalating reads as an
+escalation. If you weighed escalating and decided against it, just plan.
