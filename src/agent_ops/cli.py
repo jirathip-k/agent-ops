@@ -25,6 +25,7 @@ from agent_ops.workflows import (
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
+from agent_ops.workflows.triage import LABEL_COLORS
 
 app = typer.Typer(
     name="agent",
@@ -44,6 +45,23 @@ def _err(message: str) -> None:
 
 
 GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
+
+# Every label the lanes read or write, with the colors the pipelines use.
+# The triage/groom/scout lanes create their own verdict labels at run time
+# (LABEL_COLORS, merged in below), but the gate labels are applied by a human
+# — they have to exist before anyone can request work, so `init` prints the
+# whole set at onboarding rather than leaving it to the first failed run.
+ONBOARDING_LABELS: dict[str, str] = {
+    "spec-requested": "5319e7",
+    "plan-requested": "1d76db",
+    "approved-for-agent": "1d76db",
+    "blocked": "b60205",
+    "triage:done": "ededed",
+    "ready-to-merge": "0e8a16",
+    "hotfix-ready": "d93f0b",
+    "hotfix-backmerge": "5319e7",
+    **LABEL_COLORS,
+}
 
 
 def _missing_gitignore_markers(root: Path) -> list[str]:
@@ -607,6 +625,14 @@ def init(project: ProjectOpt = Path(".")) -> None:
         with gitignore.open("a") as fh:
             fh.write(f"\n{marker}\n")
         typer.echo(f"added {marker} to .gitignore")
+
+    # Labels live in GitHub, not on disk, so init can only tell you about them
+    # — but it has to, because a gate label nobody created is a lane nobody can
+    # request: the CI pipelines select on it, and a missing label just selects
+    # nothing.
+    typer.echo("\nlabels the lanes use — run once per repo:")
+    for name, color in ONBOARDING_LABELS.items():
+        typer.echo(f"  gh label create {name} --color {color} --force")
 
 
 @app.command()

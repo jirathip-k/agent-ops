@@ -159,14 +159,18 @@ on manual approval. Install the App on this owner and grant it this repo.`
 ## Checklist for onboarding a repo
 
 1. Branches: `staging` + `main`, mapped as above.
-2. `.mcp.json`: dev writable, prod read-only, committed.
-3. Frontend CD wired to the platform integration.
-4. Edge functions present? Add the deploy-all-on-merge workflow.
-5. Ledger solo or shared? Solo → `db push` CD; shared → naming gate +
+2. Labels: run the `gh label create` lines `agent init` prints (same set as
+   `setup.sh`). The spec/plan lanes select on `spec-requested` /
+   `plan-requested` and the pipelines create them, but a human still has to
+   apply one to request work — and `approved-for-agent` is human-only.
+3. `.mcp.json`: dev writable, prod read-only, committed.
+4. Frontend CD wired to the platform integration.
+5. Edge functions present? Add the deploy-all-on-merge workflow.
+6. Ledger solo or shared? Solo → `db push` CD; shared → naming gate +
    scheduled drift check.
-6. `SUPABASE_ACCESS_TOKEN` as a repo secret via environments; no PATs on
+7. `SUPABASE_ACCESS_TOKEN` as a repo secret via environments; no PATs on
    disk anywhere.
-7. CLAUDE.md states what deploys automatically and what remains manual, so
+8. CLAUDE.md states what deploys automatically and what remains manual, so
    agents don't improvise.
 
 ## Moving or renaming a managed repo

@@ -74,21 +74,39 @@ jobs:
         run: |
           ISSUE="${ISSUE:-0}"           # workflow_dispatch omits the input
           MAX_ISSUES="${MAX_ISSUES:-2}"
+          # Register the gate label here, in the step that ALWAYS runs. It used
+          # to live in the run step below, which is guarded on this step finding
+          # a labelled issue — so on a fresh repo the label could never exist,
+          # nothing could carry it, and the step that would have created it was
+          # never reached. Also keeps --remove-label from tripping on a missing
+          # label. Costs one API call per run.
+          gh label create plan-requested --repo "$TARGET_REPO" --color 1d76db \
+            --description "Human asked the agent to post an implementation plan" --force
+          DEFERRED=""
           if [ "$ISSUE" != "0" ]; then
             ISSUES="$ISSUE"
           else
             # Oldest-first so long-waiting issues get planned before fresh
             # ones; needs-human/blocked always win over the plan-requested gate.
-            ISSUES=$(gh issue list --repo "$TARGET_REPO" --state open \
+            MATCHED=$(gh issue list --repo "$TARGET_REPO" --state open \
               --label plan-requested --limit 100 --json number,labels \
               --jq '[.[] | select(
                 ([.labels[].name] | map(. == "needs-human" or . == "blocked") | any) | not
-              ) | .number] | sort | .[]' | head -n "$MAX_ISSUES" | xargs)
+              ) | .number] | sort | .[]')
+            ISSUES=$(echo "$MATCHED" | head -n "$MAX_ISSUES" | xargs)
+            # Everything past the cap waits for a later run. Reported so a
+            # queued issue is distinguishable from one the gate never saw.
+            DEFERRED=$(echo "$MATCHED" | tail -n "+$((MAX_ISSUES + 1))" | xargs)
           fi
           COUNT=$(echo "$ISSUES" | wc -w | tr -d ' ')
           echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "Issues to plan: ${ISSUES:-none}"
+          if [ -n "$DEFERRED" ]; then
+            echo "Queued for a later run (max_issues=$MAX_ISSUES): $DEFERRED"
+            echo "Queued for a later run (\`max_issues=$MAX_ISSUES\`): $DEFERRED" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Checkout control repo (CLI + prompts)
         if: steps.precheck.outputs.count != '0'
@@ -126,10 +144,6 @@ jobs:
           ISSUES: ${{ steps.precheck.outputs.issues }}
         working-directory: agent-ops
         run: |
-          # Register the gate label up front so humans can apply it in fresh
-          # repos and the --remove-label below never trips on a missing label.
-          gh label create plan-requested --repo "$TARGET_REPO" --color 1d76db \
-            --description "Human asked the agent to post an implementation plan" --force
           FAILED=""
           for N in $ISSUES; do
             echo "::group::plan issue #$N"
