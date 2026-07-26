@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -84,6 +85,36 @@ def test_classify_worktree_with_open_pr_is_done_not_stopped() -> None:
     )
     assert run is not None
     assert run.state == "done"
+
+
+def test_classify_outcome_outranks_stale_feedback_file() -> None:
+    """Issue #78: a stale halt file left behind by a run that never resumed
+    cleanly through `_finish_run` must not mask the durable outcome it
+    recorded (e.g. a merged PR)."""
+    run = runs.classify(
+        73,
+        worktree_path=None,
+        live=None,
+        has_feedback=True,
+        pr=None,
+        outcome=runs.Outcome("done", "https://x/pull/76", None),
+    )
+    assert run == runs.Run(73, "done", "PR #76 — https://x/pull/76")
+
+
+def test_classify_live_outranks_outcome_record() -> None:
+    """A live resume on an issue with a leftover outcome record must still
+    report `running` — no regression for in-flight runs."""
+    run = runs.classify(
+        73,
+        worktree_path=None,
+        live=(1, "00:30", "implement"),
+        has_feedback=False,
+        pr=None,
+        outcome=runs.Outcome("done", "https://x/pull/76", None),
+    )
+    assert run is not None
+    assert run.state == "running"
 
 
 # --- live_runs ---------------------------------------------------------------
@@ -380,6 +411,115 @@ def test_discover_runs_no_candidates_returns_empty(
     assert runs.discover_runs(tmp_path) == ([], True)
 
 
+def _write_outcome_file(
+    tmp_path: Path, issue: int, *, state: str = "done", pr_url: str | None = "https://x/pull/76"
+) -> Path:
+    runs_dir = tmp_path / ".agent-runs"
+    runs_dir.mkdir(exist_ok=True)
+    path = runs_dir / f"issue-{issue}-outcome.json"
+    path.write_text(json.dumps({"state": state, "pr_url": pr_url, "reason": None}))
+    return path
+
+
+def test_discover_runs_outcome_only_reports_done_after_worktree_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #87: once the worktree/feedback/open-PR signals are all gone, the
+    durable outcome record alone must still produce a `done` row."""
+    _write_outcome_file(tmp_path, 42)
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(42, "done", "PR #76 — https://x/pull/76")]
+    # An outcome record is a local file read, not a `gh`/`git` call — finding
+    # one never degrades the poll.
+    assert trustworthy is True
+
+
+def test_discover_runs_outcome_record_beats_stale_feedback_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #78: a stale feedback file left behind alongside a later outcome
+    record must not win — the run is `done`, not `halted` forever."""
+    (tmp_path / ".agent-runs").mkdir()
+    (tmp_path / ".agent-runs" / "issue-42-feedback.md").write_text("stale findings")
+    _write_outcome_file(tmp_path, 42)
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(42, "done", "PR #76 — https://x/pull/76")]
+
+
+def test_classify_outcome_over_feedback_is_only_safe_because_a_halt_clears_it(
+    tmp_path: Path,
+) -> None:
+    """The precedence above is deliberate, and it is `implement._record_halt`'s
+    unlink that keeps it honest (PR #93 review).
+
+    Read this together with
+    `test_a_new_cycles_halt_supersedes_the_previous_cycles_outcome_record` in
+    tests/test_resume.py: `classify` has no way to tell a stale feedback file
+    from a fresh one, so the write side must guarantee the two never coexist
+    with the feedback being the newer of the pair. If that ever regresses,
+    this row silently reads `done` while the run is waiting on
+    `agent resume`.
+    """
+    outcome = runs.Outcome(state="done", pr_url="https://x/pull/76", reason=None)
+
+    shadowed = runs.classify(
+        42, worktree_path=None, live=None, has_feedback=True, pr=None, outcome=outcome
+    )
+    cleared = runs.classify(
+        42, worktree_path=None, live=None, has_feedback=True, pr=None, outcome=None
+    )
+
+    assert shadowed == runs.Run(42, "done", "PR #76 — https://x/pull/76")
+    assert cleared is not None and cleared.state == "halted"
+
+
+def test_discover_runs_prunes_outcome_record_past_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_outcome_file(tmp_path, 42)
+    old = runs.time.time() - runs._OUTCOME_TTL_S - 1
+    os.utime(path, (old, old))
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == []
+    assert not path.exists()
+
+
+def test_discover_runs_invalid_outcome_json_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_dir = tmp_path / ".agent-runs"
+    runs_dir.mkdir()
+    (runs_dir / "issue-42-outcome.json").write_text("not valid json")
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    warnings: list[str] = []
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=warnings.append)
+
+    assert result == []
+    assert any("could not read outcome record" in w for w in warnings)
+    # A corrupt outcome record is a local-file problem, not a degraded
+    # `gh`/worktree poll: it must not push `wait_for_runs` toward its
+    # degraded-streak bail-out.
+    assert trustworthy is True
+
+
 # --- report_runs / CLI ---------------------------------------------------------
 
 
@@ -550,6 +690,27 @@ def test_wait_for_runs_stopped_requires_two_consecutive_polls(
 
     assert result is False
     assert any("stopped → running" in line for line in lines)
+
+
+def test_wait_for_runs_sees_done_via_outcome_record_instead_of_vanishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #87: once the worktree/feedback/PR signals are gone but a durable
+    outcome record remains, `--wait` must see `done`, not the run disappearing
+    (`gone`)."""
+    _polls(
+        monkeypatch,
+        [runs.Run(77, "running", "pid 1")],
+        [runs.Run(77, "done", "PR #76 — https://x/pull/76")],
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any("running → done" in line for line in lines)
+    assert not any("gone" in line for line in lines)
 
 
 def test_wait_for_runs_watched_run_vanishes_mid_wait(

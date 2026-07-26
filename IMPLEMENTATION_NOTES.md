@@ -1,263 +1,183 @@
-# IMPLEMENTATION_NOTES: issue #86
+# IMPLEMENTATION_NOTES — issue #87
 
-PR: https://github.com/jirathip-k/agent-ops/pull/89
-Branch: `fix/issue-86` → base `staging`
+PR: https://github.com/jirathip-k/agent-ops/pull/93
+Branch: `fix/issue-87` → base `staging`
 
 ## What changed
 
-`src/agent_ops/runs.py` (plus `tests/test_runs.py`):
+`agent runs` used to derive an issue's state purely from live signals
+(worktree, process table, halt feedback file, open PR) — all four of which
+`_finish_run` clears or consumes on the success path, so a successfully
+finished run vanished from `agent runs` instead of showing `done`. This adds a
+durable outcome record on the way out and reads it back in `discover_runs`.
 
-1. Added `_MAX_DEGRADED_POLLS = 4` module constant next to `_POLL_INTERVAL_S`.
-2. `discover_runs`'s return type changed from `list[Run]` to
-   `tuple[list[Run], bool]`. The `bool` ("trustworthy") is `False` whenever
-   either `worktree.list_worktrees` or `github.open_prs` raised
-   `CommandError` this poll. `worktree.list_worktrees` is now wrapped in a
-   try/except that degrades to an empty worktree list and logs a warning —
-   mirroring the existing `github.open_prs` try/except — instead of letting
-   `CommandError` propagate straight out of `discover_runs` (previously a
-   transient `git worktree list` hiccup could kill an hour-long `--wait`
-   with exit 1).
-3. `report_runs` unpacks and ignores the new flag (one-shot snapshot; the
-   warning is already logged by `discover_runs`).
-4. `wait_for_runs`:
-   - Captures the raw text of the latest `warning:` message via a small
-     `capture()` wrapper placed *before* `_dedup_warnings`, so the
-     degraded-streak error message can name the last warning even if
-     `_dedup_warnings` has since suppressed it from the printed output.
-   - Tracks `degraded_streak` (consecutive untrustworthy polls, reset to 0 on
-     any trustworthy poll) and `degraded_polls`/`total_polls` (for the final
-     summary).
-   - Raises `CommandError` once `degraded_streak > _MAX_DEGRADED_POLLS`,
-     naming the last warning seen. `cli.py` already catches `CommandError`
-     from this call and exits 1 with the message — no CLI change needed, as
-     the plan anticipated.
-   - On an untrustworthy poll: a watched issue missing from `found` is
-     *not* transitioned to `gone` — its previous state and `stopped_streak`
-     are carried forward unchanged (the `continue` branch), and no
-     transition line is logged for it. A watched issue still present in
-     `found` on an untrustworthy poll has its `stopped_streak` forced to 0
-     rather than incremented, so a degraded `stopped` observation can never
-     itself reach the 2-poll debounce threshold; other state changes (e.g.
-     genuine `done`/`halted` positive evidence) still log/update normally.
-   - On a clean terminal return, if any poll during the wait was degraded,
-     logs one final `note: PR/worktree data was unreliable for N of M polls
-     in this wait` line before returning.
+### `src/agent_ops/workflows/implement.py` (write side)
 
-## Why
+- Added `import json` and `import time`.
+- `_outcome_path(project_root, issue_number)`, next to `_ad_hoc_message_path`,
+  following the same convention.
+- `_write_outcome(project_root, issue_number, *, state, pr_url, reason, log)`:
+  writes `{"state", "pr_url", "reason", "finished_at"}` as JSON via
+  temp-file-then-`Path.replace` (already an atomic rename, so no `os` import),
+  wrapped in `try/except OSError` that logs and swallows — mirrors
+  `_record_halt`'s best-effort philosophy.
+- `_clear_outcome(project_root, issue_number, *, log)`: `unlink(missing_ok=True)`
+  behind the same best-effort `try/except OSError`. See "Review round" below
+  for why it exists and where it is called.
+- In `_finish_run`: hoisted `pr_url: str | None = None` before the `if open_pr:`
+  block, set `pr_url = url` right after `github.create_pr(...)`, and — after
+  the PR/auto-merge block, before the feedback-file cleanup — added
+  `_write_outcome(..., state="done", pr_url=pr_url, reason=None, log=log)`.
+  Only the success path writes a record (`state="done"` always); the
+  FAILED-gates/`stopped` path is a deliberate deferral.
 
-Exactly per `PLAN.md`'s root-cause analysis: a `gh` outage or worktree-list
-hiccup produced output indistinguishable from a genuinely stopped/gone run,
-and the existing 2-poll `stopped` debounce and 0-poll `gone` transition had
-no way to discount a poll known to be degraded.
+### `src/agent_ops/runs.py` (read side)
 
-## Test additions (`tests/test_runs.py`)
+- Added `import json`, `_OUTCOME_RE`, `_OUTCOME_TTL_S = 7 * 24 * 3600.0`, and
+  a frozen `Outcome` dataclass (`state`, `pr_url`, `reason`).
+- `_outcome_detail(outcome)`: renders `PR #{n} — {url}` when a PR url parses,
+  `reason or "(recorded)"` otherwise.
+- `_load_outcomes(run_files, now, log)`: parses every `issue-N-outcome.json`,
+  pruning (via `unlink(missing_ok=True)`) anything whose file mtime is older
+  than `_OUTCOME_TTL_S` — keyed on file mtime rather than the JSON's own
+  `finished_at` so a corrupt file still ages out. Malformed JSON / missing
+  keys / stat errors log a `warning:`-prefixed message and are skipped, never
+  raised.
+- `classify()`: added `outcome: Outcome | None = None` keyword parameter
+  (default preserves every existing call site unmodified). Precedence is now
+  `live > outcome > has_feedback > pr > worktree > None` — an outcome record
+  outranks a stale feedback file, which is issue #78's "reports halted
+  forever" symptom.
+- `discover_runs()`: loads outcomes from the same `run_files` listing used for
+  feedback/log candidates, adds `set(outcomes)` to the `candidates` union, and
+  passes `outcome=outcomes.get(issue)` into `classify(...)`.
+- No changes to `wait_for_runs` — `TERMINAL_STATES` already includes `"done"`.
 
-- `test_discover_runs_worktree_listing_failure_still_yields_rows` — new
-  worktree-failure case, mirroring the existing `gh`-failure test.
-- `test_wait_for_runs_single_degraded_poll_resets_stopped_streak`
-- `test_wait_for_runs_raises_after_sustained_gh_outage`
-- `test_wait_for_runs_worktree_listing_failure_mid_wait_recovers`
-- `test_wait_for_runs_untrustworthy_disappearance_is_not_gone`
-- `test_wait_for_runs_logs_degradation_summary_on_clean_finish`
+## Rebase onto the new `staging` (PR #89)
 
-Existing tests updated only for the new tuple return shape (`_polls` helper,
-the inline `discover_runs` tests, and the inline `fake` in
-`test_wait_for_runs_dedups_repeated_warning`); no behavior assertions in the
-pre-existing tests were changed, and the two regression tests named in the
-plan (`..._requires_two_consecutive_polls`, `..._dedups_repeated_warning`)
-are unmodified in intent.
+PR #89 landed on `staging` while this branch was open and touched the same
+function. It changed `discover_runs`'s return type from `list[Run]` to
+`tuple[list[Run], bool]`, where the `bool` ("trustworthy") is `False` whenever
+`worktree.list_worktrees` or `github.open_prs` raised `CommandError` and had
+to be degraded to an empty list; `wait_for_runs` was reworked around it
+(`_MAX_DEGRADED_POLLS`, degraded-poll streak handling, never reading `gone`
+off a degraded poll).
 
-## Deviations from the plan
+Two real conflicts, resolved to keep **both** behaviours:
 
-None in substance. One clarification made while implementing: the plan's
-prose bundles "reset stopped_streak to 0" and "don't transition to gone"
-into one sentence about untrustworthy polls; I read this as two related but
-separable behaviors and implemented both — the streak reset applies to
-every watched issue on an untrustworthy poll (whether or not it's still
-present in `found`), while the "hold previous state, no gone transition" only
-applies to the specific case of an issue missing from `found`. This matches
-every acceptance-criteria scenario listed in the plan's test plan section.
+1. **Module constants.** Both sides appended to the same block. Kept
+   `_MAX_DEGRADED_POLLS = 4` (#89) *and* `_OUTCOME_TTL_S` (this PR).
+2. **`discover_runs` signature + preamble.** Took #89's `tuple[list[Run], bool]`
+   signature, docstring and `trustworthy` bookkeeping wholesale, and kept this
+   PR's `_load_outcomes` helper (which #89 never saw) immediately above it.
+   The function body auto-merged cleanly: #89's `try/except` around
+   `list_worktrees` and its two `trustworthy = False` assignments sit alongside
+   this PR's `outcomes = _load_outcomes(...)`, the `| set(outcomes)` term in
+   `candidates`, and `outcome=outcomes.get(issue)` in the `classify(...)` call.
+   Both `return` statements are now the tuple form (`return [], trustworthy` /
+   `return runs, trustworthy`).
 
-## Gates
+Deliberate resolution detail: **outcome records never make a poll
+untrustworthy.** `trustworthy` means "this poll's `gh`/`git` signals can be
+believed"; outcome records are read straight off local `.agent-runs/` with no
+subprocess that could degrade. A corrupt or unreadable record logs a warning
+and is skipped, but must not push `wait_for_runs` toward its degraded-streak
+bail-out — that error is about an outage, not about a bad local file. This is
+documented in `discover_runs`'s docstring and asserted by two tests
+(`assert trustworthy is True` in the outcome-only and invalid-JSON cases).
 
-`uv run pytest -q`, `uv run ruff check . && uv run ruff format --check .`,
-and `uv run pyright` could **not** be run in this sandboxed environment:
-`uv`, `pip3`, `pipx`, `ruff`, `uvx`, and even bare `python3 -m ...` /
-`python3 -c ...` invocations all require interactive approval that this
-automated pipeline has no channel to grant (only `git`, `gh`, and plain
-read-only shell utilities are usable here). This is an environment
-limitation, not a decision to skip the gates.
+Test updates from both sides: the four outcome tests this PR added to
+`tests/test_runs.py` and the end-to-end one in `tests/test_resume.py` now
+unpack the tuple. #89's own tests (including its `_polls` helper, which already
+marks each round trustworthy) needed no changes.
 
-Mitigations applied instead:
-- Full manual re-read of the resulting `runs.py` and `test_runs.py` for
-  syntax correctness and control-flow tracing (each new test's expected
-  poll-by-poll state transitions was hand-traced against the implementation).
-- Verified via `grep` that no line in either changed file exceeds the
-  configured 100-char ruff line length.
-- Verified via `wc -c` that `discover_runs`'s new signature line is exactly
-  100 chars so it stays on one line rather than being wrapped in a way `ruff
-  format` would then want to collapse back.
-- Full type hints added on the new tuple return, the new module constant,
-  and every new local (`trustworthy: bool`, `degraded_streak`/`degraded_polls`/
-  `total_polls: int`, `last_warning: str | None`).
+## Review round — PR #93 review comment
 
-Recommend the reviewer confirm this PR's own CI run (which does have `uv`
-available) is green before merging.
+Reported at
+https://github.com/jirathip-k/agent-ops/pull/93#issuecomment-5081227651.
 
-## Revision (round 2, per TEST_REPORT.md FAIL)
+`classify` ranks `outcome` above `has_feedback`, but nothing ever cleared
+`issue-N-outcome.json` when a *new* cycle started on the same issue. Within the
+7-day TTL:
 
-The tester found that all of the above protection lived in the `else` branch
-of `if watch is None:` in `wait_for_runs` — i.e. only from the *second* poll
-onward, once a watch set already existed. The `if watch is None:` branch
-itself, which runs exactly once on the very first poll, ignored `trustworthy`
-completely:
+1. `agent implement 50` succeeds → `_finish_run` writes `outcome.json {done}`
+2. issue reopened, a later run on #50 halts at self-review → `_record_halt`
+   writes `issue-50-feedback.md`
+3. `agent runs` reports `done  PR #NN` — the halt is invisible and the user is
+   never told to `agent resume 50`
 
-- `--wait --issue N` with a degraded first poll: if `N` wasn't in `found`
-  that round, it immediately raised `CommandError("no run found for #N")`,
-  even though the data was untrustworthy.
-- `--wait` (watch-all) with a degraded first poll: if `found` was empty, it
-  immediately did `capture("no agent runs found"); return True` (exit 0) —
-  the exact false-terminal-success shape issue #86 was filed against,
-  relocated to the watch-establishment step.
+The `outcome > feedback` precedence itself is correct and is kept: it is what
+stops a stale halt file from reporting `halted` forever (#78). What was missing
+is that the precedence is only sound while the record describes the *latest*
+cycle. Fix is on the write side, in `_clear_outcome`:
 
-### Fix
+- **`_record_halt`** clears the record before writing the feedback file. Being
+  shadowed is most harmful here — it is the one exit that needs a human.
+- **The start of a run clears it too** (`run_implement` and `run_resume`). The
+  reviewer left this optional ("and/or"); I took it, because `_record_halt`
+  alone leaves the same defect on a different exit path. The gate-failure exit
+  writes *no* feedback file and *no* record of its own — it relies on the kept
+  worktree classifying as `stopped`. A stale `done` shadows that just as
+  completely, so a genuinely failed run reads as finished. Clearing when the
+  cycle starts covers every exit at once (halted, stopped, done, running)
+  rather than one at a time, and it is the honest statement anyway: from the
+  moment a new cycle owns the issue, the previous cycle's verdict is no longer
+  the current word.
 
-In `src/agent_ops/runs.py`'s `wait_for_runs`, the `if watch is None:` branch
-now checks `trustworthy` before concluding either verdict:
+Placement of the two start-of-run calls is deliberate:
 
-- Named-issue case: `issue not in found` only raises `CommandError` when
-  `trustworthy` is `True`. On an untrustworthy poll, `watch` is simply left
-  `None` and the loop proceeds to the next poll — no state to hold since the
-  watch set doesn't exist yet.
-- Watch-all case: an empty `set(found)` only triggers `capture("no agent
-  runs found"); return True` when `trustworthy` is `True`. On an
-  untrustworthy poll, `watch` stays `None` and the loop retries.
-- Either way, the existing `degraded_streak`/`_MAX_DEGRADED_POLLS` counting
-  (already incremented earlier in the same loop iteration, before the
-  `if watch is None:` block is reached) still applies unchanged — sustained
-  degradation from poll 1 raises the same degraded-outage `CommandError`
-  after more than `_MAX_DEGRADED_POLLS` consecutive untrustworthy polls, so
-  this can't hang forever on a permanent outage.
-- The final `if all(is_terminal(i) for i in watch):` check is now guarded
-  with `watch is not None and ...`, since `watch` can legitimately still be
-  `None` after a poll that neither established it nor raised/returned.
-- Docstring updated to describe "the first *trustworthy* poll" instead of
-  simply "the first poll".
+- `run_implement`: **after** the "issue already has an open PR" bail-out. That
+  path starts no cycle and returns `False`, so it has no business discarding
+  the previous cycle's record. Covered by
+  `test_an_open_pr_bail_out_leaves_the_outcome_record_alone`.
+- `run_resume`: **after** `_resolve_feedback`, which raises when there is
+  nothing to resume from — again, no cycle started, nothing to supersede.
 
-No changes outside `wait_for_runs`'s watch-establishment branch and its
-guard; `discover_runs`, `classify`, `report_runs`, and the steady-state
-(already-watched) branch are untouched.
+`_record_halt` clears it a second time even though the start of the run already
+did. That is intentional redundancy, not an oversight: it is one `unlink` on a
+path that must not be wrong, and it keeps the guarantee local to the function
+whose file would otherwise be shadowed.
 
-### Tests added (`tests/test_runs.py`)
+Failure mode: `_clear_outcome` is best-effort like everything else in
+`_record_halt`. An `OSError` logs `could not clear stale outcome record at …`
+and the halt still records — a status file that will not delete must never
+crash a halt. Failing to delete only leaves pre-existing staleness in place.
 
-- `test_wait_for_runs_first_poll_degraded_named_issue_retries` — degraded
-  first poll with the named issue absent, recovers on poll 2, finishes
-  `done` on poll 3.
-- `test_wait_for_runs_first_poll_degraded_watch_all_retries` — degraded
-  first poll with an empty result in watch-all mode, recovers and finishes
-  the same way; asserts "no agent runs found" is never logged.
-- `test_wait_for_runs_raises_when_named_issue_degraded_from_first_poll` —
-  every poll degraded from poll 1 onward, named issue never confirmed:
-  raises the degraded-outage `CommandError` (not "no run found").
-- `test_wait_for_runs_raises_when_watch_all_degraded_from_first_poll` — same
-  for watch-all mode: raises the degraded-outage `CommandError`, never
-  "no agent runs found".
+### Tests
 
-All four hand-traced poll-by-poll against the updated implementation.
+- `tests/test_resume.py`:
+  - `test_a_new_cycles_halt_supersedes_the_previous_cycles_outcome_record` —
+    the regression test the review asked for. Writes a `done` record for #11,
+    runs a full `run_implement` that halts at self-review, then asserts
+    `discover_runs` reports `halted` with `agent resume 11` in the detail, and
+    that the record is gone.
+  - `test_starting_a_new_run_clears_the_previous_cycles_outcome_record` — the
+    gate-failure path: stale `done` must not mask `stopped`.
+  - `test_record_halt_clears_the_outcome_record_even_when_the_unlink_fails` —
+    monkeypatches `Path.unlink` to raise; the halt is still recorded and the
+    failure is logged.
+  - `test_an_open_pr_bail_out_leaves_the_outcome_record_alone` — guards the
+    placement decision above.
+- `tests/test_runs.py`:
+  `test_classify_outcome_over_feedback_is_only_safe_because_a_halt_clears_it`
+  pins the invariant at the `classify` level and points at the write-side test,
+  so a future reader sees why the precedence is safe rather than just that it
+  exists.
 
-### Gates
+Verified the tests actually catch the defect: with the three `_clear_outcome`
+call sites stubbed out, `test_a_new_cycles_halt_supersedes_…`,
+`test_starting_a_new_run_clears_…` and `test_record_halt_clears_…` all fail;
+they pass with the fix in place.
 
-Same environment constraint as the initial round: `uv`, `pip3`, `ruff`, and
-even bare `python3 -c "..."` all require interactive approval unavailable in
-this sandbox, confirmed again this round (`python3 -c "print(1+1)"` itself
-required approval). Verified instead by:
-- Full manual re-read and poll-by-poll trace of `wait_for_runs` against all
-  four new tests plus every pre-existing `wait_for_runs`/`discover_runs`
-  test, confirming the trustworthy-path behavior is byte-for-byte unchanged
-  (the refactor into `candidate`/nested `if trustworthy` is equivalent to
-  the prior unconditional logic whenever `trustworthy` is `True`, which is
-  what every pre-existing test drives).
-- `grep -P ".{101,}"` over both changed files: no line exceeds the 100-char
-  ruff line length.
-- Manual review confirming no Python syntax issue from comment-only
-  `if`/`else` bodies (each such branch already contains a preceding
-  statement satisfying the block requirement; the comments are trailing,
-  not the sole content of an indented block).
+## Gate results
 
-Recommend the reviewer confirm PR #89's own CI run is green before merging.
+Run locally in this worktree, on the rebased branch, with the fix in place:
 
-## Revision (round 3, per reviewer REQUEST CHANGES on PR #89)
+- `uv run pytest -q` — **439 passed**
+- `uv run ruff check . && uv run ruff format --check .` — **All checks passed!
+  / 59 files already formatted**
+- `uv run pyright` — **0 errors, 0 warnings, 0 informations**
 
-The reviewer flagged that the watch-establishing code path (the loop under
-`if watch is None:` that seeds initial state, `runs.py` around what was then
-line 513) seeded `stopped_streak[i] = 1 if r.state == "stopped" else 0` with
-no check on `trustworthy` — unlike the steady-state update loop a few lines
-below, which explicitly zeroes the streak on an untrustworthy poll.
-
-This mattered because the very first poll establishing the watch can itself
-be untrustworthy and coincide with the documented dispatch pre-spawn race
-window (worktree exists, child hasn't exec'd yet, reads as `stopped`). That
-seeded a bogus streak of 1 from an untrustworthy observation. A single
-*subsequent trustworthy* poll that still read `stopped` (the same race still
-settling) then pushed the streak to 2 and fired `is_terminal` after only one
-trustworthy observation — violating this PR's own documented "two consecutive
-trustworthy polls" debounce invariant. No existing test covered this exact
-combination (untrustworthy first poll + `stopped` state on the to-be-watched
-issue).
-
-### Fix
-
-Applied exactly the reviewer's suggested change in `src/agent_ops/runs.py`,
-in the watch-establishing loop:
-
-```python
-stopped_streak[i] = 1 if (trustworthy and r.state == "stopped") else 0
-```
-
-Now a `stopped` observation only seeds a streak of 1 when the poll that
-produced it was trustworthy; an untrustworthy first poll always seeds 0,
-regardless of the reported state, matching the steady-state loop's existing
-`if not trustworthy: stopped_streak[i] = 0` behavior. This is the only
-behavioral change in this round.
-
-### Minor fix (non-blocking note from the same review)
-
-The reviewer also noted, as a non-blocking observation, that the two
-early-exit paths in the watch-establishing branch — `raise
-CommandError("no run found for #{issue} ...")` and `capture("no agent runs
-found"); return True` — didn't surface the degraded-polls summary that the
-terminal-return path already logs. Since this was small and contained (no
-restructuring), both paths now log the same `note: PR/worktree data was
-unreliable for N of M polls in this wait` line (via the existing `capture()`
-helper) when `degraded_polls > 0`, before raising/returning. This does not
-change the exception message matched by `test_wait_for_runs_unknown_issue`
-(`match="no run found for #99"` is a substring search) nor any other existing
-assertion.
-
-### Test added (`tests/test_runs.py`)
-
-- `test_wait_for_runs_untrustworthy_first_poll_does_not_seed_stopped_streak`
-  — first poll is untrustworthy and reports `stopped` on issue #77 (the exact
-  scenario in the reviewer's finding); the next two polls are trustworthy and
-  still report `stopped`. Asserts the wait only terminates after the *third*
-  poll overall (i.e., after two consecutive *trustworthy* `stopped`
-  observations), not the second. Hand-traced against the buggy code, this
-  test fails at `calls["n"] == 2` (false-early termination) and passes at
-  `calls["n"] == 3` with the fix applied.
-
-### Gates
-
-Same environment constraint as prior rounds: `uv`, `pip3`, `ruff`, and bare
-`python3 -c "..."` all require interactive approval unavailable in this
-sandbox (confirmed again this round). Verified instead by:
-- Full manual poll-by-poll trace of the new test against both the pre-fix and
-  post-fix code, confirming it discriminates exactly the bug described.
-- `grep -P ".{101,}"` over both changed files: no line exceeds the 100-char
-  ruff line length.
-- Re-read of all pre-existing `wait_for_runs` tests to confirm the added
-  `trustworthy and` guard and the two `degraded_polls` notes do not change
-  behavior on any poll where `trustworthy` is `True` (the overwhelming
-  majority of existing test polls), since `trustworthy and X` is identical to
-  `X` whenever `trustworthy` is `True`.
-
-Recommend the reviewer confirm PR #89's own CI run is green before merging.
+(Earlier revisions of this file claimed the gates could not be executed in the
+sandbox. That claim is withdrawn: `uv run` works here and all three gates were
+actually run for this round.)
