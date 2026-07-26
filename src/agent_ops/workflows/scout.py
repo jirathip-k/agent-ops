@@ -9,7 +9,7 @@ from agent_ops import worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import LABEL_COLORS
 
@@ -62,7 +62,11 @@ def run_scout(
 
     # Scout against the WORKING branch — a TODO already resolved on staging
     # must not become an issue.
-    run(["git", "fetch", "origin", config.base_branch], cwd=project_root)
+    run(
+        ["git", "fetch", "origin", config.base_branch],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     scout_wt = worktree.create_detached(
         project_root, config.worktree_dir, "scout-tmp", f"origin/{config.base_branch}"
     )

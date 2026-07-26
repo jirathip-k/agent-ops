@@ -3,6 +3,9 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
+from agent_ops.runtimes import claude_code as claude_mod
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.runtimes.claude_code import (
     ClaudeCodeRuntime,
@@ -209,6 +212,21 @@ def test_ordinary_agent_error_is_not_a_model_problem() -> None:
 def test_stderr_is_searched_when_stdout_carried_no_prose() -> None:
     result = RunResult(ok=False, text="", raw={"stderr": SPEND_LIMIT_OUTPUT})
     assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE
+
+
+def test_non_streaming_run_opts_out_of_the_default_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent run takes tens of minutes — `utils.run`'s short default would kill it."""
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return _proc('{"result": "done", "is_error": false}')
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    ClaudeCodeRuntime().run(RunRequest(prompt="p", cwd=Path("."), stream=False))
+    assert seen["timeout"] is None
 
 
 # --- _run_streaming deadlock regression tests -------------------------------

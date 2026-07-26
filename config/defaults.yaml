@@ -62,6 +62,8 @@ commands:
 loop:
   max_attempts: 3          # implement attempts before escalating to a human
   gates: [test, lint, typecheck]   # run in order; gates without a command are skipped
+  gate_timeout_seconds: 1800   # per-gate (and setup) wall clock; a gate that
+                           # overruns fails that gate instead of hanging the run
   plan: true               # planner agent runs first; ESCALATE stops the workflow
   self_review: true        # run a read-only review agent before committing
 

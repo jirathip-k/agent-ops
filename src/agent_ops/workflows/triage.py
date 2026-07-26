@@ -10,7 +10,7 @@ from agent_ops import messages, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import role_request
 
 # An issue is classified only when it carries a bucket label. The CI lane
@@ -92,7 +92,11 @@ def run_triage(
 
     # Classify against the WORKING branch (staging), not the local checkout —
     # the checkout may sit on a stale main while merged work lives on staging.
-    run(["git", "fetch", "origin", config.base_branch], cwd=project_root)
+    run(
+        ["git", "fetch", "origin", config.base_branch],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     triage_wt = worktree.create_detached(
         project_root, config.worktree_dir, "triage-tmp", f"origin/{config.base_branch}"
     )

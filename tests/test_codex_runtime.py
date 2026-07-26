@@ -84,9 +84,10 @@ def _stub_run(
     calls: list[list[str]] = []
 
     def fake_run(
-        cmd: list[str], *, cwd: Path | None = None, check: bool = True
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
     ) -> subprocess.CompletedProcess[str]:
         assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
+        assert timeout is None, "an agent run must opt out of `run`'s short default bound"
         calls.append(cmd)
         return subprocess.CompletedProcess(
             args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
@@ -147,9 +148,10 @@ def test_run_forwards_cwd_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_cwd: list[Path | None] = []
 
     def fake_run(
-        cmd: list[str], *, cwd: Path | None = None, check: bool = True
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
     ) -> subprocess.CompletedProcess[str]:
         assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
+        assert timeout is None, "an agent run must opt out of `run`'s short default bound"
         captured_cwd.append(cwd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="done", stderr="")
 

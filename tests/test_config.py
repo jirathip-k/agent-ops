@@ -34,6 +34,14 @@ def test_project_config_overrides_defaults(tmp_path: Path) -> None:
     assert config.commands.lint is None
 
 
+def test_gate_timeout_defaults_from_platform_and_is_overridable(tmp_path: Path) -> None:
+    assert load_project_config(tmp_path).loop.gate_timeout_seconds == 1800
+    _write_config(tmp_path, "loop:\n  gate_timeout_seconds: 300\n")
+    config = load_project_config(tmp_path)
+    assert config.loop.gate_timeout_seconds == 300
+    assert config.loop.max_attempts == 3  # sibling loop keys keep their defaults
+
+
 def test_platform_defaults_tier_models_by_role(tmp_path: Path) -> None:
     config = load_project_config(tmp_path)
     planner = config.resolve_role("planner")

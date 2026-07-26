@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops.config import ProjectConfig, load_project_config
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 
 
 def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
@@ -132,7 +132,7 @@ def run_promote(project_root: Path, *, log: Callable[[str], None] = print) -> st
             "configure base_branch: staging to use the promotion flow"
         )
 
-    run(["git", "fetch", "origin", working, stable], cwd=project_root)
+    run(["git", "fetch", "origin", working, stable], cwd=project_root, timeout=SLOW_GIT_TIMEOUT_S)
     commits = run(
         ["git", "log", f"origin/{stable}..origin/{working}", "--pretty=%s"],
         cwd=project_root,

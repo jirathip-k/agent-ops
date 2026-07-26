@@ -88,7 +88,7 @@ def _stub_worktree(
 def _stub_fetch(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], Path | None]]:
     calls: list[tuple[list[str], Path | None]] = []
 
-    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> None:
+    def fake_run(cmd: list[str], *, cwd: Path | None = None, **kwargs: object) -> None:
         calls.append((cmd, cwd))
 
     monkeypatch.setattr(spec_mod, "run", fake_run)
@@ -206,7 +206,7 @@ def test_run_spec_fetches_then_specs_against_origin_base(
     refs: list[str] = []
     _stub_issue(monkeypatch)
 
-    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> None:
+    def fake_run(cmd: list[str], *, cwd: Path | None = None, **kwargs: object) -> None:
         order.append("fetch")
         fetched.append((cmd, cwd))
 

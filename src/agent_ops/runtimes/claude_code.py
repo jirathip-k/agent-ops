@@ -56,7 +56,11 @@ class ClaudeCodeRuntime:
         cmd = build_command(request)
         if request.stream:
             return self._run_streaming(cmd, request)
-        proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False)
+        # timeout=None keeps today's unbounded behaviour: an agent run
+        # legitimately takes tens of minutes, so `run`'s short default would
+        # kill it. Bounding this path is issue #108's job — it needs an *idle*
+        # timeout (silence), not a wall-clock one.
+        proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False, timeout=None)
         return parse_result(proc)
 
     def classify_failure(self, result: RunResult) -> FailureKind:

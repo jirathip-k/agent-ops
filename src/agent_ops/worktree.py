@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,13 @@ def create(
     # sidesteps a git DWIM trap — with a remote-only base, `worktree add -b`
     # silently ignores -b and checks out a new local <base> branch instead.
     base_ref = base
-    if run(["git", "fetch", "origin", base], cwd=project_root, check=False).returncode == 0:
+    fetch = run(
+        ["git", "fetch", "origin", base],
+        cwd=project_root,
+        check=False,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
+    if fetch.returncode == 0:
         base_ref = f"origin/{base}"
 
     # Parallel dispatches race git's .git/config lock ("could not lock config
@@ -53,6 +59,7 @@ def create(
             ["git", "worktree", "add", "-b", branch, str(path), base_ref],
             cwd=project_root,
             check=False,
+            timeout=SLOW_GIT_TIMEOUT_S,
         )
         if proc.returncode == 0:
             return path
@@ -97,7 +104,12 @@ def create_tracking(project_root: Path, worktree_dir: str, name: str, branch: st
             f"remove it with `agent worktree remove {name}` before mirroring that branch."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "fetch", "origin", branch], cwd=project_root, check=False)
+    run(
+        ["git", "fetch", "origin", branch],
+        cwd=project_root,
+        check=False,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     local_exists = (
         run(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=project_root, check=False)
     ).returncode == 0
@@ -106,7 +118,7 @@ def create_tracking(project_root: Path, worktree_dir: str, name: str, branch: st
         if local_exists
         else ["git", "worktree", "add", "--track", "-b", branch, str(path), f"origin/{branch}"]
     )
-    proc = run(cmd, cwd=project_root, check=False)
+    proc = run(cmd, cwd=project_root, check=False, timeout=SLOW_GIT_TIMEOUT_S)
     if proc.returncode != 0:
         raise CommandError(
             f"git worktree add failed for existing branch {branch!r}:\n"
@@ -121,7 +133,11 @@ def create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) 
     if path.exists():
         raise FileExistsError(f"Worktree {path} already exists")
     path.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "worktree", "add", "--detach", str(path), ref], cwd=project_root)
+    run(
+        ["git", "worktree", "add", "--detach", str(path), ref],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     return path
 
 

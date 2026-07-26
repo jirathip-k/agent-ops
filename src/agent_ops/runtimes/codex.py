@@ -46,7 +46,10 @@ class CodexRuntime:
             cmd += ["--model", request.model]
         cmd.append(prompt)
 
-        proc = run(cmd, cwd=request.cwd, check=False)
+        # timeout=None keeps today's unbounded behaviour — see the same note in
+        # claude_code.py: agent runs need the idle timeout issue #108 adds, not
+        # `run`'s short wall-clock default.
+        proc = run(cmd, cwd=request.cwd, check=False, timeout=None)
         text = proc.stdout.strip() or proc.stderr.strip()
         # stderr is kept even when stdout wins the `text` slot: the error JSON
         # lands on stderr, and classification needs it.
