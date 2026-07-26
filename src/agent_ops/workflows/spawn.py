@@ -46,7 +46,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import messages, orca, runs, surfaces, worktree
+from agent_ops import claims, messages, orca, runs, surfaces, worktree
 from agent_ops.config import load_project_config
 from agent_ops.runtimes import get_spawnable_runtime
 from agent_ops.utils import CommandError
@@ -140,6 +140,13 @@ def report_outcome(
         log(f"#{issue} has already reported this cycle — nothing to send")
         return False
     runs.write_outcome(project_root, issue, state=state, pr_url=pr_url, reason=reason, log=log)
+    # Every state a run can report is terminal, so reporting one ends this
+    # issue's occupancy (issue #131). This is what releases a *spawned* session's
+    # claim: the session-end hook calls `agent report` whether or not the agent
+    # cooperated, so a worker that dies, is interrupted or stops early hands the
+    # issue back without having had to remember to. Best-effort, like the record
+    # and the push either side of it.
+    claims.release(project_root, issue, log=log)
     pushed = messages.send_outcome(
         project_root, issue, state=state, pr_url=pr_url, reason=reason, log=log
     )
@@ -239,6 +246,11 @@ def run_spawn(
     # A new cycle supersedes the last one's verdict, and `--if-unreported` is
     # only meaningful once this cycle's slate is clean.
     runs.clear_outcome(project_root, issue, log=log)
+    # Claimed here rather than released here: unlike `agent implement`, this
+    # command returns while the work is only just starting, so the release
+    # belongs to whatever ends the session — the worker's own `agent report`, or
+    # the stop hook seeded above on its behalf (issue #131).
+    claims.claim(project_root, issue, log=log)
 
     if isinstance(chosen, surfaces.OrcaSurface):
         # Orca finds an externally-created worktree on a periodic rescan, and
@@ -250,6 +262,10 @@ def run_spawn(
     try:
         spawned = chosen.spawn(f"agent-spawn-issue-{issue}", command, wt_path, attach_path=wt_path)
     except CommandError as exc:
+        # Nothing is running, so nothing holds the issue: hand the claim back
+        # rather than leaving the CI lane blocked until the TTL expires on a
+        # session that never started. A retry re-claims.
+        claims.release(project_root, issue, log=log)
         # The worktree is fine and the hook is already on it, so a retry is
         # cheap — but a caller left staring at a bare Orca error has no way to
         # know that, and issue #117 watched exactly that turn into an

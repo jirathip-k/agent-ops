@@ -66,6 +66,12 @@ class Outcome:
     state: str
     pr_url: str | None
     reason: str | None
+    # When the run recorded this, as `write_outcome` stamped it. None for a
+    # record written before the field existed, or one whose value is not a
+    # number — a corrupt timestamp must read as "unknown", never as epoch 0,
+    # since `claims.audit` compares it against a claim's age to decide whether a
+    # release was missed.
+    finished_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -493,6 +499,53 @@ def clear_outcome(
         log(f"could not clear stale outcome record at {path}: {exc}")
 
 
+def issue_from_branch(branch: str) -> int | None:
+    """The issue number a `fix/issue-N` task branch belongs to, or None.
+
+    The branch convention is this module's, and `discover_runs` is no longer its
+    only reader — `claims` derives "issues this checkout is holding a worktree
+    for" from the same rule, and two copies of a regex are two things to keep in
+    step.
+    """
+    match = _BRANCH_RE.match(branch)
+    return int(match.group(1)) if match is not None else None
+
+
+def _parse_outcome(path: Path, log: Callable[[str], None]) -> Outcome | None:
+    """One outcome record off disk, or None with a warning if it can't be read."""
+    try:
+        data = json.loads(path.read_text())
+        finished = data.get("finished_at")
+        return Outcome(
+            state=data["state"],
+            pr_url=data.get("pr_url"),
+            reason=data.get("reason"),
+            finished_at=float(finished) if isinstance(finished, int | float) else None,
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        log(f"warning: could not read outcome record {path}: {exc}")
+        return None
+
+
+def read_outcome(
+    project_root: Path,
+    issue: int,
+    *,
+    log: Callable[[str], None] = lambda _: None,
+) -> Outcome | None:
+    """This cycle's recorded outcome for one issue, or None when there is none.
+
+    The single-issue counterpart to `_load_outcomes`, for callers that already
+    know which issue they are asking about (`claims.audit`) and have no business
+    pruning the directory to find out. A missing record is the ordinary answer,
+    not a warning: most issues have never had a run.
+    """
+    path = outcome_path(project_root, issue)
+    if not path.is_file():
+        return None
+    return _parse_outcome(path, log)
+
+
 def _load_outcomes(
     run_files: list[Path], now: float, log: Callable[[str], None]
 ) -> dict[int, Outcome]:
@@ -517,13 +570,9 @@ def _load_outcomes(
         if age > ARTIFACT_TTL_S:
             path.unlink(missing_ok=True)
             continue
-        try:
-            data = json.loads(path.read_text())
-            outcomes[issue] = Outcome(
-                state=data["state"], pr_url=data.get("pr_url"), reason=data.get("reason")
-            )
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            log(f"warning: could not read outcome record {path}: {exc}")
+        parsed = _parse_outcome(path, log)
+        if parsed is not None:
+            outcomes[issue] = parsed
     return outcomes
 
 

@@ -143,6 +143,62 @@ terminal is open, and `agent spawn` says so at spawn time rather than letting
 the state imply otherwise. Killing the process outright (SIGKILL, power loss)
 is the same silence it has always been.
 
+## Cross-lane coordination
+
+The two dispatch lanes shared no signal, so on 2026-07-26 both implemented #116
+at once: a hand-dispatched local agent (#126) and the scheduled CI triage lane
+(#127), five minutes apart. Two paid sessions, one outcome, noticed only because
+a human read the PR list.
+
+| Failure | Why it was invisible | What catches it now |
+|---|---|---|
+| Two lanes implement the same issue in parallel | Every label the CI lane selects on describes an issue's *classification* — `triage:done`, `needs-human`, `blocked`. None means "an agent is working on this right now". The local side's evidence (a worktree, `.agent-runs/`) lives on one machine; a fresh CI runner cannot read any of it, so an issue under active local work looks exactly like an untouched one | An `agent:claimed` label, applied by `agent implement`/`resume`/`spawn` and skipped by the CI lane's Step 1 selector (#131). Released in a `finally` around the whole run, so no exit path can forget |
+| Merging the narrower of two duplicate PRs *masks* a bug rather than fixing it | Both PRs are green and well-tested, so the choice looks like a preference. Fixing #116 alone hid #120: `classify` ranks `live > outcome`, so a detected-live spawn hides a false `halted` record that still becomes the run's verdict once the session ends | The duplication itself, upstream — there is no second PR to choose between (#131) |
+
+### The one it introduces
+
+A claim mechanism can strand an issue, and that is a worse trade than the
+duplication it prevents: duplicate work is loud and costs money, a blocked issue
+is silent and costs nothing anyone can see. Written down as a failure mode
+rather than as a caveat, because it is one.
+
+**A claim can outlive its run.** The release is a `gh` call at the end of a
+process, so anything that skips the end skips the release: SIGKILL, power loss, a
+`gh`/network outage in the last second of a run, or a spawned session under a
+runtime with no stop hook (Codex today — the same gap `agent spawn` already has
+for outcome records). The issue then carries `agent:claimed` with nothing behind
+it, and *no lane will touch it* until something clears it. Three recoveries, in
+decreasing order of how much they assume:
+
+- the run releases it (`finally`, or the session-end hook via `agent report`);
+- the CI lane treats a claim older than 8h as dead, clears it with a comment, and
+  proceeds — enforced by the *reader*, deliberately, because a claim left by a
+  laptop that is now closed must expire with nothing local ever running again;
+- `agent doctor` names it, with the command to clear it, long before the TTL.
+
+The eight hours between a crash and the TTL are real blocked time, and nothing
+shortens them for an operator who never runs `doctor`. That is the cost, stated
+rather than discounted.
+
+**A hand-started agent still claims nothing.** `agent implement`, `agent resume`
+and `agent spawn` claim on their own; an agent started by hand in a worktree —
+how most of this repo's own work happens, including #126 — runs no agent-ops
+command at all, so nothing can claim on its behalf. `agent claim <N>` covers it
+only if somebody remembers. What keeps that from being silent is the inverse
+check: `agent doctor` reports a `fix/issue-N` worktree on this machine whose
+issue carries no claim, which is exactly the #126 shape. It is a report, not a
+guard — the collision it describes is still possible, and the honest summary is
+that this closes the lanes the platform dispatches and only *surfaces* the one it
+does not.
+
+**`agent doctor` cannot tell a foreign claim from a dead one.** A claim held by
+another machine looks identical to one whose run died: no local worktree, no
+local outcome record. Reporting that as stale would produce confident, wrong
+advice — the exact shape every entry above shares — so it is not reported at all.
+Only two things count as stale: age past the TTL, and a local outcome record
+written *after* the claim was applied (a release that failed). Everything else is
+left to the TTL, which is slower and correct.
+
 ## Tests
 
 A passing test is not evidence that a test guards anything. Two cases from one

@@ -144,6 +144,28 @@ what stops the local lane and the CI lane from fixing the same issue twice.
 The message names the existing PR; pass `--force` to implement anyway (e.g.
 the match was a false positive).
 
+That guard only works once a PR exists. For the window before it — the hours a
+run spends implementing — the issue carries an `agent:claimed` label, and the CI
+lane's Step 1 selector skips it (issue #131). `agent implement`, `agent resume`
+and `agent spawn` apply it at the start of a run and clear it on every way out,
+including a crash and the session-end hook, so there is nothing to remember.
+
+Two things about claims are worth knowing:
+
+```sh
+agent claim 123             # an agent you started by hand is working on this
+agent claim 123 --release   # ...and is done
+```
+
+- **An agent started by hand claims nothing.** No agent-ops command runs in that
+  path, so nothing can claim for it — run `agent claim` from the worktree. `agent
+  doctor` reports any `fix/issue-N` worktree on this machine whose issue is
+  unclaimed, so forgetting is visible rather than silent.
+- **A claim expires.** A run killed outright leaves the label behind; the CI lane
+  clears any claim older than 8 hours and says so, and `agent doctor` reports
+  stale claims (and failed releases) well before that. See
+  `docs/failure-modes.md` for what this prevents and what it costs.
+
 ### Resuming a self-review halt
 
 If self-review requests changes, `agent implement` stops and keeps the
