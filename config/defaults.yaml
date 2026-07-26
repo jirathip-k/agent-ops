@@ -19,10 +19,18 @@ runtime:
   stream: true             # print agent activity (tool calls, text) live —
                            # makes Orca terminals show real progress
 
-# Tier names → concrete models, per runtime. Roles below reference tiers, so
-# swapping the whole fleet to a new model is a one-line edit here — and since
-# these are floating vendor aliases (fable/sonnet always point at the latest
-# release), the tiers self-update as new models ship.
+# Tier names → concrete models, per runtime. A tier names a *job*, not a
+# vendor: `smart` is the planning-and-review tier (few tokens, high leverage),
+# `fast` is the implementation tier (the workhorse). Roles below reference
+# tiers, so swapping the whole fleet is a one-line edit here.
+#
+# Every runtime needs its own table: what a model string means is the runtime's
+# business, and a tier missing for the runtime a role actually runs on is a
+# named error at resolution (config.ModelTierError), never a foreign model name
+# handed to a CLI. `agent doctor` lists the resolved model per runtime per role
+# and flags the gaps. Whether a value tracks new releases on its own is a
+# per-provider property — do not assume it; see docs/workflow.md for how to
+# check a table against the vendor's models API.
 model_tiers:
   claude_code:
     smart: fable           # planning & review: highest-leverage tokens

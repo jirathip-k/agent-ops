@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,18 @@ from agent_ops.cli import _checkout_drift, _missing_gitignore_markers, app
 from agent_ops.utils import run
 
 runner = CliRunner()
+
+
+def _all_clis_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend every CLI `doctor` looks for is installed.
+
+    Patches `shutil.which` itself rather than `agent_ops.cli`'s reference to
+    it: the runtime rows answer through each adapter's own `available()`, so a
+    patch scoped to the CLI module would leave them reporting whatever happens
+    to be on the developer's PATH — passing locally and failing in CI.
+    """
+    monkeypatch.setattr(shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
 
 IN_SYNC_TRIAGE_CALLER = """
 jobs:
@@ -128,7 +141,7 @@ def test_doctor_warns_on_missing_marker_but_exit_code_stays_zero(
 ) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     (tmp_path / ".gitignore").write_text(".worktrees/\n")
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -138,7 +151,7 @@ def test_doctor_warns_on_missing_marker_but_exit_code_stays_zero(
 
 def test_doctor_no_warning_when_both_markers_present(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -149,7 +162,7 @@ def test_doctor_no_warning_when_both_markers_present(tmp_path: Path, monkeypatch
 def test_doctor_warns_on_no_gitignore_file(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     (tmp_path / ".gitignore").unlink()
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -160,7 +173,7 @@ def test_doctor_warns_on_no_gitignore_file(tmp_path: Path, monkeypatch) -> None:
 def test_doctor_no_triage_output_when_caller_in_sync(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -176,7 +189,7 @@ def test_doctor_warns_on_missing_secrets(tmp_path: Path, monkeypatch) -> None:
         "",
     )
     _write_triage_caller(tmp_path, caller)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -191,7 +204,7 @@ def test_doctor_warns_on_missing_permission(tmp_path: Path, monkeypatch) -> None
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     caller = IN_SYNC_TRIAGE_CALLER.replace("      actions: read\n", "")
     _write_triage_caller(tmp_path, caller)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -205,7 +218,7 @@ def test_doctor_no_warning_for_customised_triage_values(tmp_path: Path, monkeypa
         "auto_merge: false", "auto_merge: true\n      runner: blacksmith-2vcpu-ubuntu-2404"
     )
     _write_triage_caller(tmp_path, caller)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -215,7 +228,7 @@ def test_doctor_no_warning_for_customised_triage_values(tmp_path: Path, monkeypa
 
 def test_doctor_no_output_when_no_triage_yml(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -226,7 +239,7 @@ def test_doctor_no_output_when_no_triage_yml(tmp_path: Path, monkeypatch) -> Non
 def test_doctor_reports_an_unreadable_stub_without_traceback(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
     monkeypatch.setattr(stubs, "STUBS_DIR", _fake_stubs(tmp_path, triage="jobs: [not a mapping"))
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
@@ -247,7 +260,7 @@ def test_doctor_drift_message_follows_a_patched_stubs_dir(tmp_path: Path, monkey
 
     alt_stubs = _fake_stubs(tmp_path, triage=IN_SYNC_TRIAGE_CALLER)
     monkeypatch.setattr(stubs, "STUBS_DIR", alt_stubs)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -263,7 +276,7 @@ def test_doctor_warns_on_a_drifting_groom_caller(tmp_path: Path, monkeypatch) ->
         "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n", ""
     )
     _write_caller(tmp_path, "groom.yml", caller)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -279,7 +292,7 @@ def test_doctor_reports_each_drifting_lane_on_its_own_line(tmp_path: Path, monke
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER.replace("      actions: read\n", ""))
     _write_caller(tmp_path, "groom.yml", IN_SYNC_GROOM_CALLER.replace("      issues: write\n", ""))
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -293,11 +306,111 @@ def test_doctor_reports_each_drifting_lane_on_its_own_line(tmp_path: Path, monke
     )
 
 
+# --- model tiers, per runtime (#42) -----------------------------------------
+
+
+def _write_project_config(root: Path, body: str) -> None:
+    (root / ".agent").mkdir(exist_ok=True)
+    (root / ".agent" / "config.yaml").write_text(body)
+
+
+def test_doctor_lists_the_resolved_model_and_ladder_for_every_role(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "  planner: claude_code / fable (fallbacks: opus → sonnet)" in result.output
+    assert "  implementer: claude_code / sonnet (fallbacks: haiku)" in result.output
+
+
+def test_doctor_warns_that_a_runtime_without_a_tier_table_would_be_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#42: the refusal is correct, but useless if the only way to find it is to
+    run with the override — and people reach for `--runtime` exactly when the
+    usual runtime has already stopped working."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert (
+        "! --runtime codex would be refused — model_tiers.codex has "
+        "no 'fast' for implementer; no 'smart' for planner, reviewer" in result.output
+    )
+    # a runtime this project never reaches for is not a fault
+    assert result.exit_code == 0
+
+
+def test_doctor_lists_an_alternate_runtimes_models_once_it_has_a_table(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_project_config(
+        tmp_path,
+        "model_tiers:\n  codex:\n    smart: some-codex-model\n    fast: some-small-codex-model\n",
+    )
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert (
+        "  --runtime codex: planner some-codex-model, implementer some-small-codex-model, "
+        "reviewer some-codex-model" in result.output
+    )
+    assert "would be refused" not in result.output
+
+
+def test_doctor_fails_when_the_configured_runtimes_cli_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    monkeypatch.setattr(shutil, "which", lambda tool: None if tool == "claude" else f"/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "✗ claude_code (missing; it is this project's runtime.name)" in result.output
+
+
+def test_doctor_tolerates_a_missing_cli_for_a_runtime_the_project_does_not_use(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    monkeypatch.setattr(shutil, "which", lambda tool: None if tool == "codex" else f"/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "- codex (optional)" in result.output
+
+
+def test_doctor_flags_a_ladder_that_could_step_up_into_a_costlier_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A project that repoints a tier but inherits the ladder gets a ladder that
+    is never trimmed — invisible until the day an availability failure uses it."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_project_config(tmp_path, "model_tiers:\n  claude_code:\n    smart: haiku\n")
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "! model_tiers.claude_code.smart is 'haiku'" in result.output
+    assert "step UP into 'fable'" in result.output
+
+
 def test_doctor_stays_quiet_about_lanes_the_repo_has_not_wired(tmp_path: Path, monkeypatch) -> None:
     """Absent lanes are named once as "not wired" and never warned about."""
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER)
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -310,7 +423,7 @@ def test_doctor_stays_quiet_about_lanes_the_repo_has_not_wired(tmp_path: Path, m
 
 def test_doctor_says_nothing_when_no_lane_is_wired(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
@@ -409,7 +522,7 @@ def test_checkout_drift_never_fetches(
 
 def test_doctor_reports_checkout_drift(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
     monkeypatch.setattr(
         "agent_ops.cli._checkout_drift",
         lambda root: "agent-ops checkout is 4 commits behind origin/main",
@@ -423,7 +536,7 @@ def test_doctor_reports_checkout_drift(tmp_path: Path, monkeypatch) -> None:
 
 def test_doctor_silent_when_checkout_in_sync(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
-    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    _all_clis_present(monkeypatch)
     monkeypatch.setattr("agent_ops.cli._checkout_drift", lambda root: None)
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
