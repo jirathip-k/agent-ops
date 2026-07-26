@@ -909,6 +909,13 @@ def status(
             help="Show per-repo CI lane coverage (triage/groom/...) instead of PRs and issues",
         ),
     ] = False,
+    failures: Annotated[
+        bool,
+        typer.Option(
+            "--failures",
+            help="Show recent failed workflow runs for every registered repo",
+        ),
+    ] = False,
     sync_orca: Annotated[
         bool,
         typer.Option(
@@ -918,15 +925,26 @@ def status(
     ] = False,
 ) -> None:
     """Fleet overview: open PRs and issue buckets for every registered repo."""
-    from agent_ops.status import fleet_status, pipeline_coverage
+    from agent_ops.status import fleet_failures, fleet_status, pipeline_coverage
 
-    if pipelines and sync_orca:
-        _err("--pipelines and --sync-orca are separate views; pass one at a time")
+    chosen = [
+        flag
+        for flag, on in (
+            ("--pipelines", pipelines),
+            ("--failures", failures),
+            ("--sync-orca", sync_orca),
+        )
+        if on
+    ]
+    if len(chosen) > 1:
+        _err(f"{' and '.join(chosen)} are separate views; pass one at a time")
         raise typer.Exit(1)
     try:
         config = registry.load_registry()
         if pipelines:
             pipeline_coverage(config)
+        elif failures:
+            fleet_failures(config)
         elif sync_orca:
             from agent_ops.orca_sync import sync_orca as run_sync
 

@@ -62,6 +62,7 @@ agent review --all             # review every open PR targeting base_branch, con
 agent worktree list            # see in-flight task worktrees
 agent runs                     # per-issue state: running / halted / stopped / done
 agent runs --wait              # block until every tracked run finishes, printing transitions
+agent status --failures        # recent failed workflow runs across every registered repo
 agent status --sync-orca       # mirror active agent lanes onto Orca cards (read-only)
 agent runtimes                 # claude_code / codex availability
 ```
