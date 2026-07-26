@@ -14,6 +14,7 @@ from agent_ops.status import (
     _branch,
     _cell,
     _short_runner,
+    _tag,
     bucket_counts,
     detect_lanes,
 )
@@ -222,10 +223,15 @@ def _proc(stdout: str = "", *, returncode: int = 0, stderr: str = "") -> Proc:
     return subprocess.CompletedProcess(["gh"], returncode, stdout=stdout, stderr=stderr)
 
 
-def _run(name: str, branch: str = "main", created: str = "2026-07-26T08:14:22Z") -> dict[str, Any]:
+def _run(
+    name: str,
+    branch: str = "main",
+    created: str = "2026-07-26T08:14:22Z",
+    conclusion: str = "failure",
+) -> dict[str, Any]:
     return {
         "name": name,
-        "conclusion": "failure",
+        "conclusion": conclusion,
         "headBranch": branch,
         "createdAt": created,
         "url": f"https://github.com/o/r/actions/runs/{len(name)}",
@@ -233,10 +239,20 @@ def _run(name: str, branch: str = "main", created: str = "2026-07-26T08:14:22Z")
 
 
 def _canned(responses: dict[str, Proc]) -> FakeRun:
-    """A `run()` stand-in that answers per the `--repo` argument it is given."""
+    """A `run()` stand-in that answers per the `--repo` argument it is given.
+
+    The sweep asks once per failed conclusion, so each repo's canned payload is
+    narrowed to the `--status` being asked for — the same filtering `gh` does
+    server-side.
+    """
 
     def fake(cmd: list[str], **kwargs: Any) -> Proc:
-        return responses[cmd[cmd.index("--repo") + 1]]
+        proc = responses[cmd[cmd.index("--repo") + 1]]
+        if proc.returncode != 0:
+            return proc
+        wanted = cmd[cmd.index("--status") + 1]
+        runs = [r for r in json.loads(proc.stdout) if r.get("conclusion") == wanted]
+        return _proc(json.dumps(runs))
 
     return fake
 
@@ -338,7 +354,8 @@ def test_fleet_failures_bounds_each_repo_below_the_run_default(
     status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lambda line: None)
 
     # A fan-out must not let one wedged repo hold the sweep for the fleet-wide default.
-    assert seen == [status.FAILURE_TIMEOUT_S]
+    # Every per-conclusion ask carries the bound; none falls back to the default.
+    assert seen == [status.FAILURE_TIMEOUT_S] * len(status.FAILED_CONCLUSIONS)
     assert status.FAILURE_TIMEOUT_S < utils.DEFAULT_TIMEOUT_S
 
 
@@ -367,6 +384,157 @@ def test_fleet_failures_columns_stay_aligned_within_a_repo(
 
     urls = [line.index("https://") for line in lines if "https://" in line]
     assert len(urls) == 2 and len(set(urls)) == 1  # URLs start in the same column
+
+
+def test_fleet_failures_asks_gh_for_every_failed_conclusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[str] = []
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        asked.append(cmd[cmd.index("--status") + 1])
+        return _proc("[]")
+
+    monkeypatch.setattr(status, "run", fake)
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lambda line: None)
+
+    assert asked == ["failure", "startup_failure", "cancelled", "timed_out"]
+
+
+def test_fleet_failures_counts_every_failed_conclusion(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned(
+            {
+                "o/a": _proc(
+                    json.dumps(
+                        [
+                            _run("ci", created="2026-07-25T01:00:00Z"),
+                            _run("triage", created="2026-07-25T02:00:00Z", conclusion="cancelled"),
+                            _run("groom", created="2026-07-25T03:00:00Z", conclusion="timed_out"),
+                            _run(
+                                "promote",
+                                created="2026-07-25T04:00:00Z",
+                                conclusion="startup_failure",
+                            ),
+                        ]
+                    )
+                )
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    # All four count as failures — none of the three new ones is invisible.
+    assert "o/a\033[0m — 4 recent failed run(s)" in text
+    assert "1 repo(s) with failures · 0 clean" in text
+    for tag in ("failed", "cancelled", "timed-out", "startup"):
+        assert tag in text
+    # Merged newest-first across the four separate `gh` asks.
+    order = [line.split()[0] for line in lines if line.startswith("  ")]
+    assert order == ["promote", "groom", "triage", "ci"]
+
+
+def test_fleet_failures_catches_a_lane_dead_with_only_startup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The outage that motivated this: five straight startup_failure runs and not
+    # one plain `failure`, which the old sweep reported as clean.
+    dead = [
+        _run("triage", created=f"2026-07-2{day}T06:00:00Z", conclusion="startup_failure")
+        for day in range(1, 6)
+    ]
+    monkeypatch.setattr(
+        status, "run", _canned({"o/dead": _proc(json.dumps(dead)), "o/ok": _proc("[]")})
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/dead", "o/ok"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/dead\033[0m — 5 recent failed run(s) · ⚠ 5 startup_failure" in text
+    assert "1 repo(s) with failures · 1 clean" in text
+    # startup_failure is contract drift, so the report points at the tool that finds it.
+    assert "agent doctor" in text and "o/dead" in text.split("agent doctor")[1]
+
+
+def test_fleet_failures_omits_the_doctor_hint_without_startup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned({"o/a": _proc(json.dumps([_run("ci"), _run("deploy", conclusion="timed_out")]))}),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "agent doctor" not in text and "startup_failure" not in text
+
+
+def test_fleet_failures_keeps_only_the_newest_across_conclusions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = [
+        _run("old", created="2026-07-20T00:00:00Z"),
+        _run("mid", created="2026-07-22T00:00:00Z", conclusion="cancelled"),
+        _run("new", created="2026-07-24T00:00:00Z", conclusion="startup_failure"),
+    ]
+    monkeypatch.setattr(status, "run", _canned({"o/a": _proc(json.dumps(runs))}))
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lines.append, limit=2)
+
+    text = "\n".join(lines)
+    # The limit applies to the merged result, not to each conclusion's ask.
+    assert "o/a\033[0m — 2 recent failed run(s)" in text
+    assert "new" in text and "mid" in text and "old" not in text
+
+
+def test_fleet_failures_columns_stay_aligned_across_mixed_conclusions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned(
+            {
+                "o/a": _proc(
+                    json.dumps(
+                        [
+                            _run("CI", "main"),
+                            _run("Deploy Edge Functions", "fix/issue-31", conclusion="cancelled"),
+                            _run("triage", "main", conclusion="startup_failure"),
+                        ]
+                    )
+                )
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    # The widest tag ("cancelled") must not stagger the columns after it.
+    urls = [line.index("https://") for line in lines if "https://" in line]
+    assert len(urls) == 3 and len(set(urls)) == 1
+
+
+def test_tag_labels_each_conclusion_and_passes_unknown_through() -> None:
+    assert _tag({"conclusion": "failure"}) == "failed"
+    assert _tag({"conclusion": "startup_failure"}) == "startup"
+    assert _tag({"conclusion": "cancelled"}) == "cancelled"
+    assert _tag({"conclusion": "timed_out"}) == "timed-out"
+    # An unmapped conclusion must not be flattened into a misleading "failed".
+    assert _tag({"conclusion": "stale"}) == "stale"
+    assert _tag({}) == "?"
 
 
 def test_branch_elides_only_when_it_would_push_the_url_out() -> None:
