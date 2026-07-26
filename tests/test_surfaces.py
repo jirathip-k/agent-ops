@@ -273,6 +273,102 @@ def test_orca_surface_raises_immediately_on_non_selector_error(
     assert sleeps == []
 
 
+def _handle_timeout(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """What `orca terminal create` actually returned in issue #117.
+
+    Note what it says: the handle timed out *after creation*. The terminal
+    exists; only the answer was late."""
+    body = {
+        "ok": False,
+        "error": {
+            "code": "runtime_error",
+            "message": "Timed out waiting for terminal handle after creation",
+        },
+    }
+    return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(body), stderr="")
+
+
+def test_orca_surface_retries_a_transient_error_that_is_not_selector_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only `selector_not_found` was retryable, so the first real `agent spawn`
+    aborted on a timeout that succeeded when re-run by hand (#117)."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _handle_timeout(cmd)
+        payload = {"result": {"terminal": {"handle": "term_abc"}}}
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(surfaces, "run", fake_run)
+    monkeypatch.setattr(surfaces.time, "sleep", lambda s: None)
+    # Orca answers, and consistently: nothing was created by the failed attempt.
+    monkeypatch.setattr(surfaces.orca, "terminal_handles", lambda path: set())
+
+    spawned = surfaces.OrcaSurface().spawn(
+        "agent-issue-7", ["agent", "implement", "7"], Path("/repo")
+    )
+
+    assert spawned.handle == "term_abc"
+    assert len(calls) == 2
+
+
+def test_orca_surface_adopts_the_terminal_a_timed_out_create_left_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole of #117's comment: the retry made a *second* live agent session
+    on one worktree and one branch, and the spawn record named only one of them,
+    so the other was invisible to `agent runs` and unaddressable by
+    `messages.send_outcome`."""
+    creates: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        creates.append(cmd)
+        return _handle_timeout(cmd)
+
+    listed = [set(), {"term_orphan"}]
+
+    def fake_handles(path: Path) -> set[str]:
+        return listed[min(len(creates), len(listed) - 1)]
+
+    monkeypatch.setattr(surfaces, "run", fake_run)
+    monkeypatch.setattr(surfaces.time, "sleep", lambda s: None)
+    monkeypatch.setattr(surfaces.orca, "terminal_handles", fake_handles)
+
+    spawned = surfaces.OrcaSurface().spawn(
+        "agent-issue-7", ["agent", "implement", "7"], Path("/repo")
+    )
+
+    # One create, and the terminal it silently made is the one we run with.
+    assert len(creates) == 1
+    assert spawned.handle == "term_orphan"
+    assert "adopted" in spawned.where
+
+
+def test_orca_surface_adopts_nothing_when_orca_cannot_list_terminals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `None` baseline is "unknown", not "empty" — diffing against it would
+    adopt whatever happened to be on the worktree, including somebody else's
+    session."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return _handle_timeout(cmd)
+
+    monkeypatch.setattr(surfaces, "run", fake_run)
+    monkeypatch.setattr(surfaces.time, "sleep", lambda s: None)
+    monkeypatch.setattr(surfaces.orca, "terminal_handles", lambda path: None)
+
+    with pytest.raises(CommandError, match="Timed out"):
+        surfaces.OrcaSurface().spawn("agent-issue-7", ["agent", "implement", "7"], Path("/repo"))
+
+    assert len(calls) == surfaces._ATTACH_ATTEMPTS
+
+
 def test_orca_surface_no_duplicate_fallback_when_attach_path_is_cwd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
