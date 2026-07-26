@@ -109,7 +109,10 @@ paths executed in Actions, so the output can't drift between lanes. Unlike
 groom they are label-gated, not scheduled: add `spec-requested` or
 `plan-requested` (or dispatch the workflow with an explicit issue number),
 and the pipeline runs the CLI, posts the "## Agent spec" / "## Agent plan"
-comment, and removes the request label on success. `needs-human`/`blocked`
+comment, and removes the request label on success. A spec agent that
+escalates instead posts its question as a "## Spec agent — escalation"
+comment (once, however many times the run repeats) and fails the run, so the
+reasoning survives where a human reads it. `needs-human`/`blocked`
 issues are always skipped, runs are capped by `max_issues`, and both lanes
 share the `agent-triage-<repo>` concurrency group with triage/groom so a
 repo is never specced while it's being groomed. None of this moves a gate:

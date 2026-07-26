@@ -4,6 +4,35 @@ import pytest
 
 from agent_ops import messages, orca
 
+# The exact reply a managed repo's scheduled spec run got at 03:48 on
+# 2026-07-26 (issue #129): it opens with the sentinel word on the way to ruling
+# escalation OUT, and then writes the spec. The bare prefix match read that as
+# an escalation, discarded the spec and failed the run — every night, because
+# the gate label only clears on success. Kept verbatim and shared by every test
+# that guards the boundary: a matcher is only as good as the strings it was
+# actually built against.
+DECLINED_ESCALATION_REPLY = """ESCALATE is not needed — this is a pure UI restyle. Writing the spec.
+
+## Summary
+
+Restyle the settings panel to match the rest of the app.
+
+## Acceptance criteria
+
+- [ ] The settings list rows use the shared card surface
+- [ ] The expanded row keeps the same spacing as the list view
+
+## Size
+
+S
+"""
+
+
+@pytest.fixture
+def declined_escalation_reply() -> str:
+    """The real-world reply that must NOT be read as an escalation (issue #129)."""
+    return DECLINED_ESCALATION_REPLY
+
 
 @pytest.fixture(autouse=True)
 def _orca_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
