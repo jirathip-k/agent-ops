@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import shlex
+import string
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TextIO
 
-from agent_ops import orca
+from agent_ops import orca, runs
 from agent_ops.utils import CommandError, run
 
 # Orca does not index a brand-new external worktree instantly (see issue #20):
@@ -17,6 +18,20 @@ from agent_ops.utils import CommandError, run
 # monkeypatch `surfaces.time.sleep` without touching class internals.
 _ATTACH_ATTEMPTS = 3
 _ATTACH_DELAY_S = 2.0
+
+# A background run's log is named `<label>-<YYYYMMDD>-<HHMMSS>.log`. Labels are
+# derived from the issue number alone, so a fixed `<label>.log` opened `"w"`
+# meant every re-dispatch and every `agent resume` silently truncated the
+# previous attempt's only record (issue #92). Local time, most-significant
+# first: a plain `ls` puts one issue's attempts in the order they happened, so
+# telling which log is which attempt never requires opening one.
+_LOG_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+# Two spawns of the same label within one second collide on the stamp — the
+# later ones take an `a`, `b`, ... suffix instead of overwriting the earlier.
+# A letter rather than `-2`: `-` sorts before `.`, so a numbered suffix would
+# put the second attempt *ahead* of the first in `ls`, which is the one thing
+# this naming scheme is supposed to make reliable.
+_LOG_STAMP_SUFFIXES = ("", *string.ascii_lowercase)
 
 
 @dataclass(frozen=True)
@@ -168,13 +183,42 @@ class OrcaSurface:
         )
 
 
+def _open_run_log(log_dir: Path, label: str) -> tuple[Path, TextIO]:
+    """Create and open this attempt's own log; never touch an existing one.
+
+    Opened `"x"`, so the only way this returns is with a file that did not
+    exist a moment ago — a run can no more truncate a sibling's log than it
+    can be handed one to append to (issue #92: an ever-growing appended file
+    makes run boundaries unreadable, and nothing would prune it).
+    """
+    stamp = time.strftime(_LOG_STAMP_FORMAT)
+    for suffix in _LOG_STAMP_SUFFIXES:
+        path = log_dir / f"{label}-{stamp}{suffix}.log"
+        try:
+            return path, path.open("x")
+        except FileExistsError:
+            continue
+    raise CommandError(
+        f"could not open a run log for {label!r} in {log_dir}: every name for {stamp} is taken "
+        f"({len(_LOG_STAMP_SUFFIXES)} spawns of the same label in one second)"
+    )
+
+
 class BackgroundSurface:
-    """Detached process logging to <cwd>/.agent-runs/<label>.log.
+    """Detached process logging to <cwd>/.agent-runs/<label>-<timestamp>.log.
 
     Works everywhere (plain terminal, Claude Code UI, CI). Watch with
-    `tail -f` on the log file. `attach_path` is ignored: there is no UI to
-    attach to, and the log must live under `cwd` (the project root) so it
-    survives the task worktree being removed on success.
+    `tail -f` on the log file — `Spawned.log_path` (and the `where` prose)
+    names the file this run is actually writing, and the spawn record persists
+    it (`messages.record_spawn`), so no reader has to reconstruct the
+    timestamp. `attach_path` is ignored: there is no UI to attach to, and the
+    log must live under `cwd` (the project root) so it survives the task
+    worktree being removed on success.
+
+    Each spawn writes a new file rather than reopening a label-derived one, so
+    a re-dispatch or an `agent resume` cycle leaves the previous attempt's
+    record intact (issue #92). Old logs are aged out by `runs.prune_logs` on
+    the same one-week clock that prunes outcome records.
     """
 
     name = "background"
@@ -187,8 +231,9 @@ class BackgroundSurface:
     ) -> Spawned:
         log_dir = cwd / ".agent-runs"
         log_dir.mkdir(exist_ok=True)
-        log_path = log_dir / f"{label}.log"
-        with log_path.open("w") as log_file:
+        runs.prune_logs(log_dir)
+        log_path, log_file = _open_run_log(log_dir, label)
+        with log_file:
             proc = subprocess.Popen(
                 command,
                 cwd=cwd,

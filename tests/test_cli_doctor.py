@@ -32,10 +32,37 @@ jobs:
 """
 
 
-def _write_triage_caller(root: Path, text: str) -> None:
+IN_SYNC_GROOM_CALLER = """
+jobs:
+  groom:
+    permissions:
+      contents: read
+      issues: write
+    uses: acme/agent-ops/.github/workflows/groom-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+"""
+
+
+def _write_caller(root: Path, name: str, text: str) -> None:
     workflows = root / ".github" / "workflows"
     workflows.mkdir(parents=True, exist_ok=True)
-    (workflows / "triage.yml").write_text(text)
+    (workflows / name).write_text(text)
+
+
+def _write_triage_caller(root: Path, text: str) -> None:
+    _write_caller(root, "triage.yml", text)
+
+
+def _fake_stubs(root: Path, **lanes: str) -> Path:
+    """A stand-in stubs/ directory: one `managed-repo-<lane>.yml` per keyword."""
+    stubs_dir = root / "stubs"
+    stubs_dir.mkdir(exist_ok=True)
+    for lane, text in lanes.items():
+        (stubs_dir / f"managed-repo-{lane}.yml").write_text(text)
+    return stubs_dir
 
 
 def _commit(repo: Path, message: str) -> None:
@@ -196,39 +223,99 @@ def test_doctor_no_output_when_no_triage_yml(tmp_path: Path, monkeypatch) -> Non
     assert "triage.yml" not in result.output
 
 
-def test_doctor_reports_missing_stub_without_traceback(tmp_path: Path, monkeypatch) -> None:
+def test_doctor_reports_an_unreadable_stub_without_traceback(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER)
     monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(stubs, "TRIAGE_STUB", tmp_path / "nonexistent-stub.yml")
+    monkeypatch.setattr(stubs, "STUBS_DIR", _fake_stubs(tmp_path, triage="jobs: [not a mapping"))
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "! triage.yml drift check skipped:" in result.output
+    assert "! triage drift check skipped:" in result.output
 
 
-def test_doctor_drift_message_follows_a_patched_stub(tmp_path: Path, monkeypatch) -> None:
-    """The stub path in the warning must come from stubs.TRIAGE_STUB at call time.
+def test_doctor_drift_message_follows_a_patched_stubs_dir(tmp_path: Path, monkeypatch) -> None:
+    """The stub path in the warning must come from stubs.STUBS_DIR at call time.
 
-    A by-value `from ... import TRIAGE_STUB` would silently keep reporting the
-    real stub, and an unguarded relative_to() would raise for a stub outside
-    PLATFORM_ROOT.
+    A by-value import would silently keep reporting the real stub, and an
+    unguarded relative_to() would raise for a stub outside PLATFORM_ROOT.
     """
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     caller = IN_SYNC_TRIAGE_CALLER.replace("      actions: read\n", "")
     _write_triage_caller(tmp_path, caller)
 
-    alt_stub = tmp_path / "alt-stub.yml"
-    alt_stub.write_text(IN_SYNC_TRIAGE_CALLER)
-    monkeypatch.setattr(stubs, "TRIAGE_STUB", alt_stub)
+    alt_stubs = _fake_stubs(tmp_path, triage=IN_SYNC_TRIAGE_CALLER)
+    monkeypatch.setattr(stubs, "STUBS_DIR", alt_stubs)
     monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "alt-stub.yml" in result.output
+    assert str(alt_stubs / "managed-repo-triage.yml") in result.output
     assert "missing permissions: actions" in result.output
+
+
+def test_doctor_warns_on_a_drifting_groom_caller(tmp_path: Path, monkeypatch) -> None:
+    """#90: every lane the repo calls is checked, not just triage."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    caller = IN_SYNC_GROOM_CALLER.replace(
+        "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n", ""
+    )
+    _write_caller(tmp_path, "groom.yml", caller)
+    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert (
+        "! .github/workflows/groom.yml is behind stubs/managed-repo-groom.yml — "
+        "missing secrets: CLAUDE_CODE_OAUTH_TOKEN" in result.output
+    )
+
+
+def test_doctor_reports_each_drifting_lane_on_its_own_line(tmp_path: Path, monkeypatch) -> None:
+    """Two drifting lanes must stay two readable lines, not one merged message."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER.replace("      actions: read\n", ""))
+    _write_caller(tmp_path, "groom.yml", IN_SYNC_GROOM_CALLER.replace("      issues: write\n", ""))
+    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "! CI lane callers checked: groom, triage" in result.output
+    assert "groom.yml is behind stubs/managed-repo-groom.yml — missing permissions: issues" in (
+        result.output
+    )
+    assert "triage.yml is behind stubs/managed-repo-triage.yml — missing permissions: actions" in (
+        result.output
+    )
+
+
+def test_doctor_stays_quiet_about_lanes_the_repo_has_not_wired(tmp_path: Path, monkeypatch) -> None:
+    """Absent lanes are named once as "not wired" and never warned about."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_triage_caller(tmp_path, IN_SYNC_TRIAGE_CALLER)
+    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "✓ CI lane callers in sync: triage (not wired: groom, plan, promote, scout, spec)" in (
+        result.output
+    )
+    assert "is behind" not in result.output
+
+
+def test_doctor_says_nothing_when_no_lane_is_wired(tmp_path: Path, monkeypatch) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    monkeypatch.setattr("agent_ops.cli.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "CI lane callers" not in result.output
 
 
 def test_checkout_drift_in_sync(origin_and_clone: tuple[Path, Path]) -> None:

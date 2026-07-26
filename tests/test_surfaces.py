@@ -1,12 +1,21 @@
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from agent_ops import surfaces
+from agent_ops import runs, surfaces
 from agent_ops.utils import CommandError
+
+
+def _await_text(log: Path, text: str) -> str:
+    for _ in range(50):
+        if log.exists() and text in log.read_text():
+            break
+        time.sleep(0.05)
+    return log.read_text()
 
 
 def test_background_surface_spawns_and_logs(tmp_path: Path) -> None:
@@ -14,12 +23,13 @@ def test_background_surface_spawns_and_logs(tmp_path: Path) -> None:
         "demo", ["sh", "-c", "echo surface-works"], tmp_path
     )
     assert "background pid" in spawned.where
-    log = tmp_path / ".agent-runs" / "demo.log"
-    for _ in range(50):
-        if log.exists() and "surface-works" in log.read_text():
-            break
-        time.sleep(0.05)
-    assert "surface-works" in log.read_text()
+    log = spawned.log_path
+    assert log is not None
+    # The printed `where` names the file this run is actually writing, so
+    # `tail -f` on it is still correct under per-attempt names (issue #92).
+    assert str(log) in spawned.where
+    assert log.parent == tmp_path / ".agent-runs"
+    assert "surface-works" in _await_text(log, "surface-works")
 
 
 def test_background_surface_logs_under_cwd_not_attach_path(tmp_path: Path) -> None:
@@ -27,8 +37,87 @@ def test_background_surface_logs_under_cwd_not_attach_path(tmp_path: Path) -> No
     wt.mkdir(parents=True)
     surfaces.BackgroundSurface().spawn("demo", ["true"], tmp_path, attach_path=wt)
     # the attach target may be deleted on success; the log must outlive it
-    assert (tmp_path / ".agent-runs" / "demo.log").exists()
+    assert list((tmp_path / ".agent-runs").glob("demo-*.log"))
     assert not (wt / ".agent-runs").exists()
+
+
+def test_background_surface_keeps_both_records_when_a_label_is_spawned_twice(
+    tmp_path: Path,
+) -> None:
+    """Issue #92: the label is derived from the issue number alone, so a
+    re-dispatch or an `agent resume` cycle used to truncate the previous
+    attempt's only record."""
+    first = surfaces.BackgroundSurface().spawn(
+        "agent-issue-92", ["sh", "-c", "echo first-attempt"], tmp_path
+    )
+    second = surfaces.BackgroundSurface().spawn(
+        "agent-issue-92", ["sh", "-c", "echo second-attempt"], tmp_path
+    )
+
+    assert first.log_path is not None and second.log_path is not None
+    assert first.log_path != second.log_path
+    assert "first-attempt" in _await_text(first.log_path, "first-attempt")
+    assert "second-attempt" in _await_text(second.log_path, "second-attempt")
+    # Both attempts are still on disk, and sorting the names orders them —
+    # which log belongs to which attempt is readable without opening either.
+    logs = sorted(p.name for p in (tmp_path / ".agent-runs").glob("agent-issue-92-*.log"))
+    assert logs == [first.log_path.name, second.log_path.name]
+
+
+def test_background_surface_keeps_sort_order_for_two_spawns_inside_one_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stamp has second resolution, so a re-dispatch can land on the same
+    one. It still must not overwrite, and the names must still sort into the
+    order the attempts happened — hence a letter suffix and not `-2`, which
+    would sort ahead of the unsuffixed first attempt."""
+    monkeypatch.setattr(surfaces.time, "strftime", lambda fmt: "20260726-143512")
+
+    first = surfaces.BackgroundSurface().spawn("agent-issue-92", ["true"], tmp_path)
+    second = surfaces.BackgroundSurface().spawn("agent-issue-92", ["true"], tmp_path)
+
+    assert first.log_path is not None and second.log_path is not None
+    assert first.log_path.name == "agent-issue-92-20260726-143512.log"
+    assert second.log_path.name == "agent-issue-92-20260726-143512a.log"
+    assert sorted(p.name for p in (tmp_path / ".agent-runs").glob("*.log")) == [
+        first.log_path.name,
+        second.log_path.name,
+    ]
+
+
+def test_background_surface_log_names_are_a_discover_runs_signal(tmp_path: Path) -> None:
+    """The per-attempt name must still be what `runs.discover_runs` counts as a
+    log candidate — a scheme change that stopped matching would silently drop
+    the signal rather than fail."""
+    spawned = surfaces.BackgroundSurface().spawn("agent-issue-92", ["true"], tmp_path)
+
+    assert spawned.log_path is not None
+    match = runs._LOG_RE.match(spawned.log_path.name)
+    assert match is not None and int(match.group(1)) == 92
+    # ...and must not be picked up as one of the other per-issue artifacts.
+    for pattern in (runs._FEEDBACK_RE, runs._OUTCOME_RE):
+        assert pattern.match(spawned.log_path.name) is None
+
+
+def test_background_surface_prunes_logs_past_the_artifact_ttl(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".agent-runs"
+    runs_dir.mkdir()
+    stale = runs_dir / "agent-issue-1-20200101-000000.log"
+    stale.write_text("last year's attempt")
+    old = time.time() - runs.ARTIFACT_TTL_S - 1
+    os.utime(stale, (old, old))
+    recent = runs_dir / "agent-issue-2-20200101-000000.log"
+    recent.write_text("this week's attempt")
+    # Live state, not history: a halt nobody has answered must survive.
+    feedback = runs_dir / "issue-3-feedback.md"
+    feedback.write_text("findings")
+    os.utime(feedback, (old, old))
+
+    surfaces.BackgroundSurface().spawn("agent-issue-4", ["true"], tmp_path)
+
+    assert not stale.exists()
+    assert recent.exists()
+    assert feedback.exists()
 
 
 def _orca_spawn_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
@@ -252,4 +341,6 @@ def test_background_surface_reports_its_identity_without_a_handle(tmp_path: Path
     assert spawned.surface == "background"
     assert spawned.handle is None
     assert spawned.pid is not None
-    assert spawned.log_path == tmp_path / ".agent-runs" / "demo.log"
+    assert spawned.log_path is not None
+    assert spawned.log_path.exists()
+    assert spawned.log_path.parent == tmp_path / ".agent-runs"

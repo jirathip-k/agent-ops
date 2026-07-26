@@ -20,7 +20,14 @@ from agent_ops.utils import CommandError, run
 
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
 _FEEDBACK_RE = re.compile(r"^issue-(\d+)-feedback\.md$")
-_LOG_RE = re.compile(r"^agent-issue-(\d+)\.log$")
+# `agent-issue-N-<YYYYMMDD>-<HHMMSS>[a-z].log` is what `BackgroundSurface`
+# writes today (issue #92); the bare `agent-issue-N.log` form is what it wrote
+# before per-attempt log names existed, and is still matched so an upgrade
+# doesn't make an existing project's logs stop counting as run signals.
+# Deliberately still only the *dispatch* label: `agent-plan-issue-N`,
+# `agent-resume-issue-N` and the review labels have never been run candidates
+# here, and widening that is a behaviour change, not a rename.
+_LOG_RE = re.compile(r"^agent-issue-(\d+)(?:-\d{8}-\d{6}[a-z]?)?\.log$")
 _OUTCOME_RE = re.compile(r"^issue-(\d+)-outcome\.json$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 
@@ -35,7 +42,15 @@ _DEFAULT_TIMEOUT_S = 3600.0
 # the default interval: comfortably above the 2-poll dispatch debounce, far
 # short of the hour-long default timeout.
 _MAX_DEGRADED_POLLS = 4
-_OUTCOME_TTL_S = 7 * 24 * 3600.0  # 7 days — a recent-activity view, not a log
+
+# One retention story for everything `.agent-runs/` accumulates: outcome
+# records and run logs both age out after a week. `.agent-runs/` is a
+# recent-activity view — long enough to still have last week's evidence when a
+# run is being reconstructed, short enough that a long-lived project's
+# directory doesn't grow without bound. The two artifacts that are *live
+# state* rather than history are exempt: the feedback file is a halt a human
+# has yet to answer, and the spawn record is how to reach the current run.
+ARTIFACT_TTL_S = 7 * 24 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -319,11 +334,12 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
 def _load_outcomes(
     run_files: list[Path], now: float, log: Callable[[str], None]
 ) -> dict[int, Outcome]:
-    """Parse every `issue-N-outcome.json`, pruning ones older than `_OUTCOME_TTL_S`.
+    """Parse every `issue-N-outcome.json`, pruning ones older than `ARTIFACT_TTL_S`.
 
     Pruning is keyed on the file's own mtime, not the JSON's `finished_at`
     field, so a corrupt file still ages out instead of lingering forever —
-    this is a recent-activity view, not an audit log.
+    this is a recent-activity view, not an audit log. `prune_logs` ages run
+    logs out of the same directory on the same clock.
     """
     outcomes: dict[int, Outcome] = {}
     for path in run_files:
@@ -336,7 +352,7 @@ def _load_outcomes(
         except OSError as exc:
             log(f"warning: could not stat outcome record {path}: {exc}")
             continue
-        if age > _OUTCOME_TTL_S:
+        if age > ARTIFACT_TTL_S:
             path.unlink(missing_ok=True)
             continue
         try:
@@ -347,6 +363,48 @@ def _load_outcomes(
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             log(f"warning: could not read outcome record {path}: {exc}")
     return outcomes
+
+
+def prune_logs(
+    runs_dir: Path,
+    *,
+    now: float | None = None,
+    log: Callable[[str], None] = lambda _: None,
+) -> list[Path]:
+    """Delete `.agent-runs/` logs older than `ARTIFACT_TTL_S`; return what went.
+
+    Per-attempt log names (issue #92) mean nothing overwrites anything any
+    more, so something has to do the bounding instead. This is that something,
+    on the same clock and the same mtime criterion `_load_outcomes` prunes
+    outcome records with — `.agent-runs/` has one retention rule, not one per
+    artifact.
+
+    Called from the writer (`surfaces.BackgroundSurface.spawn`) rather than
+    from `discover_runs`, so the directory is bounded even on a project where
+    nobody ever runs `agent runs`.
+
+    A log being written to has a fresh mtime, so a live run's log is never
+    eligible; and on POSIX, unlinking a file another process holds open leaves
+    that process writing happily to the now-unnamed inode either way. Purely
+    best-effort: a prune that fails must never take a spawn down with it.
+    """
+    now = time.time() if now is None else now
+    removed: list[Path] = []
+    try:
+        candidates = sorted(runs_dir.glob("*.log"))
+    except OSError as exc:
+        log(f"warning: could not list old run logs in {runs_dir}: {exc}")
+        return removed
+    for path in candidates:
+        try:
+            if now - path.stat().st_mtime <= ARTIFACT_TTL_S:
+                continue
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log(f"warning: could not prune old run log {path}: {exc}")
+            continue
+        removed.append(path)
+    return removed
 
 
 def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tuple[list[Run], bool]:

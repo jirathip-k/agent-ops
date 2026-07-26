@@ -20,7 +20,7 @@ question is not "does it recover?" but "does anyone find out?"
 |---|---|---|
 | Pipeline pushes attributed to `github-actions[bot]`, whose workflow runs GitHub holds at `action_required` | The auto-merge gate saw an empty check rollup and read it as "CI not green", so PRs were held with no stated reason | App identity for pushes (#59); the gate distinguishes "CI failed" from "CI never ran" (#56) |
 | A reusable workflow cannot read the caller's secrets | Secrets were set on the repo and *looked* configured; inside the pipeline they were empty, so the mint step skipped and checkout silently fell back to `GITHUB_TOKEN` | Callers forward them explicitly; `agent doctor` reports a caller missing keys the stub declares (#61) |
-| Managed repos run a stale copy of `stubs/managed-repo-triage.yml` | `agent init` writes the stub once at onboarding; copies never follow the source | `agent doctor` structural drift check (#61) |
+| Managed repos run a stale copy of a `stubs/managed-repo-*.yml` caller | `agent init` writes the stub once at onboarding; copies never follow the source | `agent doctor` structural drift check (#61), run for every lane the repo calls (#90) |
 | A missing or mis-scoped App installation would fail the mint step and take the whole triage job down | The step became load-bearing the moment secrets existed — most likely mid-rollout | `continue-on-error` plus an explicit `::warning::` naming the repo (#62) |
 
 ## Local lane
