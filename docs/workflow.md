@@ -209,7 +209,13 @@ whether or not the agent cooperates:
 | finished/gave up/went idle saying nothing | `halted`, "stopped without reporting" — an `escalation` |
 | killed outright (SIGKILL, power loss) | nothing — silence, resolved by polling as before |
 
-Wait on it the same way as any other run: `agent runs 113 --wait`.
+Wait on it the same way as any other run: `agent runs 113 --wait`. While the
+session is alive, `agent runs` reports it as `spawned`, not `stopped` (issue
+#116): the spawn record it wrote at dispatch time is checked for liveness — a
+bare `ps` pid for a background session, an `orca terminal show` for an Orca
+one — since the session's own OS process is the runtime CLI (`claude`/
+`codex`), never `agent` itself, so the ordinary "`agent` process in `ps`"
+liveness check this command otherwise relies on can never see it.
 
 A worker can report a better outcome than the hook's generic one, and the
 seeded settings pre-approve the command so it doesn't stop to ask:

@@ -21,8 +21,14 @@ Two properties this module exists to preserve:
   poll interval of latency, never a run.
 
 The spawn record (`.agent-runs/issue-N-spawn.json`) is deliberately *not* one
-of `runs.discover_runs`'s signal patterns. It is an address book — how to
-reach a run — not evidence that one exists.
+of `runs.discover_runs`'s *candidate-discovery* patterns — it names no issue
+`_matches` a regex against, so a spawn record alone never turns an issue into
+a run row. It remains an address book, not evidence that a run exists in the
+first place. It is, however, a *classification* input (issue #116):
+`runs._spawn_liveness` reads it, once an issue is already a candidate from
+some other signal, to tell whether the process or terminal it names is still
+alive — the piece that used to be missing for `agent spawn`, whose actual OS
+process is the runtime CLI (`claude`/`codex`), never `agent` itself.
 """
 
 from __future__ import annotations

@@ -120,6 +120,124 @@ def test_classify_live_outranks_outcome_record() -> None:
     assert run.state == "running"
 
 
+# --- classify: spawn_detail (issue #116) ------------------------------------
+
+
+def test_classify_spawned_when_only_spawn_detail_present() -> None:
+    run = runs.classify(
+        113,
+        worktree_path=Path(".worktrees/issue-113"),
+        live=None,
+        has_feedback=False,
+        pr=None,
+        spawn_detail="background pid 555, 3m",
+    )
+    assert run == runs.Run(113, "spawned", "background pid 555, 3m")
+    assert run is not None
+    assert run.state not in runs.TERMINAL_STATES
+
+
+def test_classify_live_outranks_spawn_detail() -> None:
+    run = runs.classify(
+        113,
+        worktree_path=Path(".worktrees/issue-113"),
+        live=(1, "00:30", "implement"),
+        has_feedback=False,
+        pr=None,
+        spawn_detail="background pid 555, 3m",
+    )
+    assert run is not None
+    assert run.state == "running"
+
+
+def test_classify_outcome_outranks_spawn_detail() -> None:
+    run = runs.classify(
+        113,
+        worktree_path=None,
+        live=None,
+        has_feedback=False,
+        pr=None,
+        outcome=runs.Outcome("done", "https://x/pull/9", None),
+        spawn_detail="background pid 555, 3m",
+    )
+    assert run == runs.Run(113, "done", "PR #9 — https://x/pull/9")
+
+
+def test_classify_feedback_outranks_spawn_detail() -> None:
+    run = runs.classify(
+        113,
+        worktree_path=Path(".worktrees/issue-113"),
+        live=None,
+        has_feedback=True,
+        pr=None,
+        spawn_detail="background pid 555, 3m",
+    )
+    assert run is not None
+    assert run.state == "halted"
+
+
+def test_classify_spawn_detail_outranks_open_pr() -> None:
+    run = runs.classify(
+        113,
+        worktree_path=Path(".worktrees/issue-113"),
+        live=None,
+        has_feedback=False,
+        pr=_pr(9, issue=113),
+        spawn_detail="orca terminal term_1, 3m",
+    )
+    assert run is not None
+    assert run.state == "spawned"
+
+
+# --- _pid_alive / _spawn_liveness (issue #116) ------------------------------
+
+
+def test_pid_alive_true_when_pid_present() -> None:
+    ps = "555 00:03:00 claude --resume\n"
+    assert runs._pid_alive(ps, 555) is True
+
+
+def test_pid_alive_false_when_pid_absent() -> None:
+    ps = "555 00:03:00 claude --resume\n"
+    assert runs._pid_alive(ps, 999) is False
+
+
+def test_pid_alive_false_on_empty_ps_output() -> None:
+    assert runs._pid_alive("", 555) is False
+
+
+def test_spawn_liveness_background_alive() -> None:
+    record = messages.SpawnRecord(issue=113, surface="background", pid=555)
+    ps = "555 00:03:00 claude --resume\n"
+    assert runs._spawn_liveness(record, ps) is True
+
+
+def test_spawn_liveness_background_dead() -> None:
+    record = messages.SpawnRecord(issue=113, surface="background", pid=555)
+    assert runs._spawn_liveness(record, "") is False
+
+
+def test_spawn_liveness_background_no_pid_is_unknown() -> None:
+    record = messages.SpawnRecord(issue=113, surface="background", pid=None)
+    assert runs._spawn_liveness(record, "555 00:03:00 claude\n") is None
+
+
+def test_spawn_liveness_orca_no_handle_is_unknown() -> None:
+    record = messages.SpawnRecord(issue=113, surface="orca", handle=None)
+    assert runs._spawn_liveness(record, "") is None
+
+
+def test_spawn_liveness_orca_defers_to_terminal_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = messages.SpawnRecord(issue=113, surface="orca", handle="term_1")
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: handle == "term_1")
+    assert runs._spawn_liveness(record, "") is True
+
+
+def test_spawn_liveness_unknown_surface_is_unknown() -> None:
+    record = messages.SpawnRecord(issue=113, surface="something-else", pid=1, handle="x")
+    assert runs._spawn_liveness(record, "1 00:00 x\n") is None
+
+
 # --- live_runs ---------------------------------------------------------------
 
 
@@ -611,6 +729,120 @@ def test_discover_runs_invalid_outcome_json_does_not_raise(
     assert trustworthy is True
 
 
+# --- discover_runs: spawn liveness (issue #116) -----------------------------
+
+
+def test_discover_runs_background_spawn_alive_reports_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-113", "fix/issue-113")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:03:00 claude --resume\n")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(tmp_path, 113, surface="background", pid=555)
+
+    result, trustworthy = runs.discover_runs(tmp_path)
+
+    assert trustworthy is True
+    assert [r.issue for r in result] == [113]
+    assert result[0].state == "spawned"
+    assert "pid 555" in result[0].detail
+
+
+def test_discover_runs_background_spawn_pid_gone_falls_back_to_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-113", "fix/issue-113")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(tmp_path, 113, surface="background", pid=555)
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(113, "stopped", STOPPED_DETAIL)]
+
+
+def test_discover_runs_orca_spawn_alive_reports_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-113", "fix/issue-113")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: True)
+    messages.record_spawn(tmp_path, 113, surface="orca", handle="term_1")
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(113, "spawned", "orca terminal term_1, <1m")]
+
+
+def test_discover_runs_orca_unavailable_degrades_to_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Orca down/unreachable is `None`, not a verdict — the row falls through
+    to today's existing derivation (and, over successive polls, the existing
+    2-poll `stopped` debounce in `wait_for_runs`)."""
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-113", "fix/issue-113")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: None)
+    messages.record_spawn(tmp_path, 113, surface="orca", handle="term_1")
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(113, "stopped", STOPPED_DETAIL)]
+
+
+def test_discover_runs_outcome_wins_over_spawn_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An outcome record beats spawn liveness in `classify`'s precedence —
+    the spawn record's pid may even still be alive (a lingering process that
+    has already reported) and must not mask the durable verdict."""
+    _write_outcome_file(tmp_path, 113)
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:03:00 claude\n")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(tmp_path, 113, surface="background", pid=555)
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(113, "done", "PR #76 — https://x/pull/76")]
+
+
+def test_discover_runs_with_no_spawn_record_is_unaffected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An issue with no spawn record on file must behave exactly as before —
+    `messages.load_spawn` returning None is the ordinary case, not an error."""
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-68", "fix/issue-68")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(68, "stopped", STOPPED_DETAIL)]
+
+
 # --- report_runs / CLI ---------------------------------------------------------
 
 
@@ -781,6 +1013,51 @@ def test_wait_for_runs_stopped_requires_two_consecutive_polls(
 
     assert result is False
     assert any("stopped → running" in line for line in lines)
+
+
+def test_wait_for_runs_spawned_never_becomes_terminal_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run reporting `spawned` across several polls must never be treated as
+    terminal by itself — it needs an outcome/feedback/PR signal to resolve,
+    the same as `running` (issue #116)."""
+    _polls(
+        monkeypatch,
+        [runs.Run(113, "spawned", "background pid 555, 1m")],
+        [runs.Run(113, "spawned", "background pid 555, 2m")],
+        [runs.Run(113, "spawned", "background pid 555, 3m")],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(runs.time, "sleep", lambda s: sleeps.append(s))
+    clock = iter([0.0, 0.0, 0.0, 0.0, 100.0])
+    monkeypatch.setattr(runs.time, "monotonic", lambda: next(clock, 100.0))
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, timeout_s=10.0, interval_s=1.0, log=lines.append)
+
+    assert result is False  # timed out — never fell into `is_terminal`
+    reported_states = [line.split()[1] for line in lines if line.startswith("#")]
+    assert not any(state in runs.TERMINAL_STATES for state in reported_states)
+
+
+def test_wait_for_runs_spawned_transitions_promptly_to_reported_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that starts `spawned` and later gets a durable outcome record
+    must transition immediately to that terminal state — no debounce, exactly
+    like `running` → `done` already works."""
+    _polls(
+        monkeypatch,
+        [runs.Run(113, "spawned", "background pid 555, 1m")],
+        [runs.Run(113, "done", "PR #9 — https://x/pull/9")],
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    result = runs.wait_for_runs(tmp_path, log=lines.append)
+
+    assert result is True
+    assert any("spawned → done" in line and "PR #9" in line for line in lines)
 
 
 def test_wait_for_runs_sees_done_via_outcome_record_instead_of_vanishing(

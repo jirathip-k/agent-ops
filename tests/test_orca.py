@@ -351,6 +351,50 @@ def test_fallback_relocates_the_comment_but_never_the_status(
     assert "issue-68: #68: implementing" in fallback_cmd
 
 
+def test_terminal_alive_is_none_without_orca(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("must not invoke the CLI when Orca is unavailable")
+
+    monkeypatch.setattr(orca, "available", lambda: False)
+    monkeypatch.setattr(orca, "run", boom)
+    assert orca.terminal_alive("term_1") is None
+
+
+def test_terminal_alive_true_for_an_open_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _json_run(monkeypatch, {"ok": True, "result": {"terminal": {"open": True}}})
+    assert orca.terminal_alive("term_1") is True
+    (cmd,) = calls
+    assert cmd[1:3] == ["terminal", "show"]
+    assert "term_1" in cmd
+
+
+def test_terminal_alive_false_for_a_closed_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    _json_run(monkeypatch, {"ok": True, "result": {"terminal": {"open": False}}})
+    assert orca.terminal_alive("term_1") is False
+
+
+def test_terminal_alive_none_on_a_failed_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    _json_run(monkeypatch, {"ok": False}, returncode=1)
+    assert orca.terminal_alive("term_1") is None
+
+
+def test_terminal_alive_none_on_unparseable_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    _json_run(monkeypatch, "not json at all")
+    assert orca.terminal_alive("term_1") is None
+
+
+def test_terminal_alive_none_on_an_unrecognized_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never invent a verdict for a response shape this hasn't been verified against."""
+    _json_run(monkeypatch, {"ok": True, "result": {"terminal": "not-a-dict"}})
+    assert orca.terminal_alive("term_1") is None
+
+    _json_run(monkeypatch, {"ok": True, "result": {"terminal": {"open": "yes"}}})
+    assert orca.terminal_alive("term_1") is None
+
+    _json_run(monkeypatch, {"ok": True, "result": {}})
+    assert orca.terminal_alive("term_1") is None
+
+
 def test_status_only_report_is_not_relocated(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no comment there is nothing safe to move — status alone must not travel."""
     calls: list[list[str]] = []

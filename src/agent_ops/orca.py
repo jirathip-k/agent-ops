@@ -133,6 +133,31 @@ def _indexed(path: Path) -> bool:
     return _result(["worktree", "show", "--worktree", f"path:{path}"]) is not None
 
 
+def terminal_alive(handle: str) -> bool | None:
+    """Whether Orca still has terminal `handle` open, or None when that can't be told.
+
+    Read-only (`orca terminal show --terminal <handle> --json`); used by
+    `runs._spawn_liveness` to tell a live `agent spawn` session apart from an
+    abandoned one (issue #116). The exact response shape has not been verified
+    against a live Orca instance, so this is deliberately conservative in the
+    same style as `_result`/`_indexed`: `available()` being False, a non-zero
+    exit, unparseable JSON, or a `result["terminal"]` that isn't the
+    `{"open": bool, ...}` shape expected all answer None ("unknown") rather
+    than inventing a verdict. Only a recognized boolean `open` field ever
+    returns a definite True or False — a caller with None must fall back to
+    whatever it would have done without this signal at all, never treat it as
+    "closed".
+    """
+    result = _result(["terminal", "show", "--terminal", handle])
+    if result is None:
+        return None
+    terminal = result.get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    is_open = terminal.get("open")
+    return is_open if isinstance(is_open, bool) else None
+
+
 @dataclass(frozen=True)
 class Repo:
     """A repo registered in Orca, and where its main clone lives on disk."""

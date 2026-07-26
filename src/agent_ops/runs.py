@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, messages, worktree
+from agent_ops import github, messages, orca, worktree
 from agent_ops.utils import CommandError, run
 
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
@@ -34,6 +34,13 @@ _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 # `failed` never comes from the derivation below — a run whose gates failed
 # looks exactly like an abandoned one from the outside. It only arrives when
 # the run says so itself (`messages`), which is the point of issue #98.
+#
+# `spawned` (issue #116) is deliberately not here: it means "the process/
+# terminal a spawn record names is confirmed alive", which is exactly as
+# non-terminal as `running` — an in-flight `agent spawn` session, not a
+# finished one. `wait_for_runs.is_terminal` already treats anything outside
+# this tuple (other than the synthetic `"gone"`) as non-terminal, so no
+# change was needed there for a new mid-flight state to fall through safely.
 TERMINAL_STATES = ("done", "halted", "stopped", "failed")
 _POLL_INTERVAL_S = 15.0
 _DEFAULT_TIMEOUT_S = 3600.0
@@ -56,7 +63,7 @@ ARTIFACT_TTL_S = 7 * 24 * 3600.0
 @dataclass(frozen=True)
 class Run:
     issue: int
-    state: str  # running | halted | stopped | done
+    state: str  # running | spawned | halted | stopped | done
     detail: str
 
 
@@ -160,6 +167,73 @@ def live_runs(ps_output: str, project_root: Path | None = None) -> dict[int, tup
             continue
         live[int(issue_s)] = (int(pid_s), etime, verb)
     return live
+
+
+def _pid_alive(ps_output: str, pid: int) -> bool:
+    """Whether `pid` shows up as a bare pid anywhere in `ps_output`.
+
+    Unlike `live_runs`, this is not scoped to `agent`/`agent.exe` as the
+    invoked program: a `agent spawn` session's actual OS process is the
+    runtime CLI (`claude`/`codex`), never `agent` itself (issue #116) — the
+    spawn record just names the pid `surfaces.BackgroundSurface.spawn` handed
+    back at dispatch time, so any process still holding it counts.
+    """
+    for line in ps_output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid_s = parts[0]
+        if pid_s.isdigit() and int(pid_s) == pid:
+            return True
+    return False
+
+
+def _spawn_liveness(record: messages.SpawnRecord, ps_output: str) -> bool | None:
+    """Whether the process/terminal `record` names is still alive.
+
+    None means "can't tell" — no pid/handle recorded, or (Orca surface) Orca
+    being unavailable or returning something `orca.terminal_alive` doesn't
+    recognize. `discover_runs` treats None exactly like the record not
+    existing: fall through to the existing derivation rather than reporting
+    either verdict on a guess.
+    """
+    if record.surface == "background":
+        if record.pid is None:
+            return None
+        return _pid_alive(ps_output, record.pid)
+    if record.surface == "orca":
+        if record.handle is None:
+            return None
+        return orca.terminal_alive(record.handle)
+    return None
+
+
+def _elapsed_since(spawned_at: float) -> str:
+    """`_fmt_elapsed`-shaped duration since `spawned_at`.
+
+    A spawn record has no `ps` etime of its own (`_pid_alive` only answers
+    yes/no) and an Orca terminal has no `ps` row to read one from at all, so
+    this derives the same shape from the record's own `spawned_at` clock
+    instead of leaving a spawned run's detail with no elapsed time at all.
+    """
+    seconds = max(0, int(time.time() - spawned_at)) if spawned_at else 0
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    etime = f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+    return _fmt_elapsed(etime)
+
+
+def _spawn_detail(record: messages.SpawnRecord) -> str:
+    """A `classify`-ready detail string for a spawn record confirmed alive.
+
+    Mirrors the existing `running` branch's formatting in `classify` so a
+    spawned run's row reads the same shape as a polled `agent implement`/
+    `resume` one.
+    """
+    elapsed = _elapsed_since(record.spawned_at)
+    if record.surface == "background":
+        return f"background pid {record.pid}, {elapsed}"
+    return f"orca terminal {record.handle}, {elapsed}"
 
 
 # `dispatch` counts as live: it creates the worktree, then retries the Orca
@@ -285,6 +359,7 @@ def classify(
     has_feedback: bool,
     pr: dict[str, Any] | None,
     outcome: Outcome | None = None,
+    spawn_detail: str | None = None,
 ) -> Run | None:
     """One issue's state from its signals, in the precedence the issue lays out.
 
@@ -297,6 +372,15 @@ def classify(
     by a run that was never cleanly resumed through `_finish_run` would report
     `halted` forever, even after the outcome it recorded (e.g. a merged PR)
     supersedes it (issue #78).
+
+    `spawn_detail` (issue #116) slots in right below `has_feedback`: a live
+    `ps`-verified `agent implement`/`resume`/`dispatch` process, a durable
+    outcome, and an unresolved halt file are all stronger evidence than "the
+    spawn record's process/terminal is alive", so each still wins over it —
+    same reasoning as `live` outranking `has_feedback` above, one rung down.
+    It outranks a merely-open PR and a bare kept worktree, both of which are
+    exactly what an in-flight spawn also looks like from those two signals
+    alone.
     """
     if live is not None:
         pid, etime, verb = live
@@ -312,6 +396,8 @@ def classify(
         return Run(issue, outcome.state, _outcome_detail(outcome))
     if has_feedback:
         return Run(issue, "halted", f"self-review — resume with `agent resume {issue}`")
+    if spawn_detail is not None:
+        return Run(issue, "spawned", spawn_detail)
     if pr is not None:
         return Run(issue, "done", f"PR #{pr['number']}")
     if worktree_path is not None:
@@ -502,6 +588,12 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     Outcome records are not part of that judgement: they are read straight off
     the local `.agent-runs/` directory, with no `gh`/`git` call that could
     degrade, so a poll that finds one is as trustworthy as the filesystem.
+
+    A spawn record (issue #116) is the same kind of read — local file, no
+    `gh`/`git` involved — and its liveness check (a bare `ps` scan, or one
+    `orca terminal show`) degrades to `None` ("unknown") entirely on its own
+    rather than flipping this poll's overall trustworthiness; it never
+    downgrades `stopped`/`gone` to that degraded meaning either way.
     """
     trustworthy = True
 
@@ -527,7 +619,8 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     if not candidates:
         return [], trustworthy
 
-    live = live_runs(_ps_output(log), project_root)
+    ps_output = _ps_output(log)
+    live = live_runs(ps_output, project_root)
 
     try:
         prs = github.open_prs(project_root)
@@ -551,13 +644,28 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
                 display = wt_path.relative_to(project_root)
             except ValueError:
                 display = wt_path
+        live_entry = live.get(issue)
+        has_fb = issue in feedback_issues
+        outcome_entry = outcomes.get(issue)
+        spawn_detail = None
+        # `classify` ranks a ps-verified `live`, a durable `outcome` and an
+        # unresolved `has_feedback` all above a spawn record's own liveness
+        # (issue #116), so any of the three already resolving this issue makes
+        # reading the spawn record — and, for an Orca surface, a
+        # `terminal_alive` round trip — pure waste. Only pay for it while a
+        # run still looks like it might be an in-flight spawn.
+        if live_entry is None and outcome_entry is None and not has_fb:
+            record = messages.load_spawn(project_root, issue, log=log)
+            if record is not None and _spawn_liveness(record, ps_output) is True:
+                spawn_detail = _spawn_detail(record)
         found = classify(
             issue,
             worktree_path=display,
-            live=live.get(issue),
-            has_feedback=issue in feedback_issues,
+            live=live_entry,
+            has_feedback=has_fb,
             pr=pr_by_issue.get(issue),
-            outcome=outcomes.get(issue),
+            outcome=outcome_entry,
+            spawn_detail=spawn_detail,
         )
         if found is not None:
             runs.append(found)
