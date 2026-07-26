@@ -109,6 +109,8 @@ def role_request(
         # every role may run the gates: implementer to iterate, planner to
         # reproduce, reviewer to verify — write access still differs by mode
         allowed_tools=gate_allowed_tools(config) + extra_allowed_tools,
+        idle_timeout_seconds=config.loop.idle_timeout_seconds,
+        run_timeout_seconds=config.loop.run_timeout_seconds,
     )
     return runtime, request
 
