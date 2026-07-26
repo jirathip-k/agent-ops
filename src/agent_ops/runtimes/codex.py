@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 from typing import Any
 
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
@@ -61,6 +62,24 @@ class CodexRuntime:
 
     def classify_failure(self, result: RunResult) -> FailureKind:
         return classify_failure(result)
+
+    def interactive_command(self, prompt: str | None, *, model: str | None = None) -> list[str]:
+        cmd = ["codex"]
+        if model:
+            cmd += ["--model", model]
+        if prompt:
+            cmd.append(prompt)
+        return cmd
+
+    def seed_stop_hook(self, worktree: Path, command: list[str]) -> Path | None:
+        """None: Codex has no session-lifecycle hook to hang this on.
+
+        Not a stub waiting to be filled in — until the CLI grows one, a Codex
+        worker's completion is only ever inferred, so `agent spawn --runtime
+        codex` says so at spawn time rather than letting a caller wait for a
+        report that can never arrive.
+        """
+        return None
 
 
 def classify_failure(result: RunResult) -> FailureKind:

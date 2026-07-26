@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shlex
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,32 @@ _TRANSIENT_MARKERS = (
     "503",
 )
 
+# Project-local settings, not the shared `.claude/settings.json`: the hook is
+# one spawn's wiring, not a fact about the repo, and nothing here should ever
+# reach a commit.
+SETTINGS_REL = Path(".claude") / "settings.local.json"
+
+# `Stop` fires when the agent finishes responding — for a delegated worker that
+# is the terminal moment, whether it finished the job, gave up, or stopped to
+# escalate. It deliberately does *not* fire on a user interrupt, which is why
+# `SessionEnd` is seeded alongside it: between them the only uncovered case is
+# the process dying without running anything (SIGKILL, power loss), which stays
+# what it has always been — silence the supervisor resolves by polling.
+STOP_HOOK_EVENTS = ("Stop", "SessionEnd")
+
+# Seconds Claude Code gives the hook before killing it. `Stop` runs in the
+# session's critical path, so the bound matters: the reporting command has its
+# own inner timeout, and this is the backstop under it.
+_HOOK_TIMEOUT_S = 30
+
+# `.claude/` is not in most repos' .gitignore, and a linked worktree cannot
+# have its own `info/exclude` (git reads only the common one). A .gitignore
+# that also ignores itself keeps the seeded files out of `git status` without
+# touching anything shared — otherwise the first `git add -A` sweeps them into
+# the worker's own PR.
+_GITIGNORE_REL = Path(".claude") / ".gitignore"
+_GITIGNORE_BODY = "# agent-ops spawn wiring; never committed.\nsettings.local.json\n.gitignore\n"
+
 
 class ClaudeCodeRuntime:
     """Headless Claude Code via `claude -p`.
@@ -65,6 +93,12 @@ class ClaudeCodeRuntime:
 
     def classify_failure(self, result: RunResult) -> FailureKind:
         return classify_failure(result)
+
+    def interactive_command(self, prompt: str | None, *, model: str | None = None) -> list[str]:
+        return build_interactive_command(prompt, model=model)
+
+    def seed_stop_hook(self, worktree: Path, command: list[str]) -> Path | None:
+        return write_stop_hook(worktree, command)
 
     def _run_streaming(self, cmd: list[str], request: RunRequest) -> RunResult:
         proc = subprocess.Popen(
@@ -154,6 +188,122 @@ def build_command(request: RunRequest) -> list[str]:
     else:
         cmd += ["--output-format", "json"]
     return cmd
+
+
+def build_interactive_command(prompt: str | None, *, model: str | None = None) -> list[str]:
+    """`claude` as a terminal session, with `prompt` as its opening brief.
+
+    Deliberately not `build_command`'s `-p`: this is the form a human can
+    watch, interrupt and type into, which is the whole point of putting a
+    delegated worker on a visible surface rather than in a log file.
+    """
+    cmd = ["claude"]
+    if model:
+        cmd += ["--model", model]
+    if prompt:
+        cmd.append(prompt)
+    return cmd
+
+
+def write_stop_hook(
+    worktree: Path,
+    command: list[str],
+    *,
+    log: Callable[[str], None] = lambda _: None,
+) -> Path | None:
+    """Seed `command` as this worktree's Stop/SessionEnd hook. Best-effort.
+
+    Must run *before* the session starts: Claude Code snapshots its hooks at
+    startup, so a settings file written after the CLI launches is read by
+    nobody. That ordering is the reason `workflows/spawn` creates the worktree
+    itself and then attaches a terminal to it, rather than having Orca create
+    the worktree and the agent in one step.
+
+    The same file also pre-approves the command as a Bash pattern, so an agent
+    that wants to report a *better* outcome than the hook's generic one ("done,
+    PR #123") can run it without stopping to ask for permission.
+
+    Merges into an existing settings file rather than replacing it, and never
+    adds the same hook twice — re-spawning into a reused worktree is ordinary.
+    Returns the file written, or None when it could not be (unreadable JSON, an
+    unwritable path): the spawn still happens, it just falls back to polling.
+    """
+    path = worktree / SETTINGS_REL
+    settings: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"warning: could not read {path}, leaving it alone: {exc}")
+            return None
+        if not isinstance(loaded, dict):
+            log(f"warning: {path} is not a JSON object, leaving it alone")
+            return None
+        settings = loaded
+
+    entry = {
+        "type": "command",
+        "command": shlex.join(command),
+        "timeout": _HOOK_TIMEOUT_S,
+    }
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        log(f"warning: {path} has a non-object `hooks` key, leaving it alone")
+        return None
+    for event in STOP_HOOK_EVENTS:
+        matchers = hooks.setdefault(event, [])
+        if not isinstance(matchers, list):
+            log(f"warning: {path} has a non-list `hooks.{event}` key, leaving it alone")
+            return None
+        if not any(_carries(matcher, entry["command"]) for matcher in matchers):
+            matchers.append({"hooks": [entry]})
+
+    _allow(settings, _permission_pattern(command), log=log)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2) + "\n")
+        gitignore = worktree / _GITIGNORE_REL
+        if not gitignore.exists():
+            gitignore.write_text(_GITIGNORE_BODY)
+    except OSError as exc:
+        log(f"warning: could not seed the stop hook at {path}: {exc}")
+        return None
+    return path
+
+
+def _carries(matcher: Any, command: str) -> bool:
+    """True if this hook matcher already runs `command`."""
+    if not isinstance(matcher, dict):
+        return False
+    entries = matcher.get("hooks")
+    if not isinstance(entries, list):
+        return False
+    return any(isinstance(e, dict) and e.get("command") == command for e in entries)
+
+
+def _permission_pattern(command: list[str]) -> str:
+    """`Bash(agent report:*)` for `["agent", "report", ...]`.
+
+    Two tokens, not the whole command line: the pre-approval is for the
+    *subcommand* the worker may call with its own arguments, not for the one
+    argument vector the hook happens to use.
+    """
+    return f"Bash({' '.join(command[:2])}:*)"
+
+
+def _allow(settings: dict[str, Any], pattern: str, *, log: Callable[[str], None]) -> None:
+    """Add `pattern` to `permissions.allow`, leaving anything unexpected alone."""
+    permissions = settings.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        log("warning: settings has a non-object `permissions` key; skipping the allow rule")
+        return
+    allow = permissions.setdefault("allow", [])
+    if not isinstance(allow, list):
+        log("warning: settings has a non-list `permissions.allow` key; skipping the allow rule")
+        return
+    if pattern not in allow:
+        allow.append(pattern)
 
 
 def format_event(event: dict[str, Any], cwd: Path | None = None) -> str | None:

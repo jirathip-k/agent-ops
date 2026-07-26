@@ -61,8 +61,11 @@ _HANDLE_ENV = "ORCA_TERMINAL_HANDLE"
 # advertised timeout.
 _WAIT_GRACE_S = 10.0
 
-# Non-blocking calls should be instant; this only stops a wedged CLI from
-# hanging a poll loop that has no other bound.
+# Non-blocking calls (a `--unread` drain, a send) should be instant, so they
+# take a tighter bound than `utils.DEFAULT_TIMEOUT_S`: both callers are inside
+# something that is itself waiting — a poll loop with its own cadence, and a
+# stop hook running in a session's critical path, where a command that does not
+# return holds the session open (issue #113).
 _CHECK_TIMEOUT_S = 30.0
 
 
@@ -240,12 +243,14 @@ def send_outcome(
         "--json",
     ]
     try:
-        proc = run(cmd, check=False)
-    except OSError as exc:
-        # `utils.run` lets `FileNotFoundError` through when the executable has
-        # gone since `available()` said otherwise — the same hole `_record_halt`
-        # documents for a missing `gh`. This function promises not to crash a
-        # finished run, so it is caught here rather than at every call site.
+        proc = run(cmd, check=False, timeout=_CHECK_TIMEOUT_S)
+    except (CommandError, OSError) as exc:
+        # OSError: `utils.run` lets `FileNotFoundError` through when the
+        # executable has gone since `available()` said otherwise — the same
+        # hole `_record_halt` documents for a missing `gh`. CommandError: the
+        # timeout bound fired on a wedged CLI. This function promises not to
+        # crash a finished run, so both are caught here rather than at every
+        # call site.
         log(f"could not push the {state!r} outcome for #{issue} to {handle}: {exc}")
         return False
     if proc.returncode != 0:

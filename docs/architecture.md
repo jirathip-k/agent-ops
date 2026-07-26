@@ -9,7 +9,8 @@ knowledge** (each managed repo's `AGENTS.md` + `.agent/`).
 CLI (agent scout / spec / triage / groom / plan / implement / review / ...)
  │
  ├─ config      platform defaults ⊕ project .agent/config.yaml
- ├─ workflows   scout, spec, triage, groom, implement, review   ← business logic
+ ├─ workflows   scout, spec, triage, groom, implement, review,  ← business logic
+ │              spawn
  │    │
  │    ├─ roles      planner / implementer / reviewer — per-role model +
  │    │             permission overrides (agents: in config); planner and
@@ -28,6 +29,10 @@ CLI (agent scout / spec / triage / groom / plan / implement / review / ...)
 
 Workflows and the loop depend only on the `Runtime` protocol
 (`src/agent_ops/runtimes/base.py`) — swapping runtimes never touches them.
+`agent spawn` needs a larger promise (start the CLI as a session someone
+watches, and hook that session's end) and depends on `SpawnableRuntime`, the
+protocol that extends it — so a runtime that only knows the headless path
+remains a valid `Runtime`.
 
 ## Two lanes
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -65,3 +65,39 @@ class Runtime(Protocol):
     def run(self, request: RunRequest) -> RunResult: ...
 
     def classify_failure(self, result: RunResult) -> FailureKind: ...
+
+
+@runtime_checkable
+class SpawnableRuntime(Runtime, Protocol):
+    """A runtime that can also be *launched* as a session someone watches.
+
+    Separate from `Runtime` because it is a strictly larger promise and only
+    `agent spawn` needs it: the loop drives headless `run()` calls and has no
+    use for either method here. Keeping them off `Runtime` means a runtime that
+    only knows how to be driven headlessly (or a test double for the loop)
+    stays a valid `Runtime`.
+    """
+
+    def interactive_command(self, prompt: str | None, *, model: str | None = None) -> list[str]:
+        """Argv that starts this CLI as a *human-shaped* session, not a `-p` run.
+
+        `run()` is the headless path the loop drives; this is the one a surface
+        hands to a terminal so a person can watch it and type into it. `prompt`
+        is the opening brief, if there is one.
+        """
+        ...
+
+    def seed_stop_hook(self, worktree: Path, command: list[str]) -> Path | None:
+        """Arrange for `command` to run when a session in `worktree` stops.
+
+        The point is a completion signal that does not depend on the agent
+        remembering to send one: an agent that dies, is interrupted, or stops
+        early to escalate never reaches an instruction in its prompt, and a
+        silent worker is indistinguishable from a working one (issue #113).
+
+        Returns the file that now carries the arrangement, or None when this
+        runtime has no such mechanism (or seeding failed). None is not an
+        error: the caller loses the push signal and falls back to polling,
+        which is all it ever had.
+        """
+        ...

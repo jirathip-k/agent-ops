@@ -54,6 +54,8 @@ agent implement 123            # worktree → plan → implement loop → gates 
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
 agent resume 123               # rerun the implementer in the existing worktree
 agent resume 123 -m "..."      # ...with your feedback instead of the stored self-review
+agent spawn 123 -m "..."       # ad-hoc: an interactive agent in the worktree, wired to report back
+agent report 123 --state done  # ...what that agent (or its stop hook) reports on the way out
 agent review 45                # read-only review of PR #45 (add --post to comment)
 agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent review --all             # review every open PR targeting base_branch, concurrently

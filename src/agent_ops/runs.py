@@ -331,6 +331,88 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
     return issues
 
 
+def outcome_path(project_root: Path, issue: int) -> Path:
+    """Where a durable "this run finished" record is written on the way out.
+
+    Read by `discover_runs` for issues whose other signals (worktree, feedback
+    file, open PR) have since been cleared/consumed — see issue #87: without
+    this, a successfully finished run vanishes from `agent runs` instead of
+    showing `done`.
+
+    Lives here rather than in `workflows/implement.py` because this module
+    already owns the record's schema on the read side (`_load_outcomes`), and
+    `implement` is no longer the only writer: an agent spawned into a worktree
+    reports through the same record (issue #113).
+    """
+    return project_root / ".agent-runs" / f"issue-{issue}-outcome.json"
+
+
+def write_outcome(
+    project_root: Path,
+    issue: int,
+    *,
+    state: str,
+    pr_url: str | None = None,
+    reason: str | None = None,
+    log: Callable[[str], None] = lambda _: None,
+) -> None:
+    """Best-effort durable record of a run's outcome; never crashes a successful run.
+
+    Written via a temp-file-then-`replace` so a crash mid-write never leaves a
+    torn/partial JSON file for `_load_outcomes` to trip over. Mirrors
+    `messages.record_spawn`'s best-effort philosophy: a failed status write
+    must not turn a successful run into a crash.
+    """
+    path = outcome_path(project_root, issue)
+    payload = {
+        "state": state,
+        "pr_url": pr_url,
+        "reason": reason,
+        "finished_at": time.time(),
+    }
+    try:
+        path.parent.mkdir(exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload))
+        tmp_path.replace(path)
+    except OSError as exc:
+        log(f"could not write outcome record at {path}: {exc}")
+
+
+def clear_outcome(
+    project_root: Path,
+    issue: int,
+    *,
+    log: Callable[[str], None] = lambda _: None,
+) -> None:
+    """Drop the previous cycle's outcome record; a new cycle supersedes it.
+
+    `classify` ranks `outcome` above `has_feedback` so that a stale halt file
+    can't report `halted` forever after the run it belonged to finished (issue
+    #78). That precedence is only sound while the record describes the *latest*
+    cycle. Nothing else expires it inside `ARTIFACT_TTL_S`, so a second cycle
+    on the same issue — reopened issue, follow-up work — would keep reporting
+    the first cycle's `done` no matter what the new one does: a halt needing
+    `agent resume` would be invisible, and a gate failure that keeps the
+    worktree would read as finished instead of `stopped`. Both are the same
+    silent-failure class as #78, pointed the worse way.
+
+    It is also what scopes `agent report --if-unreported` to one cycle: with
+    the record cleared at spawn time, "an outcome record exists" means "this
+    cycle already reported", which is the whole basis for the stop hook firing
+    at most once per spawn (issue #113).
+
+    Best-effort like the rest of this module's status bookkeeping: a run must
+    never crash because a stale status file could not be removed. Failing to
+    delete it only leaves the pre-existing staleness in place.
+    """
+    path = outcome_path(project_root, issue)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"could not clear stale outcome record at {path}: {exc}")
+
+
 def _load_outcomes(
     run_files: list[Path], now: float, log: Callable[[str], None]
 ) -> dict[int, Outcome]:

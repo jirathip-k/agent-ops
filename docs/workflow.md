@@ -172,6 +172,58 @@ worktree-spawning surface's argv it is only ever a path, never inlined text —
 so it can't be mangled by shell quoting the way a hand-rolled
 `orca terminal create --command "$(cat …)"` invocation can.
 
+### Delegating ad-hoc work — `agent spawn`
+
+`dispatch` runs the pipeline. For work the pipeline doesn't model — "rebase
+this branch onto main", "reproduce the flake and report back" — `agent spawn`
+puts a plain interactive coding agent in the issue's worktree instead:
+
+```sh
+agent spawn 113                                  # brief defaults to "work on issue #113"
+agent spawn 113 --prompt "rebase onto main"      # or your own
+agent spawn 113 --prompt-file brief.md
+```
+
+The difference from starting one by hand (`orca worktree create --agent
+claude`) is that a hand-started session is invisible: it writes no spawn
+record, sends nothing when it ends, and a silent worker looks exactly like a
+working one. `agent spawn` closes that by seeding a Claude Code **stop hook**
+into the worktree before the session starts, so the completion report fires
+whether or not the agent cooperates:
+
+| what the worker did | what a supervisor sees |
+| --- | --- |
+| finished and ran `agent report` | `done`, with the PR — a `worker_done` message |
+| finished/gave up/went idle saying nothing | `halted`, "stopped without reporting" — an `escalation` |
+| killed outright (SIGKILL, power loss) | nothing — silence, resolved by polling as before |
+
+Wait on it the same way as any other run: `agent runs 113 --wait`.
+
+A worker can report a better outcome than the hook's generic one, and the
+seeded settings pre-approve the command so it doesn't stop to ask:
+
+```sh
+agent report 113 --state done --pr https://github.com/o/r/pull/9
+agent report 113 --state halted --reason "needs a schema decision"
+```
+
+Reporting by hand is optional — the hook reports either way, and the first
+report of a spawn wins, so a hook firing later never overwrites what the
+worker said for itself. `agent report` always exits 0: it runs from a `Stop`
+hook, where a non-zero exit is fed back to the agent as something to fix.
+
+Caveats worth knowing before relying on it:
+
+- **Claude Code only.** `--runtime codex` spawns fine but says so at spawn
+  time — Codex has no session-lifecycle hook, so its completion is only ever
+  inferred.
+- **`Stop` fires per turn**, not only at session end, so a worker that pauses
+  for input reports `halted` while still alive. That is deliberate: an agent
+  sitting idle mid-task is exactly the case worth waking a coordinator for.
+- Orca stays optional throughout. Without it there is no handle to address a
+  message to, so the durable outcome record is written and the supervisor
+  polls — which is all it ever had.
+
 ### Checking on a dispatched run
 
 `agent dispatch` hands the run to a detached surface — nothing reports back
