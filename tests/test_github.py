@@ -218,3 +218,177 @@ def test_normalise_pr_url_says_so_when_a_number_cannot_be_expanded(tmp_path: Pat
 
 def test_remote_slug_is_none_outside_a_repo(tmp_path: Path) -> None:
     assert github.remote_slug(tmp_path) is None
+
+
+def _label_run(
+    monkeypatch: pytest.MonkeyPatch,
+    existing: list[dict[str, str]],
+    fails: frozenset[str] = frozenset(),
+) -> list[list[str]]:
+    """Stub `github.run` for label-sync tests; returns the argv list it recorded."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "label", "list"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(existing), stderr="")
+        if cmd[:3] == ["gh", "label", "create"] and cmd[3] in fails:
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="HTTP 403: Resource not accessible by integration\nmore"
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(github, "run", fake_run)
+    return calls
+
+
+def test_sync_labels_creates_all_on_a_fresh_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _label_run(monkeypatch, existing=[])
+    labels = {"agent-ready": github.Label("1d76db", "Groomed and safe to implement")}
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result == github.LabelSync(created=["agent-ready"], updated=[], unchanged=[], failed=[])
+    (create_call,) = [c for c in calls if c[:3] == ["gh", "label", "create"]]
+    assert "--description" in create_call
+    assert "Groomed and safe to implement" in create_call
+
+
+def test_sync_labels_is_a_noop_when_everything_already_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _label_run(
+        monkeypatch,
+        existing=[{"name": "agent-ready", "color": "1D76DB", "description": "Groomed and safe"}],
+    )
+    labels = {"agent-ready": github.Label("1d76db", "Groomed and safe")}
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result == github.LabelSync(created=[], updated=[], unchanged=["agent-ready"], failed=[])
+    assert not any(c[:3] == ["gh", "label", "create"] for c in calls)
+
+
+def test_sync_labels_treats_hash_prefix_and_case_as_matching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _label_run(
+        monkeypatch, existing=[{"name": "agent-ready", "color": "1d76db", "description": ""}]
+    )
+
+    result = github.sync_labels(tmp_path, {"agent-ready": github.Label("#1D76DB")})
+
+    assert result.unchanged == ["agent-ready"]
+    assert not any(c[:3] == ["gh", "label", "create"] for c in calls)
+
+
+def test_sync_labels_updates_a_drifted_color(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _label_run(
+        monkeypatch,
+        existing=[{"name": "agent-ready", "color": "ff0000", "description": "Groomed and safe"}],
+    )
+    labels = {"agent-ready": github.Label("1d76db", "Groomed and safe")}
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result == github.LabelSync(created=[], updated=["agent-ready"], unchanged=[], failed=[])
+
+
+def test_sync_labels_updates_a_drifted_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _label_run(
+        monkeypatch,
+        existing=[{"name": "agent-ready", "color": "1d76db", "description": "old text"}],
+    )
+    labels = {"agent-ready": github.Label("1d76db", "new text")}
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result.updated == ["agent-ready"]
+
+
+def test_sync_labels_one_failure_does_not_abort_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _label_run(monkeypatch, existing=[], fails=frozenset({"blocked"}))
+    labels = {
+        "blocked": github.Label("b60205", "desc"),
+        "agent-ready": github.Label("1d76db", "desc2"),
+    }
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result.created == ["agent-ready"]
+    assert result.failed == [("blocked", "HTTP 403: Resource not accessible by integration")]
+
+
+def test_sync_labels_survives_a_command_error_on_one_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run` raises `CommandError` on a timeout regardless of `check=False` — a
+    hang on one label must not propagate out of the loop and cost the rest."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "label", "list"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([]), stderr="")
+        if cmd[:3] == ["gh", "label", "create"] and cmd[3] == "blocked":
+            raise CommandError("`gh label create blocked` did not finish within 120s")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(github, "run", fake_run)
+    labels = {
+        "blocked": github.Label("b60205", "desc"),
+        "agent-ready": github.Label("1d76db", "desc2"),
+    }
+
+    result = github.sync_labels(tmp_path, labels)
+
+    assert result.created == ["agent-ready"]
+    assert result.failed == [("blocked", "`gh label create blocked` did not finish within 120s")]
+
+
+def test_sync_labels_pins_the_repo_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _label_run(monkeypatch, existing=[])
+    labels = {"agent-ready": github.Label("1d76db", "desc")}
+
+    github.sync_labels(tmp_path, labels, repo="acme/widgets")
+
+    list_call = next(c for c in calls if c[:3] == ["gh", "label", "list"])
+    create_call = next(c for c in calls if c[:3] == ["gh", "label", "create"])
+    assert list_call[-2:] == ["--repo", "acme/widgets"]
+    assert create_call[-2:] == ["--repo", "acme/widgets"]
+
+
+def test_sync_labels_omits_repo_flag_when_not_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _label_run(monkeypatch, existing=[])
+    labels = {"agent-ready": github.Label("1d76db", "desc")}
+
+    github.sync_labels(tmp_path, labels)
+
+    for call in calls:
+        assert "--repo" not in call
+
+
+def test_sync_labels_raises_when_label_list_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "label", "list"]:
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="HTTP 401: Bad credentials"
+            )
+        raise AssertionError(f"unexpected call: {cmd}")
+
+    monkeypatch.setattr(github, "run", fake_run)
+
+    with pytest.raises(CommandError, match="Bad credentials"):
+        github.sync_labels(tmp_path, {"agent-ready": github.Label("1d76db")})

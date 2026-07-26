@@ -115,7 +115,7 @@ def claim(project_root: Path, issue: int, *, log: Callable[[str], None] = _quiet
         log(f"could not claim #{issue}: {exc}")
         return False
     if proc.returncode != 0:
-        log(f"could not claim #{issue}: {_why(proc.stderr, proc.stdout)}")
+        log(f"could not claim #{issue}: {github.why(proc.stderr, proc.stdout)}")
         return False
     return True
 
@@ -141,19 +141,10 @@ def release(project_root: Path, issue: int, *, log: Callable[[str], None] = _qui
     if proc.returncode != 0:
         log(
             f"could not clear the claim on #{issue} (it may never have been claimed): "
-            f"{_why(proc.stderr, proc.stdout)}"
+            f"{github.why(proc.stderr, proc.stdout)}"
         )
         return False
     return True
-
-
-def _why(stderr: str, stdout: str) -> str:
-    """The one line of a failed `gh` invocation worth quoting."""
-    for stream in (stderr, stdout):
-        lines = [line for line in stream.strip().splitlines() if line.strip()]
-        if lines:
-            return lines[0]
-    return "no output"
 
 
 @dataclass
