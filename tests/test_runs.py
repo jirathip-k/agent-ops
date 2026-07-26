@@ -490,7 +490,7 @@ def test_discover_runs_prunes_outcome_record_past_ttl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = _write_outcome_file(tmp_path, 42)
-    old = runs.time.time() - runs._OUTCOME_TTL_S - 1
+    old = runs.time.time() - runs.ARTIFACT_TTL_S - 1
     os.utime(path, (old, old))
     monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
     monkeypatch.setattr(runs, "_ps_output", lambda log: "")
@@ -500,6 +500,94 @@ def test_discover_runs_prunes_outcome_record_past_ttl(
 
     assert result == []
     assert not path.exists()
+
+
+def test_log_pattern_covers_per_attempt_names_and_nothing_else() -> None:
+    """Issue #92 renamed background logs to `<label>-<stamp>.log`. `_LOG_RE` is
+    what makes a log file a run candidate at all, so it must follow the rename
+    without picking up labels that were never candidates."""
+    for name in (
+        "agent-issue-92.log",  # written before per-attempt names existed
+        "agent-issue-92-20260726-143512.log",
+        "agent-issue-92-20260726-143512a.log",  # two spawns inside one second
+    ):
+        match = runs._LOG_RE.match(name)
+        assert match is not None and int(match.group(1)) == 92, name
+
+    for name in (
+        "agent-plan-issue-92-20260726-143512.log",
+        "agent-resume-issue-92-20260726-143512.log",
+        "agent-review-pr-92-20260726-143512.log",
+        "issue-92-spawn.json",
+        "issue-92-outcome.json",
+        "issue-92-feedback.md",
+    ):
+        assert runs._LOG_RE.match(name) is None, name
+
+
+def test_discover_runs_finds_a_per_attempt_log_as_a_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".agent-runs").mkdir()
+    (tmp_path / ".agent-runs" / "agent-issue-35-20260726-143512.log").write_text("log")
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [_pr(76, issue=35)])
+
+    result, _trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(35, "done", "PR #76")]
+
+
+def test_prune_logs_ages_out_logs_but_not_live_state(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".agent-runs"
+    runs_dir.mkdir()
+    now = runs.time.time()
+    old = now - runs.ARTIFACT_TTL_S - 1
+    stale = runs_dir / "agent-issue-1-20200101-000000.log"
+    legacy = runs_dir / "agent-issue-2.log"
+    fresh = runs_dir / "agent-issue-3-20200101-000000.log"
+    feedback = runs_dir / "issue-4-feedback.md"
+    spawn = runs_dir / "issue-5-spawn.json"
+    for path in (stale, legacy, fresh, feedback, spawn):
+        path.write_text("x")
+    for path in (stale, legacy, feedback, spawn):
+        os.utime(path, (old, old))
+
+    removed = runs.prune_logs(runs_dir, now=now)
+
+    assert sorted(removed) == sorted([legacy, stale])
+    assert fresh.exists()
+    # A halt nobody has answered and the address of the current run are live
+    # state, not history — the log TTL must not touch them.
+    assert feedback.exists()
+    assert spawn.exists()
+
+
+def test_prune_logs_on_a_missing_directory_is_a_no_op(tmp_path: Path) -> None:
+    assert runs.prune_logs(tmp_path / "nope") == []
+
+
+def test_prune_logs_warns_but_does_not_raise_when_a_log_cannot_be_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_dir = tmp_path / ".agent-runs"
+    runs_dir.mkdir()
+    stale = runs_dir / "agent-issue-1-20200101-000000.log"
+    stale.write_text("x")
+    old = runs.time.time() - runs.ARTIFACT_TTL_S - 1
+    os.utime(stale, (old, old))
+
+    def boom(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    warnings: list[str] = []
+
+    # Pruning is housekeeping on the way to spawning a run; failing it must
+    # never fail the run.
+    assert runs.prune_logs(runs_dir, log=warnings.append) == []
+    assert any("could not prune" in w for w in warnings)
 
 
 def test_discover_runs_invalid_outcome_json_does_not_raise(
