@@ -24,3 +24,12 @@ subsystems. Building all four up front risks a framework nobody uses.
   if that becomes the bottleneck (see docs/roadmap.md).
 - Retries use fresh context + failure report instead of session resume,
   mirroring the CI pipeline's fresh-implementer rule.
+- A managed repo's `AGENTS.md` counts as GitHub-resident state, not a memory
+  store: it is human-authored by construction (its sections come from
+  `templates/project/AGENTS.md`), agents only ever append to it under that
+  same human-reviewed PR flow, and "no memory store" means no subsystem
+  writes durable knowledge outside that flow — not that the flow may never
+  touch a file twice.
+- `agent distill` is the deliberate-editing half of that same flow: it prunes
+  spent narration from `AGENTS.md` the same way a human editing a skill file
+  would, gated by the same PR review, never by an automatic memory write.

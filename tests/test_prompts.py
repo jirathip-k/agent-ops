@@ -31,6 +31,10 @@ TASK_FIELDS = {
     "scout": {"max_issues": "3"},
     "triage": {"issues": "### #1: t"},
     "groom": {"issues": "### #1: t"},
+    "distill": {
+        "protected_sections": "- What this project is",
+        "prunable_sections": "## Run log\n\nnotes",
+    },
 }
 
 
