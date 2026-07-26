@@ -366,3 +366,131 @@ def test_status_only_report_is_not_relocated(monkeypatch: pytest.MonkeyPatch) ->
 
     assert landed is None
     assert len(calls) == 1  # never attempted the fallback
+
+
+# --- what "not yet" looks like, versus "never" (issue #117) ----------------
+
+
+def test_is_transient_covers_the_handle_timeout_that_aborted_a_real_spawn() -> None:
+    """The response `agent spawn 108` actually got. It is not
+    `selector_not_found`, which is why the retry loop never engaged."""
+    body = json.dumps(
+        {
+            "ok": False,
+            "error": {
+                "code": "runtime_error",
+                "message": "Timed out waiting for terminal handle after creation",
+            },
+        }
+    )
+    assert orca.is_transient(body)
+
+
+def test_is_transient_still_covers_the_unindexed_card() -> None:
+    assert orca.is_transient('{"error":{"code":"selector_not_found"}}')
+    # ...including the bare-string spelling other Orca commands use.
+    assert orca.is_transient('{"error":"selector_not_found"}')
+
+
+def test_is_transient_refuses_to_retry_a_real_failure() -> None:
+    """Blind retries would make a bad flag or a stopped Orca fail three times
+    more slowly, and bury why."""
+    assert not orca.is_transient('{"ok":false,"error":{"code":"permission_denied"}}')
+    assert not orca.is_transient("unknown option `--wat`")
+    assert not orca.is_transient("")
+
+
+# --- is that session still there? (issue #116) -----------------------------
+
+
+def _orca_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "executable", lambda: "orca")
+
+
+def _responds(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, stderr: str = ""
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(orca, "run", fake_run)
+    return calls
+
+
+def test_terminal_alive_is_true_while_orca_hosts_the_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _orca_up(monkeypatch)
+    calls = _responds(monkeypatch, 0, json.dumps({"ok": True, "result": {"terminal": {}}}))
+
+    assert orca.terminal_alive("term_abc") is True
+    (cmd,) = calls
+    assert cmd[1:3] == ["terminal", "show"]
+    assert "term_abc" in cmd
+
+
+def test_terminal_alive_is_false_only_for_a_handle_orca_has_forgotten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one positive piece of evidence that a session is gone — closed
+    terminal, restarted app — and so the only thing allowed to end a wait."""
+    _orca_up(monkeypatch)
+    body = json.dumps({"ok": False, "error": {"code": orca.HANDLE_STALE, "message": "stale"}})
+    _responds(monkeypatch, 1, body)
+
+    assert orca.terminal_alive("term_abc") is False
+
+
+def test_terminal_alive_is_unknown_when_orca_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never `False`: an Orca outage that read as "the session is gone" would
+    hand `agent runs --wait` a terminal verdict with no evidence (#116)."""
+    _orca_up(monkeypatch)
+    _responds(monkeypatch, 1, "", "connection refused")
+
+    assert orca.terminal_alive("term_abc") is None
+
+
+def test_terminal_alive_is_unknown_without_orca(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orca, "available", lambda: False)
+
+    def boom(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("must not invoke the CLI when Orca is unavailable")
+
+    monkeypatch.setattr(orca, "run", boom)
+
+    assert orca.terminal_alive("term_abc") is None
+
+
+def test_terminal_handles_lists_what_is_on_the_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _orca_up(monkeypatch)
+    body = json.dumps({"result": {"terminals": [{"handle": "term_a"}, {"handle": "term_b"}]}})
+    calls = _responds(monkeypatch, 0, body)
+
+    assert orca.terminal_handles(Path("/wt")) == {"term_a", "term_b"}
+    (cmd,) = calls
+    assert cmd[1:3] == ["terminal", "list"]
+    assert "path:/wt" in cmd
+
+
+def test_terminal_handles_distinguishes_unknown_from_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`orca terminal list` answers `selector_not_found` for a worktree it has
+    not indexed yet, which is not "no terminals" — `surfaces` diffs these to
+    decide whether to adopt a terminal, and an empty baseline it invented would
+    make it adopt somebody else's session."""
+    _orca_up(monkeypatch)
+    _responds(monkeypatch, 1, '{"ok":false,"error":{"code":"selector_not_found"}}')
+
+    assert orca.terminal_handles(Path("/wt")) is None
+
+    _responds(monkeypatch, 0, json.dumps({"result": {"terminals": []}}))
+    assert orca.terminal_handles(Path("/wt")) == set()
