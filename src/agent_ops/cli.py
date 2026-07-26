@@ -17,6 +17,7 @@ from agent_ops.config import (
     runtime_reports,
 )
 from agent_ops.fallback import artifact_footer
+from agent_ops.github import Label
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
@@ -56,27 +57,37 @@ def _err(message: str) -> None:
 
 GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
 
-# Every label the lanes read or write, with the colors the pipelines use.
-# The triage/groom/scout lanes create their own verdict labels at run time
-# (LABEL_COLORS, merged in below, plus the gate labels groom may now emit),
-# but a gate label is mostly applied by a human — it has to exist before
-# anyone can request work, so `init` prints the whole set at onboarding
+# Every label the lanes read or write, with the colors/descriptions the
+# pipelines use. The triage/groom/scout lanes sync their own verdict labels at
+# run time too (LABEL_COLORS, merged in below, plus the gate labels groom may
+# now emit), but a gate label is mostly applied by a human — it has to exist
+# before anyone can request work, so `init` syncs the whole set at onboarding
 # rather than leaving it to the first failed run.
-ONBOARDING_LABELS: dict[str, str] = {
+ONBOARDING_LABELS: dict[str, Label] = {
     **GATE_LABELS,
-    "approved-for-agent": "1d76db",
-    "blocked": "b60205",
-    "triage:done": "ededed",
-    "ready-to-merge": "0e8a16",
-    "hotfix-ready": "d93f0b",
-    "hotfix-backmerge": "5319e7",
+    "approved-for-agent": Label(
+        "1d76db", "Human go-ahead for an enhancement/idea to enter the normal lane"
+    ),
+    "blocked": Label("b60205", "Skipped by every lane until a human clears the blocker"),
+    "triage:done": Label("ededed", "The CI triage lane has already classified this issue"),
+    "ready-to-merge": Label("0e8a16", "Passed every gate; held for merge (report-only mode)"),
+    "hotfix-ready": Label("d93f0b", "Hotfix passed PASS+APPROVE; held for maintainer review"),
+    "hotfix-backmerge": Label("5319e7", "Back-merge PR carrying a hotfix from stable to base"),
     # Applied and cleared by the runs themselves, not by a human — but listed
     # here anyway: an agent started by hand claims with `agent claim <N>`, and a
     # repo where the label does not exist yet turns that into a failed claim
     # rather than a visible one.
-    claims.CLAIM_LABEL: claims.CLAIM_LABEL_COLOR,
+    claims.CLAIM_LABEL: Label(claims.CLAIM_LABEL_COLOR, claims.CLAIM_LABEL_DESCRIPTION),
     **LABEL_COLORS,
 }
+
+
+def _print_label_commands() -> None:
+    for name, label in ONBOARDING_LABELS.items():
+        typer.echo(
+            f"  gh label create {name} --color {label.color} "
+            f'--description "{label.description}" --force'
+        )
 
 
 def _missing_gitignore_markers(root: Path) -> list[str]:
@@ -776,7 +787,15 @@ def promote(project: ProjectOpt = Path(".")) -> None:
 
 
 @app.command()
-def init(project: ProjectOpt = Path(".")) -> None:
+def init(
+    project: ProjectOpt = Path("."),
+    print_labels: Annotated[
+        bool,
+        typer.Option(
+            "--print-labels", help="Print the label `gh` commands instead of applying them"
+        ),
+    ] = False,
+) -> None:
     """Scaffold .agent/config.yaml, AGENTS.md, and a CLAUDE.md link into a project repo."""
     root = project.resolve()
     templates = PLATFORM_ROOT / "templates" / "project"
@@ -822,13 +841,63 @@ def init(project: ProjectOpt = Path(".")) -> None:
             fh.write(f"\n{marker}\n")
         typer.echo(f"added {marker} to .gitignore")
 
-    # Labels live in GitHub, not on disk, so init can only tell you about them
-    # — but it has to, because a gate label nobody created is a lane nobody can
-    # request: the CI pipelines select on it, and a missing label just selects
-    # nothing.
-    typer.echo("\nlabels the lanes use — run once per repo:")
-    for name, color in ONBOARDING_LABELS.items():
-        typer.echo(f"  gh label create {name} --color {color} --force")
+    # A gate label nobody created is a lane nobody can request: the CI
+    # pipelines select on it, and a missing label just selects nothing.
+    if print_labels:
+        typer.echo("\nlabels the lanes use — run once per repo:")
+        _print_label_commands()
+        return
+
+    # Git discovers a repo by walking UP from cwd, so `agent init --project
+    # ./newthing`, where `newthing` is a plain directory inside an existing
+    # checkout, would otherwise resolve `remote_slug` to the ENCLOSING repo's
+    # `origin` and sync every label there — an unrequested write to a repo
+    # nobody named, by the same route `--repo` pinning exists to close off.
+    toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+    if toplevel.returncode == 0 and Path(toplevel.stdout.strip()) != root.resolve():
+        typer.echo(
+            f"\n{root} is not a git repository root — it is inside "
+            f"{toplevel.stdout.strip()}'s. Labels were not synced, to avoid writing to "
+            "that repo instead; run `agent init` from the repo's own root, or with "
+            "--print-labels:"
+        )
+        _print_label_commands()
+        return
+
+    slug = github.remote_slug(root)
+    if slug is None:
+        typer.echo(
+            "\nno `origin` remote — labels were not synced; run once you have one, "
+            "or with --print-labels:"
+        )
+        _print_label_commands()
+        return
+
+    try:
+        sync = github.sync_labels(root, ONBOARDING_LABELS, repo=slug)
+    except (CommandError, OSError) as exc:
+        # The files on disk above are correct either way — that's the whole
+        # argument for not failing `init` here too. `gh` not being logged in,
+        # a network blip, a non-GitHub origin, or `gh` not being installed at
+        # all (`utils.run` raises FileNotFoundError, an OSError, for that one)
+        # all land here; fall back to the same paste-able commands as
+        # --print-labels rather than leaving the operator with nothing but an
+        # error.
+        _err(f"\ncould not sync labels: {exc}")
+        typer.echo("labels were not synced — run these once you can:")
+        _print_label_commands()
+        return
+
+    typer.echo()
+    if sync.created:
+        typer.echo(f"labels created: {', '.join(sync.created)}")
+    if sync.updated:
+        typer.echo(f"labels updated: {', '.join(sync.updated)}")
+    if sync.failed:
+        for name, reason in sync.failed:
+            _err(f"label {name} failed: {reason}")
+    if not (sync.created or sync.updated or sync.failed):
+        typer.echo(f"labels: all {len(sync.unchanged)} already match")
 
 
 @app.command()

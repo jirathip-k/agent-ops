@@ -6,11 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import worktree
+from agent_ops import github, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, LABEL_COLORS
 
@@ -122,12 +122,15 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
 
     # Gate labels included: groom can now apply them, and `gh issue edit
     # --add-label` fails outright against a label the repo never created.
-    for name, color in (LABEL_COLORS | GATE_LABELS).items():
-        run(
-            ["gh", "label", "create", name, "--color", color, "--force"],
-            cwd=project_root,
-            check=False,
+    try:
+        sync = github.sync_labels(
+            project_root, LABEL_COLORS | GATE_LABELS, repo=github.remote_slug(project_root)
         )
+    except (CommandError, OSError) as exc:
+        log(f"could not sync labels: {exc}")
+    else:
+        for name, reason in sync.failed:
+            log(f"could not sync label {name}: {reason}")
 
     for r in results:
         current = labels_by_number.get(r.number, set())

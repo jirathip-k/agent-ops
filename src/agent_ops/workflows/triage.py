@@ -6,11 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import messages, worktree
+from agent_ops import github, messages, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
+from agent_ops.github import Label
 from agent_ops.prompts import render_task
-from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
 
 # An issue is classified only when it carries a bucket label. The CI lane
@@ -18,20 +19,20 @@ from agent_ops.workflows.implement import role_request
 # bugs bucketless — those must still be triaged here, or the queue starves.
 BUCKET_LABELS = {"agent-ready", "needs-human", "backlog"}
 
-LABEL_COLORS = {
-    "agent-ready": "1d76db",
-    "needs-human": "d93f0b",
-    "backlog": "c5def5",
-    "found-by-audit": "fbca04",
-    "proposed-by-agent": "bfd4f2",
+LABEL_COLORS: dict[str, Label] = {
+    "agent-ready": Label("1d76db", "Groomed and safe for an agent to implement"),
+    "needs-human": Label("d93f0b", "Triage could not classify this without a person"),
+    "backlog": Label("c5def5", "Idea without acceptance criteria yet — not actionable"),
+    "found-by-audit": Label("fbca04", "Filed by an agent auditing the codebase, never fixed by it"),
+    "proposed-by-agent": Label("bfd4f2", "Filed by the scout lane from a mined signal"),
 }
 
 # The labels the spec/plan CI lanes select on. Not verdict labels for triage,
 # but groom may now emit them (#97), so they live here rather than in the CLI:
 # a lane that applies a label has to be able to create it first.
-GATE_LABELS = {
-    "spec-requested": "5319e7",
-    "plan-requested": "1d76db",
+GATE_LABELS: dict[str, Label] = {
+    "spec-requested": Label("5319e7", "Human asked the agent to write a spec"),
+    "plan-requested": Label("1d76db", "Human asked the agent to post an implementation plan"),
 }
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")
@@ -132,12 +133,13 @@ def run_triage(
     if not results:
         raise RuntimeError(f"Triage produced no parseable results:\n{result.text[-500:]}")
 
-    for name, color in LABEL_COLORS.items():
-        run(
-            ["gh", "label", "create", name, "--color", color, "--force"],
-            cwd=project_root,
-            check=False,
-        )
+    try:
+        sync = github.sync_labels(project_root, LABEL_COLORS, repo=github.remote_slug(project_root))
+    except (CommandError, OSError) as exc:
+        log(f"could not sync labels: {exc}")
+    else:
+        for name, reason in sync.failed:
+            log(f"could not sync label {name}: {reason}")
 
     for r in results:
         run(["gh", "issue", "edit", str(r.number), "--add-label", r.verdict], cwd=project_root)

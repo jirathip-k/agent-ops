@@ -4,9 +4,10 @@ from typing import Any
 
 import pytest
 
-from agent_ops import worktree
+from agent_ops import github, worktree
 from agent_ops.config import ProjectConfig
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
+from agent_ops.utils import CommandError
 from agent_ops.workflows import groom as groom_module
 from agent_ops.workflows.groom import VERDICTS, parse_groom, run_groom
 
@@ -126,7 +127,7 @@ def _edit_for(calls: list[list[str]], number: int) -> list[str] | None:
     return None
 
 
-def test_gate_verdicts_are_applied_and_create_their_labels(
+def test_gate_verdicts_are_applied_and_sync_their_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _stub_groom_run(
@@ -137,6 +138,18 @@ def test_gate_verdicts_are_applied_and_create_their_labels(
         "#19 plan-requested — real bug, but the fix needs a design\n",
         [_issue(18, ["backlog"]), _issue(19, [])],
     )
+    synced: list[dict[str, github.Label]] = []
+    seen_repo: list[str | None] = []
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        synced.append(labels)
+        seen_repo.append(repo)
+        return github.LabelSync(created=list(labels), updated=[], unchanged=[], failed=[])
+
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
 
     results = run_groom(tmp_path, log=lambda _msg: None)
 
@@ -147,9 +160,95 @@ def test_gate_verdicts_are_applied_and_create_their_labels(
     assert _edit_for(calls, 18) == ["gh", "issue", "edit", "18", "--add-label", "spec-requested"]
     assert _edit_for(calls, 19) == ["gh", "issue", "edit", "19", "--add-label", "plan-requested"]
     # A label the repo never created makes `gh issue edit` fail outright, so
-    # groom has to create the gate labels the same way it creates its own.
-    created = {cmd[3] for cmd in calls if cmd[:3] == ["gh", "label", "create"]}
-    assert {"spec-requested", "plan-requested"} <= created
+    # groom has to sync the gate labels through the same helper it uses for
+    # its own verdict labels.
+    assert synced, "groom must sync labels before applying verdicts"
+    assert {"spec-requested", "plan-requested"} <= synced[0].keys()
+    # groom pins the repo it resolved, so a fork's `gh` base-repo resolution
+    # can't redirect the sync to the wrong repository.
+    assert seen_repo == ["acme/widgets"]
+
+
+def test_groom_survives_a_label_sync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` failure while syncing labels (e.g. no write scope) must not stop
+    groom from still applying verdicts it already parsed."""
+    calls = _stub_groom_run(
+        monkeypatch,
+        tmp_path,
+        "GROOM RESULTS:\n#30 agent-ready — clear repro, small diff\n",
+        [_issue(30, [])],
+    )
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        raise CommandError("no write scope")
+
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    logged: list[str] = []
+
+    results = run_groom(tmp_path, log=logged.append)
+
+    assert [(r.number, r.verdict) for r in results] == [(30, "agent-ready")]
+    assert _edit_for(calls, 30) == ["gh", "issue", "edit", "30", "--add-label", "agent-ready"]
+    assert any("could not sync labels" in line for line in logged)
+
+
+def test_groom_survives_gh_not_being_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`utils.run` raises FileNotFoundError, not CommandError, when `gh` isn't on
+    PATH — a missing `gh` here must not abort a groom run after verdicts have
+    already been parsed."""
+    calls = _stub_groom_run(
+        monkeypatch,
+        tmp_path,
+        "GROOM RESULTS:\n#30 agent-ready — clear repro, small diff\n",
+        [_issue(30, [])],
+    )
+
+    def missing_gh(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(github, "sync_labels", missing_gh)
+    logged: list[str] = []
+
+    results = run_groom(tmp_path, log=logged.append)
+
+    assert [(r.number, r.verdict) for r in results] == [(30, "agent-ready")]
+    assert _edit_for(calls, 30) == ["gh", "issue", "edit", "30", "--add-label", "agent-ready"]
+    assert any("could not sync labels" in line for line in logged)
+
+
+def test_groom_logs_a_single_label_failure_without_aborting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_groom_run(
+        monkeypatch,
+        tmp_path,
+        "GROOM RESULTS:\n#30 agent-ready — clear repro, small diff\n",
+        [_issue(30, [])],
+    )
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        return github.LabelSync(
+            created=[], updated=[], unchanged=[], failed=[("agent-ready", "HTTP 403: no scope")]
+        )
+
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    logged: list[str] = []
+
+    results = run_groom(tmp_path, log=logged.append)
+
+    assert [(r.number, r.verdict) for r in results] == [(30, "agent-ready")]
+    assert _edit_for(calls, 30) == ["gh", "issue", "edit", "30", "--add-label", "agent-ready"]
+    assert any("agent-ready" in line and "HTTP 403: no scope" in line for line in logged)
 
 
 def test_a_gate_verdict_clears_agent_ready_but_keeps_the_bucket(
