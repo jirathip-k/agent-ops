@@ -456,7 +456,7 @@ def test_finish_run_writes_outcome_record_with_pr_url(
     )
 
     assert ok is True
-    outcome_path = implement_module._outcome_path(repo, 7)
+    outcome_path = runs.outcome_path(repo, 7)
     assert outcome_path.is_file()
     data = json.loads(outcome_path.read_text())
     assert data["state"] == "done"
@@ -487,7 +487,7 @@ def test_finish_run_writes_outcome_record_without_pr(
     )
 
     assert ok is True
-    data = json.loads(implement_module._outcome_path(repo, 7).read_text())
+    data = json.loads(runs.outcome_path(repo, 7).read_text())
     assert data["state"] == "done"
     assert data["pr_url"] is None
 
@@ -535,7 +535,7 @@ def test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_
 
 def _existing_outcome_record(repo: Path, issue: int) -> Path:
     """A `done` outcome record from an earlier, already-finished cycle."""
-    path = implement_module._outcome_path(repo, issue)
+    path = runs.outcome_path(repo, issue)
     path.parent.mkdir(exist_ok=True)
     path.write_text(
         json.dumps({"state": "done", "pr_url": "https://x/pull/76", "reason": None}),
@@ -721,7 +721,7 @@ def test_finish_run_reports_done_with_the_same_facts_as_the_durable_record(
     )
 
     assert sends == [{"issue": 7, "state": "done", "pr_url": "https://x/pull/76", "reason": None}]
-    durable = json.loads(implement_module._outcome_path(repo, 7).read_text())
+    durable = json.loads(runs.outcome_path(repo, 7).read_text())
     assert sends[0]["state"] == durable["state"]
     assert sends[0]["pr_url"] == durable["pr_url"]
 

@@ -17,14 +17,17 @@ from agent_ops.workflows import (
     dispatch_resume,
     dispatch_review,
     format_summary,
+    report_outcome,
     run_implement,
     run_resume,
     run_review,
     run_reviews,
+    run_spawn,
 )
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
+from agent_ops.workflows.spawn import REPORT_STATES
 from agent_ops.workflows.triage import LABEL_COLORS
 
 app = typer.Typer(
@@ -296,6 +299,105 @@ def dispatch(
         log=_err,
     )
     typer.echo(f"dispatched issue #{issue} → {spawned.where}")
+
+
+@app.command()
+def spawn(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number the work belongs to")],
+    project: ProjectOpt = Path("."),
+    prompt: Annotated[
+        str | None,
+        typer.Option("--prompt", "-m", help="Opening brief (default: 'work on issue #N')"),
+    ] = None,
+    prompt_file: Annotated[
+        Path | None, typer.Option("--prompt-file", help="File containing the opening brief")
+    ] = None,
+    surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
+    runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
+) -> None:
+    """Put an interactive coding agent in a fresh worktree, wired to report when it stops.
+
+    The ad-hoc counterpart to `dispatch`: that one spawns the `agent implement`
+    pipeline, this one spawns a plain agent session for work the pipeline does
+    not model — and seeds a stop hook so its completion is reported even if it
+    dies, is interrupted, or stops early (issue #113). Wait on it with
+    `agent runs <issue> --wait`.
+    """
+    root = project.resolve()
+    try:
+        if prompt and prompt_file:
+            raise CommandError("pass either --prompt or --prompt-file, not both")
+        if prompt_file is not None:
+            if not prompt_file.is_file():
+                raise CommandError(f"prompt file not found: {prompt_file}")
+            prompt = prompt_file.read_text()
+        delegated = run_spawn(
+            root,
+            issue,
+            prompt=prompt,
+            surface_name=surface,
+            runtime_name=runtime,
+            log=typer.echo,
+        )
+    except (ValueError, FileExistsError, CommandError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"spawned an agent for issue #{issue} → {delegated.spawned.where}")
+    typer.echo(f"  worktree: {delegated.worktree}")
+    typer.echo(
+        f"  reports back on its own — wait with `agent runs {issue} --wait`"
+        if delegated.reports_back
+        else f"  no push channel — watch it with `agent runs {issue} --wait` (polling)"
+    )
+
+
+@app.command()
+def report(
+    issue: Annotated[int, typer.Argument(help="GitHub issue number this run belongs to")],
+    state: Annotated[
+        str, typer.Option("--state", help=f"Terminal state: {' | '.join(REPORT_STATES)}")
+    ],
+    project: ProjectOpt = Path("."),
+    pr: Annotated[str | None, typer.Option("--pr", help="URL of the PR this run opened")] = None,
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Why it ended this way (blocker, failure, ...)")
+    ] = None,
+    if_unreported: Annotated[
+        bool,
+        typer.Option(
+            "--if-unreported",
+            help="Do nothing if this run already reported — what the stop hook passes",
+        ),
+    ] = False,
+) -> None:
+    """Record and push this run's terminal state, waking anyone blocked on it.
+
+    Callable by hand (an agent reporting a real outcome, with a PR or a
+    blocker) and by the stop hook `agent spawn` seeds, which passes
+    `--if-unreported` so a worker that already spoke for itself is never
+    overwritten by the generic report.
+
+    Always exits 0. It is run from a Claude Code `Stop` hook, where a non-zero
+    exit is fed back to the agent as something to fix — a status report has no
+    business doing that, and a report that could not go out is a dropped
+    notification, not a failed run.
+    """
+    if state not in REPORT_STATES:
+        _err(f"unknown state {state!r} — expected one of: {', '.join(REPORT_STATES)}")
+        return
+    try:
+        report_outcome(
+            project.resolve(),
+            issue,
+            state=state,
+            pr_url=pr,
+            reason=reason,
+            if_unreported=if_unreported,
+            log=typer.echo,
+        )
+    except Exception as exc:  # noqa: BLE001 — a status report never fails a run
+        _err(f"could not report #{issue}: {exc}")
 
 
 @app.command()

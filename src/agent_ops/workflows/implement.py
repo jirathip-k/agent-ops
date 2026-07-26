@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, messages, orca, surfaces, worktree
+from agent_ops import github, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
@@ -47,78 +45,6 @@ def _ad_hoc_message_path(project_root: Path, issue_number: int) -> Path:
     replay the note instead of the review it was meant to address.
     """
     return project_root / ".agent-runs" / f"issue-{issue_number}-resume-message.md"
-
-
-def _outcome_path(project_root: Path, issue_number: int) -> Path:
-    """Where a durable "this run finished" record is written on the way out.
-
-    Read by `runs.discover_runs` for issues whose other signals (worktree,
-    feedback file, open PR) have since been cleared/consumed — see issue #87:
-    without this, a successfully finished run vanishes from `agent runs`
-    instead of showing `done`.
-    """
-    return project_root / ".agent-runs" / f"issue-{issue_number}-outcome.json"
-
-
-def _write_outcome(
-    project_root: Path,
-    issue_number: int,
-    *,
-    state: str,
-    pr_url: str | None,
-    reason: str | None,
-    log: Callable[[str], None],
-) -> None:
-    """Best-effort durable record of a run's outcome; never crashes a successful run.
-
-    Written via a temp-file-then-`os.replace` so a crash mid-write never leaves
-    a torn/partial JSON file for `runs._load_outcomes` to trip over. Mirrors
-    `_record_halt`'s best-effort philosophy: a failed status write must not
-    turn a successful run into a crash.
-    """
-    path = _outcome_path(project_root, issue_number)
-    payload = {
-        "state": state,
-        "pr_url": pr_url,
-        "reason": reason,
-        "finished_at": time.time(),
-    }
-    try:
-        path.parent.mkdir(exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload))
-        tmp_path.replace(path)
-    except OSError as exc:
-        log(f"could not write outcome record at {path}: {exc}")
-
-
-def _clear_outcome(
-    project_root: Path,
-    issue_number: int,
-    *,
-    log: Callable[[str], None],
-) -> None:
-    """Drop the previous cycle's outcome record; a new cycle supersedes it.
-
-    `runs.classify` ranks `outcome` above `has_feedback` so that a stale halt
-    file can't report `halted` forever after the run it belonged to finished
-    (issue #78). That precedence is only sound while the record describes the
-    *latest* cycle. Nothing else expires it inside the 7-day TTL, so a second
-    cycle on the same issue — reopened issue, follow-up work — would keep
-    reporting the first cycle's `done` no matter what the new one does: a halt
-    needing `agent resume` would be invisible, and a gate failure that keeps
-    the worktree would read as finished instead of `stopped`. Both are the
-    same silent-failure class as #78, pointed the worse way.
-
-    Best-effort like the rest of this module's status bookkeeping: a run must
-    never crash because a stale status file could not be removed. Failing to
-    delete it only leaves the pre-existing staleness in place.
-    """
-    path = _outcome_path(project_root, issue_number)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        log(f"could not clear stale outcome record at {path}: {exc}")
 
 
 def _existing_worktree(project_root: Path, config: ProjectConfig, issue_number: int) -> Path:
@@ -333,7 +259,7 @@ def run_implement(
     # A new cycle owns this issue's status from here on. Deliberately after the
     # already-has-an-open-PR bail-out above, which starts nothing and so has no
     # business discarding the previous cycle's record.
-    _clear_outcome(project_root, issue_number, log=log)
+    runs.clear_outcome(project_root, issue_number, log=log)
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 
@@ -495,7 +421,7 @@ def _finish_run(
     # process is interrupted between this write and the feedback-file unlink,
     # both files briefly coexist, and the outcome record takes precedence over
     # a stale feedback file in `runs.classify`, so that's safe.
-    _write_outcome(project_root, issue_number, state="done", pr_url=pr_url, reason=None, log=log)
+    runs.write_outcome(project_root, issue_number, state="done", pr_url=pr_url, log=log)
 
     # Both callers, not just resume: a successful implement leaves any earlier
     # cycle's findings behind too, and a later `agent resume` on this issue
@@ -584,7 +510,7 @@ def run_resume(
     # Same as `run_implement`: whatever a previous cycle recorded, this one is
     # now the current word on the issue. Placed after `_resolve_feedback`,
     # which raises when there is nothing to resume from — no cycle starts then.
-    _clear_outcome(project_root, issue_number, log=log)
+    runs.clear_outcome(project_root, issue_number, log=log)
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: resuming")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
@@ -914,7 +840,7 @@ def _record_halt(
     # `agent resume`. `run_implement`/`run_resume` already clear it at the top
     # of a cycle; this repeats it because a halt is the one exit where being
     # shadowed is actively harmful, and the record is cheap to remove twice.
-    _clear_outcome(project_root, issue_number, log=log)
+    runs.clear_outcome(project_root, issue_number, log=log)
     # Sent as an escalation rather than a plain completion: this run stopped
     # early and cannot continue without a human, which is exactly the state a
     # supervisor cannot tell apart from an ordinary pause by watching the

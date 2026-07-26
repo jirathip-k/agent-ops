@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_ops import messages, orca
+from agent_ops import messages, orca, runs
 from agent_ops.utils import CommandError
 
 
@@ -90,8 +90,6 @@ def test_load_spawn_warns_and_degrades_on_a_corrupt_record(tmp_path: Path) -> No
 
 def test_spawn_record_is_not_one_of_discover_runs_signal_patterns(tmp_path: Path) -> None:
     """An address book is not evidence a run exists — see `runs.discover_runs`."""
-    from agent_ops import runs
-
     messages.record_spawn(tmp_path, 98, surface="orca", handle="term_abc")
     name = messages.spawn_path(tmp_path, 98).name
     for pattern in (runs._FEEDBACK_RE, runs._LOG_RE, runs._OUTCOME_RE):
@@ -125,8 +123,6 @@ def test_send_outcome_payload_matches_the_durable_outcome_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One schema with the issue number added, not a parallel one (issue #87/#98)."""
-    from agent_ops.workflows import implement as implement_module
-
     _orca_on(monkeypatch)
     messages.record_spawn(tmp_path, 98, surface="orca", handle="term_abc")
     calls = _fake_run(monkeypatch, stdout="{}")
@@ -134,10 +130,8 @@ def test_send_outcome_payload_matches_the_durable_outcome_record(
     assert messages.send_outcome(tmp_path, 98, state="done", pr_url="https://x/pull/99") is True
 
     payload = json.loads(_value(calls[0], "--payload"))
-    implement_module._write_outcome(
-        tmp_path, 98, state="done", pr_url="https://x/pull/99", reason=None, log=lambda _: None
-    )
-    durable = json.loads(implement_module._outcome_path(tmp_path, 98).read_text())
+    runs.write_outcome(tmp_path, 98, state="done", pr_url="https://x/pull/99")
+    durable = json.loads(runs.outcome_path(tmp_path, 98).read_text())
     assert set(payload) == set(durable) | {"issue"}
     assert payload["issue"] == 98
     for field in ("state", "pr_url", "reason"):
