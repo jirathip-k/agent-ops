@@ -456,6 +456,33 @@ def test_discover_runs_outcome_record_beats_stale_feedback_file(
     assert result == [runs.Run(42, "done", "PR #76 — https://x/pull/76")]
 
 
+def test_classify_outcome_over_feedback_is_only_safe_because_a_halt_clears_it(
+    tmp_path: Path,
+) -> None:
+    """The precedence above is deliberate, and it is `implement._record_halt`'s
+    unlink that keeps it honest (PR #93 review).
+
+    Read this together with
+    `test_a_new_cycles_halt_supersedes_the_previous_cycles_outcome_record` in
+    tests/test_resume.py: `classify` has no way to tell a stale feedback file
+    from a fresh one, so the write side must guarantee the two never coexist
+    with the feedback being the newer of the pair. If that ever regresses,
+    this row silently reads `done` while the run is waiting on
+    `agent resume`.
+    """
+    outcome = runs.Outcome(state="done", pr_url="https://x/pull/76", reason=None)
+
+    shadowed = runs.classify(
+        42, worktree_path=None, live=None, has_feedback=True, pr=None, outcome=outcome
+    )
+    cleared = runs.classify(
+        42, worktree_path=None, live=None, has_feedback=True, pr=None, outcome=None
+    )
+
+    assert shadowed == runs.Run(42, "done", "PR #76 — https://x/pull/76")
+    assert cleared is not None and cleared.state == "halted"
+
+
 def test_discover_runs_prunes_outcome_record_past_ttl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

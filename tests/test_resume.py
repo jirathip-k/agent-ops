@@ -533,6 +533,126 @@ def test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_
     assert result == [runs.Run(7, "done", "PR #76 — https://x/pull/76")]
 
 
+def _existing_outcome_record(repo: Path, issue: int) -> Path:
+    """A `done` outcome record from an earlier, already-finished cycle."""
+    path = implement_module._outcome_path(repo, issue)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(
+        json.dumps({"state": "done", "pr_url": "https://x/pull/76", "reason": None}),
+    )
+    return path
+
+
+def test_a_new_cycles_halt_supersedes_the_previous_cycles_outcome_record(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #93 review: `classify` ranks `outcome` above `has_feedback`, so an
+    outcome record nothing ever cleared would shadow a later cycle's halt and
+    report `done  PR #76` — the user would never be told to `agent resume`."""
+    outcome_path = _existing_outcome_record(repo, 11)
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(github, "comment_on_issue", lambda number, body, cwd: None)
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+    )
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: SelfReview(False, "review found issues"),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 11, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False
+    assert not outcome_path.exists()
+    assert (repo / ".agent-runs" / "issue-11-feedback.md").read_text() == "review found issues"
+
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    result, _trustworthy = runs.discover_runs(repo)
+
+    (row,) = result
+    assert row.issue == 11
+    assert row.state == "halted"
+    assert "agent resume 11" in row.detail
+
+
+def test_record_halt_clears_the_outcome_record_even_when_the_unlink_fails(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clear is best-effort like the rest of `_record_halt`: an outcome
+    record that refuses to delete must still leave the halt recorded."""
+    _existing_outcome_record(repo, 13)
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    logged: list[str] = []
+    monkeypatch.setattr(github, "comment_on_issue", lambda number, body, cwd: None)
+
+    implement_module._record_halt(repo, 13, "review found issues", log=logged.append)
+
+    assert (repo / ".agent-runs" / "issue-13-feedback.md").read_text() == "review found issues"
+    assert any("could not clear stale outcome record" in line for line in logged)
+
+
+def test_starting_a_new_run_clears_the_previous_cycles_outcome_record(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate-failure exit writes neither a feedback file nor a record of its
+    own — it relies on the kept worktree reporting `stopped`. A stale `done`
+    from the previous cycle would mask that, so the record is dropped when the
+    cycle starts, not only when it halts."""
+    outcome_path = _existing_outcome_record(repo, 14)
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 3, RunResult(ok=False, text="nope"), []),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 14, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False
+    assert not outcome_path.exists()
+
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    result, _trustworthy = runs.discover_runs(repo)
+
+    (row,) = result
+    assert row.issue == 14
+    assert row.state == "stopped"
+
+
+def test_an_open_pr_bail_out_leaves_the_outcome_record_alone(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_implement` returning early because a PR is already open starts no
+    cycle, so it has no business discarding the previous one's record."""
+    outcome_path = _existing_outcome_record(repo, 15)
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(
+        github, "open_prs_for_issue", lambda number, cwd: [{"number": 76, "url": "https://x/76"}]
+    )
+
+    ok = run_implement(repo, 15, log=lambda _: None)
+
+    assert ok is False
+    assert outcome_path.exists()
+
+
 def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An implementer that only creates files must still be reviewed.
 

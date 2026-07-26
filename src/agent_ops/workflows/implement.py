@@ -92,6 +92,35 @@ def _write_outcome(
         log(f"could not write outcome record at {path}: {exc}")
 
 
+def _clear_outcome(
+    project_root: Path,
+    issue_number: int,
+    *,
+    log: Callable[[str], None],
+) -> None:
+    """Drop the previous cycle's outcome record; a new cycle supersedes it.
+
+    `runs.classify` ranks `outcome` above `has_feedback` so that a stale halt
+    file can't report `halted` forever after the run it belonged to finished
+    (issue #78). That precedence is only sound while the record describes the
+    *latest* cycle. Nothing else expires it inside the 7-day TTL, so a second
+    cycle on the same issue — reopened issue, follow-up work — would keep
+    reporting the first cycle's `done` no matter what the new one does: a halt
+    needing `agent resume` would be invisible, and a gate failure that keeps
+    the worktree would read as finished instead of `stopped`. Both are the
+    same silent-failure class as #78, pointed the worse way.
+
+    Best-effort like the rest of this module's status bookkeeping: a run must
+    never crash because a stale status file could not be removed. Failing to
+    delete it only leaves the pre-existing staleness in place.
+    """
+    path = _outcome_path(project_root, issue_number)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"could not clear stale outcome record at {path}: {exc}")
+
+
 def _existing_worktree(project_root: Path, config: ProjectConfig, issue_number: int) -> Path:
     """The task worktree a prior `agent dispatch`/`implement` left behind, or a clear error."""
     task_id, branch = task_identifiers(issue_number)
@@ -300,6 +329,10 @@ def run_implement(
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
     )
+    # A new cycle owns this issue's status from here on. Deliberately after the
+    # already-has-an-open-PR bail-out above, which starts nothing and so has no
+    # business discarding the previous cycle's record.
+    _clear_outcome(project_root, issue_number, log=log)
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: setting up", status=orca.STATUS_IN_PROGRESS)
 
@@ -523,6 +556,10 @@ def run_resume(
         config, "implementer", prompt, wt_path, runtime_override=runtime_name
     )
 
+    # Same as `run_implement`: whatever a previous cycle recorded, this one is
+    # now the current word on the issue. Placed after `_resolve_feedback`,
+    # which raises when there is nothing to resume from — no cycle starts then.
+    _clear_outcome(project_root, issue_number, log=log)
     card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: resuming")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
@@ -807,9 +844,17 @@ def _record_halt(
 ) -> None:
     """Stash the review findings for `agent resume` and mark the issue as halted, not unstarted.
 
-    Both the file and the comment are best-effort: a missing `gh` remote (test
-    or scratch repos) must not turn a halt into a crash.
+    Every step here is best-effort: a missing `gh` remote (test or scratch
+    repos), or an outcome record that won't delete, must not turn a halt into
+    a crash.
     """
+    # Before the feedback file, not after: `runs.classify` ranks `outcome`
+    # above `has_feedback`, so a record left over from an earlier cycle would
+    # shadow this halt and report `done` — the user would never be told to
+    # `agent resume`. `run_implement`/`run_resume` already clear it at the top
+    # of a cycle; this repeats it because a halt is the one exit where being
+    # shadowed is actively harmful, and the record is cheap to remove twice.
+    _clear_outcome(project_root, issue_number, log=log)
     path = _feedback_path(project_root, issue_number)
     try:
         path.parent.mkdir(exist_ok=True)
