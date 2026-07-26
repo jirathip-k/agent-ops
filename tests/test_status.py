@@ -1,4 +1,24 @@
-from agent_ops.status import LaneInfo, _cell, _short_runner, bucket_counts, detect_lanes
+import json
+import subprocess
+from collections.abc import Callable
+from typing import Any
+
+import pytest
+from typer.testing import CliRunner
+
+from agent_ops import registry, status, utils
+from agent_ops.cli import app
+from agent_ops.registry import RegistryConfig
+from agent_ops.status import (
+    LaneInfo,
+    _branch,
+    _cell,
+    _short_runner,
+    bucket_counts,
+    detect_lanes,
+)
+
+runner = CliRunner()
 
 
 def _issue(*labels: str) -> dict:
@@ -189,3 +209,191 @@ def test_cell_appends_star_for_cron_scheduled_lanes() -> None:
     assert _cell(_lane(cron="0 6 * * *")) == "gh*"
     assert _cell(_lane(runner="blacksmith-2vcpu-ubuntu-2404")) == "bs-2vcpu"
     assert _cell(_lane()) == "gh"
+
+
+# --- fleet_failures ----------------------------------------------------------
+
+
+Proc = subprocess.CompletedProcess[str]
+FakeRun = Callable[..., Proc]
+
+
+def _proc(stdout: str = "", *, returncode: int = 0, stderr: str = "") -> Proc:
+    return subprocess.CompletedProcess(["gh"], returncode, stdout=stdout, stderr=stderr)
+
+
+def _run(name: str, branch: str = "main", created: str = "2026-07-26T08:14:22Z") -> dict[str, Any]:
+    return {
+        "name": name,
+        "conclusion": "failure",
+        "headBranch": branch,
+        "createdAt": created,
+        "url": f"https://github.com/o/r/actions/runs/{len(name)}",
+    }
+
+
+def _canned(responses: dict[str, Proc]) -> FakeRun:
+    """A `run()` stand-in that answers per the `--repo` argument it is given."""
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        return responses[cmd[cmd.index("--repo") + 1]]
+
+    return fake
+
+
+def test_fleet_failures_groups_results_per_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned(
+            {
+                "o/a": _proc(json.dumps([_run("triage", "main"), _run("ci", "feat/x")])),
+                "o/b": _proc(json.dumps([_run("deploy", "staging")])),
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a", "o/b"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/a\033[0m — 2 recent failed run(s)" in text
+    assert "o/b\033[0m — 1 recent failed run(s)" in text
+    # Each failure is its own line under its repo's header, newest-first order kept.
+    a_section = text.split("o/a")[1].split("o/b")[0]
+    assert "triage" in a_section and "ci" in a_section and "deploy" not in a_section
+    assert "07-26 08:14" in a_section and "feat/x" in a_section
+    assert "2 repo(s) with failures · 0 clean" in text
+
+
+def test_fleet_failures_empty_registry_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreachable(cmd: list[str], **kwargs: Any) -> Proc:
+        raise AssertionError("no repos registered — gh must not be called")
+
+    monkeypatch.setattr(status, "run", unreachable)
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=[]), log=lines.append)
+
+    assert len(lines) == 1
+    assert "no repos registered" in lines[0]
+
+
+def test_fleet_failures_zero_failures_is_one_clean_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        status, "run", _canned({"o/a": _proc("[]"), "o/b": _proc("[]"), "o/c": _proc("[]")})
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a", "o/b", "o/c"]), log=lines.append)
+
+    # A clean fleet stays short: no per-repo section, one summary line.
+    assert lines == ["✓ 3 repo(s) clean — no recent failed runs"]
+
+
+def test_fleet_failures_skips_a_repo_that_404s_and_finishes_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned(
+            {
+                # Verbatim stderr from a real `gh run list` on a repo that
+                # does not exist / isn't visible to the operator's auth.
+                "o/gone": _proc(
+                    returncode=1,
+                    stderr=(
+                        "failed to get runs: HTTP 404: Not Found "
+                        "(https://api.github.com/repos/o/gone/actions/runs?status=failure)\n"
+                    ),
+                ),
+                "o/b": _proc(json.dumps([_run("triage")])),
+                "o/c": _proc("[]"),
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/gone", "o/b", "o/c"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/gone\033[0m — skipped: failed to get runs: HTTP 404: Not Found" in text
+    # The sweep continued past the unreadable repo.
+    assert "o/b\033[0m — 1 recent failed run(s)" in text
+    assert "1 repo(s) with failures · 1 clean · 1 skipped (o/gone)" in text
+
+
+def test_fleet_failures_bounds_each_repo_below_the_run_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        seen.append(kwargs.get("timeout"))
+        return _proc("[]")
+
+    monkeypatch.setattr(status, "run", fake)
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lambda line: None)
+
+    # A fan-out must not let one wedged repo hold the sweep for the fleet-wide default.
+    assert seen == [status.FAILURE_TIMEOUT_S]
+    assert status.FAILURE_TIMEOUT_S < utils.DEFAULT_TIMEOUT_S
+
+
+def test_fleet_failures_columns_stay_aligned_within_a_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _canned(
+            {
+                "o/a": _proc(
+                    json.dumps(
+                        [
+                            _run("CI", "main"),
+                            _run("Deploy Edge Functions", "fix/issue-31"),
+                        ]
+                    )
+                )
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_failures(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    urls = [line.index("https://") for line in lines if "https://" in line]
+    assert len(urls) == 2 and len(set(urls)) == 1  # URLs start in the same column
+
+
+def test_branch_elides_only_when_it_would_push_the_url_out() -> None:
+    assert _branch({"headBranch": "main"}) == "main"
+    short = "a" * status.BRANCH_WIDTH
+    assert _branch({"headBranch": short}) == short
+    long = "jirathip-k/ci-linux-swift-tests-and-more"
+    elided = _branch({"headBranch": long})
+    assert len(elided) == status.BRANCH_WIDTH
+    # Both ends survive: the lane prefix and the issue suffix are what identify it.
+    assert elided.startswith("jirathip-k/") and elided.endswith("more")
+
+
+# --- CLI wiring --------------------------------------------------------------
+
+
+def test_status_failures_flag_runs_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "load_registry", lambda: RegistryConfig(repos=[]))
+
+    result = runner.invoke(app, ["status", "--failures"])
+
+    assert result.exit_code == 0
+    assert "no repos registered" in result.output
+
+
+def test_status_rejects_failures_with_pipelines() -> None:
+    result = runner.invoke(app, ["status", "--failures", "--pipelines"])
+
+    assert result.exit_code == 1
+    assert "one at a time" in result.stderr

@@ -283,6 +283,50 @@ def test_make_plan_includes_issue_comments_in_rendered_prompt(
     assert "build on this instead of re-deriving" in captured["prompt"]
 
 
+def _stub_planner_run(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    def fake_role_request(
+        config: ProjectConfig,
+        role_name: str,
+        prompt: str,
+        cwd: Path,
+        *,
+        runtime_override: str | None = None,
+        extra_allowed_tools: tuple[str, ...] = (),
+    ) -> tuple[object, RunRequest]:
+        return object(), RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(implement_module, "role_request", fake_role_request)
+    monkeypatch.setattr(
+        implement_module,
+        "run_with_fallback",
+        lambda runtime, request, on_event=None: RunResult(ok=True, text=text),
+    )
+
+
+@pytest.mark.parametrize(
+    "escalation_text", ["ESCALATE: the fix needs a migration", "  escalate: lowercase"]
+)
+def test_make_plan_escalate_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escalation_text: str
+) -> None:
+    _stub_planner_run(monkeypatch, escalation_text)
+
+    with pytest.raises(RuntimeError, match="Planner escalated"):
+        make_plan(ProjectConfig(), _fake_issue(29, tmp_path), tmp_path)
+
+
+def test_make_plan_returns_a_plan_that_opens_by_ruling_escalation_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same #128 bug as the spec lane, but here the work is a finished plan."""
+    text = "ESCALATE is not needed — no danger zones are touched.\n\n## Plan\n\n1. Edit foo.py"
+    _stub_planner_run(monkeypatch, text)
+
+    _request, result = make_plan(ProjectConfig(), _fake_issue(29, tmp_path), tmp_path)
+
+    assert result.text == text
+
+
 def test_card_reporter_sticks_to_the_fallback_once_it_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 from agent_ops import github, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import artifact_footer, run_with_fallback
-from agent_ops.prompts import render_task
+from agent_ops.prompts import escalated, render_task
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import _labels, role_request
 
@@ -68,7 +68,7 @@ def run_spec(
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
     if not result.ok:
         raise RuntimeError(f"Spec run failed: {result.text}")
-    if result.text.lstrip().upper().startswith("ESCALATE"):
+    if escalated(result.text):
         raise RuntimeError(f"Spec agent escalated:\n{result.text}")
 
     if post:

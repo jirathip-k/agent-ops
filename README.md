@@ -62,16 +62,20 @@ agent review --all             # review every open PR targeting base_branch, con
 agent worktree list            # see in-flight task worktrees
 agent runs                     # per-issue state: running / halted / stopped / done
 agent runs --wait              # block until every tracked run finishes, printing transitions
+agent status --failures        # recent failed workflow runs across every registered repo
 agent status --sync-orca       # mirror active agent lanes onto Orca cards (read-only)
 agent runtimes                 # claude_code / codex availability
 ```
 
 Stages fan out across roles via model tiers: **planner** and **reviewer**
 run the `smart` tier (currently `fable`) in read-only mode; **implementer**
-runs the `fast` tier (currently `sonnet`) with write access. Tiers are
-defined once in `config/defaults.yaml` (`model_tiers:`) using floating
-vendor aliases, so they track new model releases without config changes;
+runs the `fast` tier (currently `sonnet`) with write access. A tier names a
+job, not a vendor, and each runtime maps the tiers to its own models under
+`model_tiers:` in `config/defaults.yaml`, so swapping the fleet is one edit;
 override per project or per role under `agents:` in `.agent/config.yaml`.
+A tier the effective runtime does not define is a named error rather than a
+foreign model name handed to a CLI — `agent doctor` lists what each runtime
+resolves to and flags the gaps.
 A planner `ESCALATE:` stops the workflow before anything is changed. Agent
 activity streams live (tool calls + text) by default; set
 `runtime.stream: false` for quiet runs.

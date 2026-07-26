@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_ops.config import ROLE_NAMES, ModelTierError, load_project_config, role_reports
+from agent_ops.config import (
+    ROLE_NAMES,
+    ModelTierError,
+    ladder_warnings,
+    load_project_config,
+    role_reports,
+    runtime_reports,
+)
 
 
 def _write_config(tmp_path: Path, body: str) -> None:
@@ -187,6 +194,105 @@ def test_role_reports_cover_every_role_and_surface_errors(tmp_path: Path) -> Non
     assert reports["implementer"].runtime == "codex"
     assert reports["implementer"].error is not None
     assert "fast" in reports["implementer"].error
+
+
+def test_model_tier_error_carries_the_runtime_tier_and_role(tmp_path: Path) -> None:
+    """Structured fields, so a diagnostic can group gaps instead of re-parsing prose."""
+    config = load_project_config(tmp_path)
+
+    with pytest.raises(ModelTierError) as exc:
+        config.resolve_role("reviewer", runtime_override="codex")
+
+    assert (exc.value.runtime, exc.value.tier, exc.value.role) == ("codex", "smart", "reviewer")
+
+
+def test_role_reports_can_answer_for_another_runtime(tmp_path: Path) -> None:
+    """The same resolution `--runtime <name>` would do, without running anything."""
+    _write_config(tmp_path, "model_tiers:\n  codex:\n    smart: some-codex-model\n")
+    config = load_project_config(tmp_path)
+
+    reports = {r.name: r for r in role_reports(config, runtime="codex")}
+
+    assert reports["reviewer"].runtime == "codex"
+    assert reports["reviewer"].model == "some-codex-model"
+    # `fast` is undefined for codex here, so the implementer is a named gap
+    assert reports["implementer"].missing_tier == "fast"
+
+
+def test_runtime_reports_group_missing_tiers_by_tier(tmp_path: Path) -> None:
+    """The shipped defaults define claude_code only, so codex is entirely absent."""
+    config = load_project_config(tmp_path)
+
+    reports = {r.runtime: r for r in runtime_reports(config, ["claude_code", "codex"])}
+
+    assert reports["claude_code"].missing_tiers() == {}
+    assert reports["codex"].missing_tiers() == {
+        "smart": ["planner", "reviewer"],
+        "fast": ["implementer"],
+    }
+
+
+def test_runtime_reports_resolve_models_once_the_table_exists(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "model_tiers:\n  codex:\n    smart: some-codex-model\n    fast: some-small-codex-model\n",
+    )
+    config = load_project_config(tmp_path)
+
+    (report,) = runtime_reports(config, ["codex"])
+
+    assert report.missing_tiers() == {}
+    assert [r.model for r in report.roles] == [
+        "some-codex-model",  # planner
+        "some-small-codex-model",  # implementer
+        "some-codex-model",  # reviewer
+    ]
+
+
+def test_runtime_reports_ignore_a_role_level_runtime(tmp_path: Path) -> None:
+    """`--runtime` beats a role's own `runtime:`, so the audit must too."""
+    _write_config(tmp_path, "agents:\n  implementer:\n    runtime: codex\n")
+    config = load_project_config(tmp_path)
+
+    (report,) = runtime_reports(config, ["claude_code"])
+
+    assert [r.runtime for r in report.roles] == ["claude_code"] * 3
+    assert report.missing_tiers() == {}
+
+
+def test_ladder_warnings_flag_a_tier_that_is_not_on_its_own_ladder(tmp_path: Path) -> None:
+    """The step-UP hazard: an untrimmed ladder hands back a model nobody chose."""
+    _write_config(
+        tmp_path,
+        "model_tiers:\n  claude_code:\n    smart: haiku\n"
+        "model_fallbacks:\n  claude_code:\n    smart: [fable, opus]\n",
+    )
+
+    (warning,) = [w for w in ladder_warnings(load_project_config(tmp_path)) if "smart" in w]
+
+    assert "'haiku'" in warning
+    assert "step UP into 'fable'" in warning
+
+
+def test_ladder_warnings_flag_a_ladder_for_a_tier_the_runtime_does_not_define(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path, "model_fallbacks:\n  codex:\n    smart: [a-model, another-model]\n")
+
+    warnings = ladder_warnings(load_project_config(tmp_path))
+
+    assert any("model_fallbacks.codex.smart" in w and "nothing can reach it" in w for w in warnings)
+
+
+def test_ladder_warnings_stay_quiet_for_an_emptied_ladder(tmp_path: Path) -> None:
+    """Clearing a ladder is how a project opts out — not a misconfiguration."""
+    _write_config(tmp_path, "model_fallbacks:\n  claude_code:\n    smart: []\n    fast: []\n")
+
+    assert ladder_warnings(load_project_config(tmp_path)) == []
+
+
+def test_shipped_defaults_have_no_ladder_warnings(tmp_path: Path) -> None:
+    assert ladder_warnings(load_project_config(tmp_path)) == []
 
 
 def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:

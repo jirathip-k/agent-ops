@@ -8,7 +8,14 @@ from typing import Annotated
 import typer
 
 from agent_ops import __version__, github, messages, registry, stubs, surfaces, worktree
-from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
+from agent_ops.config import (
+    PROJECT_CONFIG_REL,
+    ProjectConfig,
+    ladder_warnings,
+    load_project_config,
+    role_reports,
+    runtime_reports,
+)
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
@@ -775,14 +782,36 @@ def init(project: ProjectOpt = Path(".")) -> None:
 def doctor(project: ProjectOpt = Path(".")) -> None:
     """Check that required CLIs are installed and the project config is valid."""
     ok = True
-    for tool, required in [("git", True), ("gh", True), ("claude", True), ("codex", False)]:
-        found = shutil.which(tool) is not None
-        mark = "✓" if found else ("✗" if required else "-")
-        typer.echo(f"{mark} {tool}{'' if found else ' (missing)' if required else ' (optional)'}")
-        ok = ok and (found or not required)
-
+    config: ProjectConfig | None = None
+    config_error: str | None = None
     try:
         config = load_project_config(project.resolve())
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
+        config_error = str(exc)
+
+    for tool in ("git", "gh"):
+        found = shutil.which(tool) is not None
+        typer.echo(f"{'✓' if found else '✗'} {tool}{'' if found else ' (missing)'}")
+        ok = ok and found
+
+    # Runtime CLIs answer for themselves through the registry, rather than this
+    # command carrying a list of vendor binary names: a new adapter shows up
+    # here without `doctor` learning anything about it. Only the configured
+    # runtime is required — an install that never reaches for `--runtime codex`
+    # should not be told it is unhealthy for not having Codex.
+    for name in runtime_names():
+        if get_runtime(name).available():
+            typer.echo(f"✓ {name}")
+        elif config is not None and name == config.runtime.name:
+            typer.echo(f"✗ {name} (missing; it is this project's runtime.name)")
+            ok = False
+        else:
+            typer.echo(f"- {name} (optional)")
+
+    if config is None:
+        _err(f"✗ config error: {config_error}")
+        ok = False
+    else:
         typer.echo(
             f"✓ config valid (runtime: {config.runtime.name}, gates: "
             f"{', '.join(config.loop.gates)})"
@@ -790,19 +819,9 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         unset = [g for g in config.loop.gates if not getattr(config.commands, g, None)]
         if unset:
             typer.echo(f"! gates with no command configured (will be skipped): {', '.join(unset)}")
-        for report in role_reports(config):
-            if report.error:
-                _err(f"✗ {report.name}: {report.error}")
-                ok = False
-                continue
-            ladder = " → ".join(report.fallbacks) if report.fallbacks else "none configured"
-            typer.echo(
-                f"  {report.name}: {report.runtime} / "
-                f"{report.model or 'runtime default'} (fallbacks: {ladder})"
-            )
-    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
-        _err(f"✗ config error: {exc}")
-        ok = False
+        ok = _report_roles(config) and ok
+        for warning in ladder_warnings(config):
+            typer.echo(f"! {warning}")
 
     missing = _missing_gitignore_markers(project.resolve())
     if missing:
@@ -814,6 +833,53 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
+
+
+def _report_roles(config: ProjectConfig) -> bool:
+    """Print what each role resolves to, per runtime. False if a run cannot start.
+
+    Two sections, because the two questions have different stakes. The runtimes
+    the project actually uses are checked first, and a role that cannot resolve
+    a model there is a failure: that run will not start.
+
+    Every other registered runtime is then reported as a *warning*. A tier the
+    effective runtime does not define refuses at resolution rather than handing
+    a foreign model name to a CLI (#39) — correct, but only discoverable today
+    by running with the override, and people reach for `--runtime` precisely
+    when the usual one has stopped working. Not having a table for a runtime
+    you never use is not a fault, so it never fails the check.
+    """
+    ok = True
+    reports = role_reports(config)
+    for report in reports:
+        if report.error:
+            _err(f"✗ {report.name}: {report.error}")
+            ok = False
+            continue
+        ladder = " → ".join(report.fallbacks) if report.fallbacks else "none configured"
+        typer.echo(
+            f"  {report.name}: {report.runtime} / "
+            f"{report.model or 'runtime default'} (fallbacks: {ladder})"
+        )
+
+    in_use = {report.runtime for report in reports}
+    others = [name for name in runtime_names() if name not in in_use]
+    for other in runtime_reports(config, others):
+        gaps = other.missing_tiers()
+        if gaps:
+            detail = "; ".join(
+                f"no {tier!r} for {', '.join(roles)}" for tier, roles in sorted(gaps.items())
+            )
+            typer.echo(
+                f"! --runtime {other.runtime} would be refused — "
+                f"model_tiers.{other.runtime} has {detail}"
+            )
+            continue
+        resolved = ", ".join(
+            f"{role.name} {role.model or 'runtime default'}" for role in other.roles
+        )
+        typer.echo(f"  --runtime {other.runtime}: {resolved}")
+    return ok
 
 
 @app.command()
@@ -862,6 +928,13 @@ def status(
             help="Show per-repo CI lane coverage (triage/groom/...) instead of PRs and issues",
         ),
     ] = False,
+    failures: Annotated[
+        bool,
+        typer.Option(
+            "--failures",
+            help="Show recent failed workflow runs for every registered repo",
+        ),
+    ] = False,
     sync_orca: Annotated[
         bool,
         typer.Option(
@@ -871,15 +944,26 @@ def status(
     ] = False,
 ) -> None:
     """Fleet overview: open PRs and issue buckets for every registered repo."""
-    from agent_ops.status import fleet_status, pipeline_coverage
+    from agent_ops.status import fleet_failures, fleet_status, pipeline_coverage
 
-    if pipelines and sync_orca:
-        _err("--pipelines and --sync-orca are separate views; pass one at a time")
+    chosen = [
+        flag
+        for flag, on in (
+            ("--pipelines", pipelines),
+            ("--failures", failures),
+            ("--sync-orca", sync_orca),
+        )
+        if on
+    ]
+    if len(chosen) > 1:
+        _err(f"{' and '.join(chosen)} are separate views; pass one at a time")
         raise typer.Exit(1)
     try:
         config = registry.load_registry()
         if pipelines:
             pipeline_coverage(config)
+        elif failures:
+            fleet_failures(config)
         elif sync_orca:
             from agent_ops.orca_sync import sync_orca as run_sync
 

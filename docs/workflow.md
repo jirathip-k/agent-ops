@@ -337,7 +337,12 @@ This repo is public; the names of the repos it manages are not. The split:
   own stub workflow and passes its settings as workflow inputs, so managed
   repo names only ever appear inside the managed repos themselves.
   `agent status --pipelines` shows which reusable CI lanes each registered
-  repo has wired up, read live from its workflow files via the GitHub API.
+  repo has wired up, read live from its workflow files via the GitHub API,
+  and `agent status --failures` sweeps those repos for recent failed runs.
+  Both read cross-repo under your local `gh` auth, which is why they are
+  local commands and not a scheduled Action: an Action running here has
+  neither the registry nor a credential that can read another repo's runs
+  (issue #95).
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 
@@ -379,15 +384,37 @@ Rules worth knowing:
   `model_tiers.claude_code.smart` at `haiku` while inheriting the default
   `smart: [fable, opus, sonnet]` keeps the ladder whole — so an availability
   failure steps *up* into models it never chose and never budgeted for. Set
-  both keys together, or clear `model_fallbacks` for that tier.
-- `agent doctor` prints the resolved model and ladder for every role.
+  both keys together, or clear `model_fallbacks` for that tier — `agent doctor`
+  warns when a tier's model is not on its own ladder.
+- **Every runtime needs its own table.** A tier names a job — `smart` for
+  planning and review, `fast` for implementation — and each runtime maps those
+  onto its own models. A tier the *effective* runtime does not define is a
+  named error at resolution, never a foreign model name handed to a CLI; that
+  is what `--runtime codex` used to do (#39).
+- `agent doctor` prints the resolved model and ladder for every role, and then,
+  for each runtime the project is *not* using, either what that runtime would
+  resolve to or which tiers it is missing:
 
-### Refreshing the ladder
+  ```
+    planner: claude_code / fable (fallbacks: opus → sonnet)
+    implementer: claude_code / sonnet (fallbacks: haiku)
+    reviewer: claude_code / fable (fallbacks: opus → sonnet)
+  ! --runtime codex would be refused — model_tiers.codex has no 'fast' for
+    implementer; no 'smart' for planner, reviewer
+  ```
 
-The tiers self-update only in the sense that `fable`/`sonnet` are floating
-aliases — that says nothing about which model is a sensible *fallback*, and it
-rots silently when a model is retired. Check the ladder against the Models API
-rather than from memory:
+  It is a warning, not a failure: a runtime you never reach for needs no table.
+  But `--runtime` gets reached for when the usual runtime has already stopped
+  working, which is a bad moment to discover the gap.
+
+### Refreshing a table or a ladder
+
+Whether a tier value tracks new releases on its own is a per-provider property
+— check it for the provider you are configuring rather than assuming it. For
+`claude_code` it is half true: `fable`/`sonnet` are floating aliases, but that
+says nothing about which model is a sensible *fallback*, and it rots silently
+when a model is retired. Check the ladder against the Models API rather than
+from memory:
 
 ```sh
 # every model this account can actually use, newest first

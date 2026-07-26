@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from agent_ops.registry import RegistryConfig
+from agent_ops.registry import EXAMPLE_REGISTRY_FILE, REGISTRY_FILE, RegistryConfig
 from agent_ops.utils import CommandError, run
 
 BUCKETS = ("agent-ready", "needs-human", "backlog")
@@ -173,6 +173,124 @@ def pipeline_coverage(config: RegistryConfig, log: Callable[[str], None] = print
         note = "" if lanes else "  ⚠ no agent-ops lanes wired"
         log(f"\033[1m{repo.ljust(name_width)}\033[0m  {row}{note}")
     log("\n* = cron-scheduled; gh = pipeline default ubuntu-latest")
+
+
+# Failed runs shown per repo. Enough to see whether a repo is failing
+# repeatedly or once, short enough that a bad fleet still fits one screen.
+FAILURE_LIMIT = 5
+
+# Per-repo bound for the failure sweep. `gh run list` is a single API
+# round-trip, so a repo still silent after this long is wedged (a credential
+# prompt, a hung proxy), not slow — and the sweep is a fan-out, where the
+# fleet-wide default would let one such repo hold every remaining repo behind
+# it for two full minutes. Tight enough to keep the sweep interactive,
+# generous enough for a bad network day.
+FAILURE_TIMEOUT_S = 30.0
+
+
+def _failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
+    """The `limit` most recent failed workflow runs for `repo`, newest first.
+
+    Raises `CommandError` for anything that makes the repo unreadable — 404,
+    no access, renamed, wedged `gh`. The sweep turns that into a skip: one
+    unreachable repo must not take the rest of the fleet down with it.
+    """
+    proc = run(
+        [
+            "gh",
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--status",
+            "failure",
+            "--limit",
+            str(limit),
+            "--json",
+            "name,conclusion,headBranch,createdAt,url",
+        ],
+        check=False,
+        timeout=FAILURE_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        # `gh` puts the useful part last ("could not resolve to a Repository",
+        # "HTTP 404"); the lines above it are boilerplate nobody scanning a
+        # fleet sweep needs.
+        detail = proc.stderr.strip().splitlines()
+        raise CommandError(detail[-1] if detail else f"gh run list exited {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def _when(created_at: str) -> str:
+    """`2026-07-26T08:14:22Z` → `07-26 08:14`; anything else passes through."""
+    match = re.match(r"\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})", created_at)
+    return f"{match.group(1)} {match.group(2)}" if match else created_at
+
+
+# Longest branch name shown before eliding. Long enough for the lane branches
+# this platform creates (`fix/issue-123`), short enough that one outlier
+# branch can't push a whole repo's URLs off the right edge.
+BRANCH_WIDTH = 24
+
+
+def _branch(run_info: dict[str, Any]) -> str:
+    """Head branch, elided in the middle — the prefix says which lane made it,
+    the suffix says which issue, and the middle is the part nobody scans."""
+    branch = str(run_info.get("headBranch", "?"))
+    if len(branch) <= BRANCH_WIDTH:
+        return branch
+    keep = BRANCH_WIDTH - 1
+    return f"{branch[: keep // 2]}…{branch[-(keep - keep // 2) :]}"
+
+
+def fleet_failures(
+    config: RegistryConfig,
+    log: Callable[[str], None] = print,
+    limit: int = FAILURE_LIMIT,
+) -> None:
+    """Recent failed workflow runs across every registered repo.
+
+    Runs under the operator's local `gh` auth, like `fleet_status` and
+    `pipeline_coverage` — there is no cross-repo credential in CI (issue #95).
+    Only repos with failures get a section, so a clean fleet is one line;
+    repos that can't be read are named and skipped, never fatal.
+    """
+    if not config.repos:
+        log(f"no repos registered — copy {EXAMPLE_REGISTRY_FILE.name} to {REGISTRY_FILE}")
+        return
+
+    failing = clean = 0
+    skipped: list[str] = []
+    for repo in config.repos:
+        try:
+            runs = _failed_runs(repo, limit)
+        except CommandError as exc:
+            skipped.append(repo)
+            log(f"\033[1m{repo}\033[0m — skipped: {exc}")
+            continue
+        if not runs:
+            clean += 1
+            continue
+        failing += 1
+        log(f"\n\033[1m{repo}\033[0m — {len(runs)} recent failed run(s)")
+        # Columns are sized per repo, not per fleet: one repo's long workflow
+        # names would otherwise indent every other repo's URLs off the screen.
+        rows = [
+            (str(r.get("name", "?")), _when(str(r.get("createdAt", ""))), _branch(r), r.get("url"))
+            for r in runs
+        ]
+        name_w = max(len(name) for name, _, _, _ in rows)
+        branch_w = max(len(branch) for _, _, branch, _ in rows)
+        for name, when, branch, url in rows:
+            log(f"  {name.ljust(name_w)}  {when}  {branch.ljust(branch_w)}  {url or ''}")
+
+    if failing:
+        parts = [f"{failing} repo(s) with failures", f"{clean} clean"]
+    else:
+        parts = [f"✓ {clean} repo(s) clean — no recent failed runs"]
+    if skipped:
+        parts.append(f"{len(skipped)} skipped ({', '.join(skipped)})")
+    log(("\n" if failing else "") + " · ".join(parts))
 
 
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
