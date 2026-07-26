@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from agent_ops import stubs
-from agent_ops.stubs import TriageDrift, triage_caller_drift
+from agent_ops.stubs import CallerDrift, caller_drift, known_lanes, lane_caller_drift
 
 IN_SYNC_CALLER = """
 name: Hourly Agent Triage
@@ -31,7 +31,31 @@ jobs:
 """
 
 
-def _fields(drift: TriageDrift | None) -> tuple[list[str], list[str]]:
+IN_SYNC_GROOM_CALLER = """
+name: Daily Agent Groom
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch: {}
+jobs:
+  groom:
+    permissions:
+      contents: read
+      issues: write
+    uses: acme/agent-ops/.github/workflows/groom-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+"""
+
+
+def _triage_drift(root: Path) -> CallerDrift | None:
+    """The triage lane on its own — the case most of these tests exercise."""
+    return lane_caller_drift(root, "triage")
+
+
+def _fields(drift: CallerDrift | None) -> tuple[list[str], list[str]]:
     """secrets/permissions of a drift that parsed cleanly — path varies per test."""
     assert drift is not None
     assert drift.error is None
@@ -44,9 +68,18 @@ def _write_caller(root: Path, text: str) -> None:
     (workflows / "triage.yml").write_text(text)
 
 
+def _fake_stubs(root: Path, **lanes: str) -> Path:
+    """A stand-in stubs/ directory: one `managed-repo-<lane>.yml` per keyword."""
+    stubs_dir = root / "stubs"
+    stubs_dir.mkdir(exist_ok=True)
+    for lane, text in lanes.items():
+        (stubs_dir / f"managed-repo-{lane}.yml").write_text(text)
+    return stubs_dir
+
+
 def test_in_sync_caller_has_no_drift(tmp_path: Path) -> None:
     _write_caller(tmp_path, IN_SYNC_CALLER)
-    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
+    assert _fields(_triage_drift(tmp_path)) == ([], [])
 
 
 def test_missing_secret_keys_are_reported(tmp_path: Path) -> None:
@@ -57,7 +90,7 @@ def test_missing_secret_keys_are_reported(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert _fields(drift) == (["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"], [])
 
@@ -66,7 +99,7 @@ def test_missing_permission_key_is_reported(tmp_path: Path) -> None:
     caller = IN_SYNC_CALLER.replace("      actions: read\n", "")
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert _fields(drift) == ([], ["actions"])
 
@@ -101,18 +134,20 @@ jobs:
 """
     _write_caller(tmp_path, caller)
 
-    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
+    assert _fields(_triage_drift(tmp_path)) == ([], [])
 
 
 def test_no_triage_yml_returns_none(tmp_path: Path) -> None:
-    assert triage_caller_drift(tmp_path) is None
+    assert _triage_drift(tmp_path) is None
 
 
 def test_missing_stub_reports_error_not_traceback(tmp_path: Path, monkeypatch) -> None:
     _write_caller(tmp_path, IN_SYNC_CALLER)
-    monkeypatch.setattr(stubs, "TRIAGE_STUB", tmp_path / "nonexistent-stub.yml")
+    empty = tmp_path / "no-stubs"
+    empty.mkdir()
+    monkeypatch.setattr(stubs, "STUBS_DIR", empty)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.error is not None
@@ -126,11 +161,9 @@ def test_missing_stub_reports_error_not_traceback(tmp_path: Path, monkeypatch) -
 
 def test_unparseable_stub_reports_error_not_traceback(tmp_path: Path, monkeypatch) -> None:
     _write_caller(tmp_path, IN_SYNC_CALLER)
-    bad_stub = tmp_path / "bad-stub.yml"
-    bad_stub.write_text("jobs: [this is not a mapping")
-    monkeypatch.setattr(stubs, "TRIAGE_STUB", bad_stub)
+    monkeypatch.setattr(stubs, "STUBS_DIR", _fake_stubs(tmp_path, triage="jobs: [not a mapping"))
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.error is not None
@@ -147,7 +180,7 @@ def test_secrets_inherit_satisfies_every_key(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
+    assert _fields(_triage_drift(tmp_path)) == ([], [])
 
 
 def test_read_all_permissions_does_not_pass_as_satisfied(tmp_path: Path) -> None:
@@ -169,7 +202,7 @@ def test_read_all_permissions_does_not_pass_as_satisfied(tmp_path: Path) -> None
     )
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.error is None
@@ -191,7 +224,7 @@ def test_write_all_permissions_satisfies_every_key(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
+    assert _fields(_triage_drift(tmp_path)) == ([], [])
 
 
 def test_unrelated_triage_workflow_is_not_a_caller(tmp_path: Path) -> None:
@@ -211,7 +244,7 @@ jobs:
 """,
     )
 
-    assert triage_caller_drift(tmp_path) is None
+    assert _triage_drift(tmp_path) is None
 
 
 def test_a_second_job_cannot_mask_the_caller_job_gap(tmp_path: Path) -> None:
@@ -232,7 +265,7 @@ def test_a_second_job_cannot_mask_the_caller_job_gap(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
@@ -267,7 +300,7 @@ jobs:
 """
     _write_caller(tmp_path, caller)
 
-    assert _fields(triage_caller_drift(tmp_path)) == ([], [])
+    assert _fields(_triage_drift(tmp_path)) == ([], [])
 
 
 def test_job_permissions_replace_workflow_permissions(tmp_path: Path) -> None:
@@ -296,7 +329,7 @@ jobs:
 """
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert "issues" in drift.permissions
@@ -324,7 +357,7 @@ def test_two_caller_jobs_do_not_cover_for_each_other(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.secrets == ["AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
@@ -346,7 +379,7 @@ def test_caller_is_found_under_any_filename(tmp_path: Path) -> None:
     caller = IN_SYNC_CALLER.replace("      AGENT_APP_ID: ${{ secrets.AGENT_APP_ID }}\n", "")
     _write_named(tmp_path, "agent-triage.yaml", caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.secrets == ["AGENT_APP_ID"]
@@ -364,7 +397,7 @@ def test_non_dict_section_is_not_treated_as_satisfied(tmp_path: Path) -> None:
     )
     _write_caller(tmp_path, caller)
 
-    drift = triage_caller_drift(tmp_path)
+    drift = _triage_drift(tmp_path)
 
     assert drift is not None
     assert drift.secrets == ["CLAUDE_CODE_OAUTH_TOKEN", "AGENT_APP_ID", "AGENT_APP_PRIVATE_KEY"]
@@ -387,4 +420,101 @@ jobs:
 """,
     )
 
-    assert triage_caller_drift(tmp_path) is None
+    assert _triage_drift(tmp_path) is None
+
+
+def test_in_sync_groom_caller_has_no_drift(tmp_path: Path) -> None:
+    _write_named(tmp_path, "groom.yml", IN_SYNC_GROOM_CALLER)
+
+    drift = lane_caller_drift(tmp_path, "groom")
+
+    assert _fields(drift) == ([], [])
+
+
+def test_groom_caller_missing_a_secret_is_reported(tmp_path: Path) -> None:
+    """The lane #90 was filed for: a non-triage caller short a secret used to pass clean."""
+    caller = IN_SYNC_GROOM_CALLER.replace(
+        "    secrets:\n      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n",
+        "",
+    )
+    _write_named(tmp_path, "groom.yml", caller)
+
+    drift = lane_caller_drift(tmp_path, "groom")
+
+    assert drift is not None
+    assert drift.lane == "groom"
+    assert drift.secrets == ["CLAUDE_CODE_OAUTH_TOKEN"]
+    assert drift.path == Path(".github/workflows/groom.yml")
+    assert drift.stub.name == "managed-repo-groom.yml"
+
+
+def test_groom_caller_missing_a_permission_is_reported(tmp_path: Path) -> None:
+    caller = IN_SYNC_GROOM_CALLER.replace("      issues: write\n", "")
+    _write_named(tmp_path, "groom.yml", caller)
+
+    drift = lane_caller_drift(tmp_path, "groom")
+
+    assert drift is not None
+    assert drift.permissions == ["issues"]
+
+
+def test_a_lane_is_compared_only_against_its_own_callers(tmp_path: Path) -> None:
+    """A groom caller must not be read as a (drifting) triage caller, or vice versa."""
+    _write_named(tmp_path, "groom.yml", IN_SYNC_GROOM_CALLER)
+
+    assert _triage_drift(tmp_path) is None
+
+
+def test_caller_drift_covers_every_wired_lane(tmp_path: Path) -> None:
+    _write_caller(tmp_path, IN_SYNC_CALLER)
+    _write_named(
+        tmp_path,
+        "groom.yml",
+        IN_SYNC_GROOM_CALLER.replace("      issues: write\n", ""),
+    )
+
+    results = caller_drift(tmp_path)
+
+    assert [(d.lane, d.permissions) for d in results] == [("groom", ["issues"]), ("triage", [])]
+
+
+def test_caller_drift_skips_lanes_the_repo_has_not_wired(tmp_path: Path) -> None:
+    """Absent is not drift — a repo must not be told to wire up lanes it skipped."""
+    _write_caller(tmp_path, IN_SYNC_CALLER)
+
+    assert [d.lane for d in caller_drift(tmp_path)] == ["triage"]
+
+
+def test_caller_drift_is_empty_for_a_repo_with_no_lanes(tmp_path: Path) -> None:
+    assert caller_drift(tmp_path) == []
+
+
+def test_lanes_are_discovered_from_the_shipped_stubs() -> None:
+    """The six stubs in stubs/ are the lane list — no second copy to keep in step."""
+    assert set(known_lanes()) == {"triage", "groom", "spec", "plan", "scout", "promote"}
+
+
+def test_a_new_stub_extends_coverage_without_a_code_change(tmp_path: Path, monkeypatch) -> None:
+    """AC: a seventh stub + pipeline pair is picked up by discovery alone."""
+    audit_stub = IN_SYNC_GROOM_CALLER.replace("groom-pipeline", "audit-pipeline")
+    monkeypatch.setattr(stubs, "STUBS_DIR", _fake_stubs(tmp_path, audit=audit_stub))
+    _write_named(
+        tmp_path,
+        "audit.yml",
+        audit_stub.replace("      issues: write\n", ""),
+    )
+
+    assert known_lanes() == ["audit"]
+    results = caller_drift(tmp_path)
+    assert [(d.lane, d.permissions) for d in results] == [("audit", ["issues"])]
+
+
+def test_yaml_stubs_are_discovered_too(tmp_path: Path, monkeypatch) -> None:
+    stubs_dir = _fake_stubs(tmp_path)
+    (stubs_dir / "managed-repo-audit.yaml").write_text(
+        IN_SYNC_GROOM_CALLER.replace("groom-pipeline", "audit-pipeline")
+    )
+    monkeypatch.setattr(stubs, "STUBS_DIR", stubs_dir)
+
+    assert known_lanes() == ["audit"]
+    assert stubs.stub_for("audit").name == "managed-repo-audit.yaml"
