@@ -15,7 +15,7 @@ from agent_ops.fallback import (
     model_note,
     run_with_fallback,
 )
-from agent_ops.prompts import render_task
+from agent_ops.prompts import render_task, verdict_of
 from agent_ops.runtimes.base import FailureKind
 from agent_ops.utils import CommandError, flush_print
 from agent_ops.workflows.implement import role_request
@@ -23,21 +23,6 @@ from agent_ops.workflows.implement import role_request
 DEFAULT_JOBS = 3
 
 Verdict = str  # "approve" | "request_changes" | "unknown" | "failed" | "skipped"
-
-_VERDICT_RE = re.compile(r"^\s*[`*_]*VERDICT:\s*(APPROVE|REQUEST CHANGES)", re.IGNORECASE)
-
-
-def verdict_of(text: str) -> Verdict:
-    """Read the `VERDICT: ...` line the review prompt requires (see prompts/tasks/review.md).
-
-    Tolerates leading markdown/backtick decoration; an unrecognised or absent
-    verdict is `"unknown"`, not a failure — the run still produced a review.
-    """
-    for line in text.splitlines():
-        match = _VERDICT_RE.match(line)
-        if match:
-            return "approve" if match.group(1).upper() == "APPROVE" else "request_changes"
-    return "unknown"
 
 
 @dataclass(frozen=True)
