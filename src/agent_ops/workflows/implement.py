@@ -14,7 +14,7 @@ from agent_ops.loop import LoopOutcome, run_task_loop
 from agent_ops.prompts import render_task
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
-from agent_ops.utils import CommandError, flush_print, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, flush_print, run
 
 NO_PLAN_TEXT = "(no planning stage — analyze the root cause yourself before editing)"
 
@@ -340,7 +340,13 @@ def run_implement(
     if config.commands.setup:
         log(f"setup: {config.commands.setup}")
         try:
-            run(["sh", "-c", config.commands.setup], cwd=wt_path)
+            # Project-configured shell like a gate (`npm install` and friends),
+            # so it shares the gate bound rather than `run`'s short default.
+            run(
+                ["sh", "-c", config.commands.setup],
+                cwd=wt_path,
+                timeout=config.loop.gate_timeout_seconds,
+            )
         except CommandError as exc:
             log(f"setup failed: {exc}")
             _abort_cleanly(project_root, config, task_id, log)
@@ -458,7 +464,7 @@ def _finish_run(
 
     pr_url: str | None = None
     if open_pr:
-        run(["git", "push", "-u", "origin", branch], cwd=wt_path)
+        run(["git", "push", "-u", "origin", branch], cwd=wt_path, timeout=SLOW_GIT_TIMEOUT_S)
         used_model = (outcome.last_result.model if outcome.last_result else None) or request.model
         body = (
             f"Closes #{issue_number}.\n\n"

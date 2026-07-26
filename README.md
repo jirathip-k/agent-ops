@@ -83,6 +83,12 @@ The implement loop retries up to `loop.max_attempts` times; each retry is a
 fresh session fed the original task plus the gate-failure report. On failure
 the worktree is kept for inspection.
 
+Each gate command (and `commands.setup`) is bounded by
+`loop.gate_timeout_seconds` — 30 minutes by default; raise it for a slow test
+suite. A gate that overruns is reported as a failed gate, so the retry prompt
+says so instead of the run hanging. Every other subprocess `agent` shells out
+to is bookkeeping (`gh`, `git`) and carries a short built-in bound.
+
 When self-review requests changes, the worktree is kept, the findings are
 saved to `.agent-runs/issue-<N>-feedback.md`, and a `## Agent self-review`
 comment is posted on the issue as a human-visible marker that it's halted

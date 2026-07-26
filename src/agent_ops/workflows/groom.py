@@ -10,7 +10,7 @@ from agent_ops import worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import BUCKET_LABELS, LABEL_COLORS
 
@@ -78,7 +78,11 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
     labels_by_number = {i["number"]: {lbl["name"] for lbl in i.get("labels", [])} for i in issues}
 
     # Groom against the WORKING branch — merged-but-unpromoted fixes live there.
-    run(["git", "fetch", "origin", config.base_branch], cwd=project_root)
+    run(
+        ["git", "fetch", "origin", config.base_branch],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     groom_wt = worktree.create_detached(
         project_root, config.worktree_dir, "groom-tmp", f"origin/{config.base_branch}"
     )

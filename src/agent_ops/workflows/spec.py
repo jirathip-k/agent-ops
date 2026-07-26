@@ -7,7 +7,7 @@ from agent_ops import github, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import artifact_footer, run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
 from agent_ops.workflows.implement import _labels, role_request
 
 
@@ -37,7 +37,11 @@ def run_spec(
     )
     # Spec against the WORKING branch — same reasoning as triage/groom:
     # merged-but-unpromoted surfaces live there, not on the local checkout.
-    run(["git", "fetch", "origin", config.base_branch], cwd=project_root)
+    run(
+        ["git", "fetch", "origin", config.base_branch],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
     task_id = f"spec-{issue_number}-tmp"
     spec_wt = worktree.create_detached(
         project_root, config.worktree_dir, task_id, f"origin/{config.base_branch}"

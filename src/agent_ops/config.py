@@ -34,6 +34,11 @@ class Commands(BaseModel):
 class LoopConfig(BaseModel):
     max_attempts: int = 3
     gates: list[str] = Field(default_factory=lambda: ["test", "lint", "typecheck"])
+    # Wall-clock bound per gate command (and per `commands.setup` run). How long
+    # a test suite takes is per-project, hence a knob; the default sits well
+    # under the CI lane's 55-minute job timeout so a wedged gate still leaves
+    # room for the run to report.
+    gate_timeout_seconds: float = 1800.0
     plan: bool = True
     self_review: bool = True
     auto_merge: bool = False  # after opening a PR, merge it into staging if merge rules pass
