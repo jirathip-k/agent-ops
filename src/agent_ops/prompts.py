@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from agent_ops.utils import PLATFORM_ROOT
 
 TASKS_DIR = PLATFORM_ROOT / "prompts" / "tasks"
@@ -76,3 +78,19 @@ def opens_with_escalation_word(text: str) -> bool:
     """
     tail = _tail_after_sentinel(text)
     return bool(tail) and tail[0] not in _BOUNDARY_CHARS
+
+
+_VERDICT_RE = re.compile(r"^\s*[`*_]*VERDICT:\s*(APPROVE|REQUEST CHANGES)", re.IGNORECASE)
+
+
+def verdict_of(text: str) -> str:
+    """Read the `VERDICT: ...` line the review prompt requires (see prompts/tasks/review.md).
+
+    Tolerates leading markdown/backtick decoration; an unrecognised or absent
+    verdict is `"unknown"`, not a failure — the run still produced a review.
+    """
+    for line in text.splitlines():
+        match = _VERDICT_RE.match(line)
+        if match:
+            return "approve" if match.group(1).upper() == "APPROVE" else "request_changes"
+    return "unknown"

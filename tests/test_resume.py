@@ -680,6 +680,117 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
     assert "new_module.py" in captured["prompt"]
 
 
+# --- self-review verdict parsing (issue #157) ------------------------------
+#
+# `_self_review` used to gate on a bare substring search
+# (`"APPROVE" in text.upper().split("REQUEST CHANGES")[0]`), which fails open:
+# any rejection not phrased with the literal string "REQUEST CHANGES" leaves
+# the whole rejection in the pre-split segment, and any stray "approve" inside
+# it (e.g. inside "does not approve") flips the verdict to True. These tests
+# drive `_self_review` end to end through a stubbed runtime result, the same
+# way test_self_review_sees_untracked_files does, so they exercise the real
+# parsing path (`agent_ops.prompts.verdict_of`) rather than a mock of it.
+
+
+def _fake_self_review_role_request(
+    config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: Any
+) -> tuple[object, RunRequest]:
+    return object(), RunRequest(prompt=prompt, cwd=cwd)
+
+
+def _stub_self_review(monkeypatch: pytest.MonkeyPatch, *, text: str, ok: bool = True) -> None:
+    monkeypatch.setattr(implement_module, "role_request", _fake_self_review_role_request)
+    monkeypatch.setattr(
+        implement_module,
+        "run_with_fallback",
+        lambda runtime, request, on_event=None: RunResult(ok=ok, text=text),
+    )
+
+
+def test_self_review_prose_approve_without_verdict_line_does_not_approve(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(monkeypatch, text="This looks good, I approve of this approach overall.")
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is False
+
+
+def test_self_review_request_changes_preceded_by_approve_prose_does_not_approve(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(
+        monkeypatch,
+        text="I might approve later but:\nVERDICT: REQUEST CHANGES\n\nfix the bug",
+    )
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is False
+
+
+def test_self_review_rejection_without_literal_request_changes_substring_does_not_approve(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core regression: the old substring check split on the literal text
+    "REQUEST CHANGES", so a rejection whose only occurrence of that phrase is
+    on the `VERDICT:` line itself left "does not approve" in the segment
+    searched for "APPROVE" — and matched it.
+    """
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(
+        monkeypatch,
+        text="this does not approve of the pattern\nVERDICT: REQUEST CHANGES",
+    )
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is False
+
+
+def test_self_review_decorated_approve_still_approves(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parity with tests/test_review.py's markdown-decoration coverage of
+    `verdict_of`, but exercised through `_self_review`."""
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(monkeypatch, text="**VERDICT: APPROVE**\n\nlgtm")
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is True
+
+
+def test_self_review_fully_unparseable_text_does_not_approve(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `VERDICT:` line anywhere, and not even the word "approve" — confirms
+    the fail-closed decision: an unparseable self-review halts the run rather
+    than letting it proceed."""
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(monkeypatch, text="Looks fine overall, ship it.")
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is False
+
+
+def test_self_review_requires_result_ok_regardless_of_verdict_text(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runtime-level failure is not an approval regardless of what the text
+    says, even when the text carries a clean `VERDICT: APPROVE` line."""
+    (repo / "changed.py").write_text("def changed(): ...\n")
+    _stub_self_review(monkeypatch, text="VERDICT: APPROVE\n\nlgtm", ok=False)
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.ok is False
+
+
 # --- pushed outcomes (issue #98) ------------------------------------------
 
 
