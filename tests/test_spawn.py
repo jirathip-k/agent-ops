@@ -16,10 +16,15 @@ from typer.testing import CliRunner
 from agent_ops import messages, orca, runs, surfaces
 from agent_ops.cli import app
 from agent_ops.runtimes import claude_code, codex
-from agent_ops.utils import run
+from agent_ops.utils import CommandError, run
 from agent_ops.workflows import spawn as spawn_module
 
 runner = CliRunner()
+
+
+def _fake_terminal_create(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    payload = {"result": {"terminal": {"handle": "term_first"}}}
+    return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
 
 @pytest.fixture()
@@ -85,10 +90,17 @@ def _orca_on(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return calls
 
 
+# Claude Code events that fire while the agent is still working. Issue #120:
+# the hook was seeded on `Stop`, which fires whenever the assistant finishes
+# speaking — so `--if-unreported` bound the single report slot to the first
+# turn and every spawned agent was recorded `halted` a minute in.
+PER_TURN_EVENTS = ("Stop", "SubagentStop", "PostToolUse", "PreToolUse", "UserPromptSubmit")
+
+
 def _hook_command(worktree: Path) -> list[str]:
-    """The argv the seeded Stop hook will actually run."""
+    """The argv the seeded session-end hook will actually run."""
     settings = json.loads((worktree / claude_code.SETTINGS_REL).read_text())
-    return shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+    return shlex.split(settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"])
 
 
 def _fire_stop_hook(worktree: Path) -> None:
@@ -152,7 +164,6 @@ def test_spawn_seeds_a_hook_that_this_cli_can_run(
     wt = repo.resolve() / ".worktrees" / "issue-113"
     assert _hook_command(wt) == spawn_module.report_command(repo.resolve(), 113)
     settings = json.loads((wt / claude_code.SETTINGS_REL).read_text())
-    # SessionEnd as well as Stop: `Stop` does not fire on a user interrupt.
     assert set(settings["hooks"]) == set(claude_code.STOP_HOOK_EVENTS)
     # ...and the worker may report a better outcome by hand without a prompt.
     assert "Bash(agent report:*)" in settings["permissions"]["allow"]
@@ -261,7 +272,7 @@ def test_spawn_reuses_a_pristine_worktree_so_a_retry_is_cheap(
     wt = repo.resolve() / ".worktrees" / "issue-113"
     settings = json.loads((wt / claude_code.SETTINGS_REL).read_text())
     # Re-spawning must not stack a second copy of the same hook.
-    assert len(settings["hooks"]["Stop"]) == 1
+    assert len(settings["hooks"]["SessionEnd"]) == 1
 
 
 def test_spawn_says_so_when_the_runtime_has_no_stop_hook(
@@ -381,10 +392,70 @@ def test_the_stop_hook_never_overwrites_a_worker_that_spoke_for_itself(
 
     wt = repo.resolve() / ".worktrees" / "issue-113"
     _fire_stop_hook(wt)
-    _fire_stop_hook(wt)  # `Stop` fires per turn, and `SessionEnd` after it
+    _fire_stop_hook(wt)  # a re-opened session ends a second time
 
     assert json.loads(runs.outcome_path(repo.resolve(), 113).read_text())["state"] == "done"
     assert calls == []
+
+
+def test_no_hook_is_wired_to_a_turn_boundary(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #120, at the wiring: `Stop` fires whenever the assistant finishes
+    speaking, not when it gets stuck. Seeding the report there — with
+    `--if-unreported` binding the one report slot to the first caller —
+    guaranteed the earliest and least informative verdict was the one that
+    stuck, so every spawned agent was recorded `halted` about a turn in."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    wt = repo.resolve() / ".worktrees" / "issue-113"
+    seeded = set(json.loads((wt / claude_code.SETTINGS_REL).read_text())["hooks"])
+    assert seeded == {"SessionEnd"}
+    assert not seeded & set(PER_TURN_EVENTS)
+
+
+def test_a_multi_turn_session_is_not_recorded_halted_while_it_works(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reproduction in #120: five files modified, nothing committed, agent
+    mid-edit — and `.agent-runs/issue-N-outcome.json` already saying `halted`.
+
+    A turn boundary is not observable from here, so this asserts the thing that
+    makes one harmless: nothing the session does before it ends writes a
+    verdict, because nothing is wired to anything but its end."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+    wt = repo.resolve() / ".worktrees" / "issue-113"
+    record = runs.outcome_path(repo.resolve(), 113)
+
+    # However many turns the worker takes, no hook of ours runs at their edges.
+    hooks = json.loads((wt / claude_code.SETTINGS_REL).read_text())["hooks"]
+    for event in PER_TURN_EVENTS:
+        assert event not in hooks
+    assert not record.is_file()
+
+    # ...and the verdict still arrives when the session actually ends.
+    _fire_stop_hook(wt)
+    assert json.loads(record.read_text())["state"] == spawn_module.SILENT_EXIT_STATE
+
+
+def test_the_silent_exit_reason_claims_only_what_the_hook_observed(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to say "finished, gave up, or waiting for input" — a guess at
+    three states it could not tell apart, asserted at the first turn boundary
+    of a healthy run (#120)."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    _fire_stop_hook(repo.resolve() / ".worktrees" / "issue-113")
+
+    reason = json.loads(runs.outcome_path(repo.resolve(), 113).read_text())["reason"]
+    assert "session ended" in reason
+    assert "waiting for input" not in reason
 
 
 def test_a_second_spawn_clears_the_last_cycles_verdict(
@@ -419,6 +490,190 @@ def test_report_exits_zero_even_when_it_cannot_do_anything(
 
     bad = runner.invoke(app, ["report", "113", "--project", str(repo), "--state", "vibes"])
     assert bad.exit_code == 0
+
+
+# --- who gets told ---------------------------------------------------------
+
+
+def test_spawn_records_the_terminal_that_asked_for_the_work(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #122: `SpawnRecord` had no field for the spawner, so a completion
+    report had nowhere to go but the worker's own handle."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    monkeypatch.setenv(messages._HANDLE_ENV, "term_coordinator")
+
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    record = messages.load_spawn(repo.resolve(), 113)
+    assert record is not None
+    assert record.spawner == "term_coordinator"
+    assert record.handle == "term_worker"
+    assert record.kind == messages.SPAWN_KIND
+
+
+def test_a_completion_report_goes_to_the_spawner_not_into_the_workers_own_session(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observed on #108: the worker received its own `worker_done` and had to
+    spend a turn reasoning about it, while nobody else was told anything."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    monkeypatch.setenv(messages._HANDLE_ENV, "term_coordinator")
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+    calls = _orca_on(monkeypatch)
+
+    runner.invoke(
+        app,
+        ["report", "113", "--project", str(repo), "--state", "done", "--pr", "https://x/pull/9"],
+    )
+
+    (cmd,) = calls
+    assert cmd[cmd.index("--to") + 1] == "term_coordinator"
+    assert cmd[cmd.index("--from") + 1] == "term_worker"
+
+
+def test_a_supervisor_waits_on_the_mailbox_the_report_was_sent_to(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both ends have to agree, or addressing the spawner would silently break
+    `agent runs --wait`, which reads a mailbox to know the run is over."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    monkeypatch.setenv(messages._HANDLE_ENV, "term_coordinator")
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+    calls = _orca_on(monkeypatch)
+
+    messages.wait_for_message(repo.resolve(), 113, 1.0)
+
+    (cmd,) = calls
+    assert cmd[cmd.index("--terminal") + 1] == "term_coordinator"
+
+
+def test_a_run_started_by_hand_keeps_todays_pollable_mailbox(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No Orca terminal to inherit an identity from, so there is no spawner —
+    which must degrade to the per-run mailbox, not fail (#122)."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+    calls = _orca_on(monkeypatch)
+
+    record = messages.load_spawn(repo.resolve(), 113)
+    assert record is not None and record.spawner is None
+    runner.invoke(app, ["report", "113", "--project", str(repo), "--state", "done"])
+
+    (cmd,) = calls
+    assert cmd[cmd.index("--to") + 1] == "term_worker"
+
+
+# --- `--pr` is a URL, or it is refused -------------------------------------
+
+
+def test_a_bare_pr_number_is_expanded_into_a_url(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--pr 121` stored `{"pr_url": "121"}` and `agent runs` rendered
+    `PR #121 — 121` (#122). The field is named `_url`; it should hold one."""
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    run(["git", "remote", "add", "origin", "git@github.com:jirathip-k/agent-ops.git"], cwd=repo)
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    result = runner.invoke(
+        app, ["report", "113", "--project", str(repo), "--state", "done", "--pr", "121"]
+    )
+
+    assert result.exit_code == 0, result.output
+    record = json.loads(runs.outcome_path(repo.resolve(), 113).read_text())
+    assert record["pr_url"] == "https://github.com/jirathip-k/agent-ops/pull/121"
+    rendered = runner.invoke(app, ["runs", "113", "--project", str(repo)]).output
+    assert "PR #121 — https://github.com/jirathip-k/agent-ops/pull/121" in rendered
+
+
+def test_a_pr_value_that_is_neither_a_url_nor_a_number_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_installed(monkeypatch)
+    _fake_surface(monkeypatch)
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    result = runner.invoke(
+        app, ["report", "113", "--project", str(repo), "--state", "done", "--pr", "soon"]
+    )
+
+    # Exit 0 like every other `report` path — it runs from a hook, where a
+    # non-zero exit is fed back to the agent as work to do.
+    assert result.exit_code == 0
+    assert "neither a PR URL" in result.output
+    assert not runs.outcome_path(repo.resolve(), 113).is_file()
+
+
+# --- one worktree, one agent ----------------------------------------------
+
+
+def test_spawning_onto_a_worktree_that_already_has_a_session_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two agents on one branch is what #117's orphaned terminal produced, and
+    it is never a valid end state: both carry the same stop hook, and whichever
+    exits first claims the single report slot."""
+    _claude_installed(monkeypatch)
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": surfaces.OrcaSurface())
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "await_indexed", lambda paths: True)
+    monkeypatch.setattr(surfaces, "run", _fake_terminal_create)
+    monkeypatch.setattr(orca, "terminal_handles", lambda path: set())
+
+    assert runner.invoke(app, ["spawn", "113", "--project", str(repo)]).exit_code == 0
+
+    monkeypatch.setattr(orca, "terminal_handles", lambda path: {"term_first"})
+    second = runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    assert second.exit_code == 1
+    assert "term_first" in second.output
+    assert "second agent" in second.output
+
+
+def test_an_orca_that_cannot_be_asked_does_not_block_a_spawn(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing on an unknown would make an Orca blip unable to start work,
+    which is a worse failure than the one being prevented."""
+    _claude_installed(monkeypatch)
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": surfaces.OrcaSurface())
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "await_indexed", lambda paths: True)
+    monkeypatch.setattr(surfaces, "run", _fake_terminal_create)
+    monkeypatch.setattr(orca, "terminal_handles", lambda path: None)
+
+    assert runner.invoke(app, ["spawn", "113", "--project", str(repo)]).exit_code == 0
+    assert runner.invoke(app, ["spawn", "113", "--project", str(repo)]).exit_code == 0
+
+
+def test_a_spawn_that_cannot_attach_says_what_it_left_behind(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#117 left `.worktrees/issue-N` on `fix/issue-N`, indexed by Orca, with a
+    seeded settings file, no agent, and no explanation."""
+    _claude_installed(monkeypatch)
+
+    class DeadSurface(FakeSurface):
+        def spawn(self, label, command, cwd, attach_path=None):  # type: ignore[no-untyped-def]
+            raise CommandError("`orca terminal create` failed:\nnope")
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": DeadSurface())
+
+    result = runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    wt = repo.resolve() / ".worktrees" / "issue-113"
+    assert wt.is_dir()  # kept on purpose: a retry reuses it
+    assert str(wt) in result.output
+    assert "agent spawn 113" in result.output  # how to retry
+    assert "agent worktree remove issue-113" in result.output  # how to drop it
 
 
 # --- case 3: no Orca -------------------------------------------------------
@@ -460,12 +715,15 @@ def test_reporting_without_orca_still_leaves_the_durable_record(
 def test_seeding_merges_into_settings_a_repo_already_had(tmp_path: Path) -> None:
     settings = tmp_path / claude_code.SETTINGS_REL
     settings.parent.mkdir(parents=True)
-    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"command": "mine"}]}]}}))
+    settings.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [{"command": "mine"}]}]}}))
 
     assert claude_code.write_stop_hook(tmp_path, ["agent", "report", "1"]) == settings
 
     data = json.loads(settings.read_text())
-    assert [e["hooks"][0]["command"] for e in data["hooks"]["Stop"]] == ["mine", "agent report 1"]
+    assert [e["hooks"][0]["command"] for e in data["hooks"]["SessionEnd"]] == [
+        "mine",
+        "agent report 1",
+    ]
 
 
 def test_seeding_leaves_a_settings_file_it_cannot_parse_alone(tmp_path: Path) -> None:

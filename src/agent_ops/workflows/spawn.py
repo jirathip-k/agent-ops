@@ -19,13 +19,20 @@ the agent cooperated.
 What that covers, and what it does not:
 
 - finished normally, reported by hand → its own `done` (or `failed`) outcome
-- finished normally, said nothing → the hook's `halted`, "stopped without
-  reporting"
-- stopped early to escalate, went idle waiting for input, was interrupted, or
-  exited → the same, via `Stop` or `SessionEnd`
+- exited without reporting — finished silently, gave up, was interrupted, or
+  crashed → the hook's `halted`, "the session ended without reporting"
+- still open: working, or finished and sitting at a prompt → nothing is sent,
+  and `runs.spawn_state` reports the session as `running` for as long as it
+  exists. The hook fires at `SessionEnd` only (issue #120): a hook on every
+  turn boundary recorded a healthy agent as `halted` a minute into its run,
+  which is worse than not answering
 - killed outright (SIGKILL, power loss), or a runtime with no hook mechanism
   (Codex today) → nothing is sent, which is silence: the supervisor's poll
   resolves it exactly as it did before this existed
+
+The report is addressed to whoever spawned the run, not to the run itself —
+`messages.SpawnRecord.spawner`, recorded here because this is the only moment
+that identity exists (issue #122).
 
 Nothing here is a state store (ADR 0003). The durable answer is the outcome
 record and GitHub; the message is a shortcut that saves a supervisor one poll
@@ -34,6 +41,7 @@ interval, and dropping it costs latency, never a run.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +49,7 @@ from pathlib import Path
 from agent_ops import messages, orca, runs, surfaces, worktree
 from agent_ops.config import load_project_config
 from agent_ops.runtimes import get_spawnable_runtime
+from agent_ops.utils import CommandError
 from agent_ops.workflows.implement import task_identifiers
 
 # The states a worker may report. `done`/`failed` go out as `worker_done`,
@@ -49,14 +58,20 @@ from agent_ops.workflows.implement import task_identifiers
 # and both distinguishable from silence.
 REPORT_STATES = ("done", "halted", "failed")
 
-# What the stop hook reports for a worker that went quiet without saying
-# anything. `halted` on purpose: nobody knows whether the work landed, which is
-# a question for a human, not a completion. The reason says all three things it
-# could mean, because the hook genuinely cannot tell them apart — `Stop` fires
-# whenever the agent finishes responding, which is finished, gave up, or is
-# waiting for input.
+# What the session-end hook reports for a worker that never said anything.
+# `halted` on purpose: nobody knows whether the work landed, which is a
+# question for a human, not a completion.
+#
+# The reason claims only what the hook actually observed. It used to say
+# "finished, gave up, or waiting for input" — a guess covering three states it
+# could not distinguish, and issue #120 found it asserted at the first turn
+# boundary of a healthy run. Firing at `SessionEnd` alone makes the one claim
+# true: the session is over and nothing was reported.
 SILENT_EXIT_STATE = "halted"
-SILENT_EXIT_REASON = "stopped without reporting — finished, gave up, or waiting for input"
+SILENT_EXIT_REASON = (
+    "the session ended without reporting an outcome — check the worktree "
+    "before assuming the work landed"
+)
 
 
 @dataclass(frozen=True)
@@ -75,12 +90,12 @@ class Delegated:
 
 
 def report_command(project_root: Path, issue: int) -> list[str]:
-    """Argv the stop hook runs when a spawned session ends.
+    """Argv the session-end hook runs when a spawned session ends.
 
-    `--if-unreported` is what keeps this to one report per spawn: `Stop` fires
-    every time the agent finishes responding, and `SessionEnd` fires after it.
-    A worker that already reported — by hand, with better detail — silences all
-    of them.
+    `--if-unreported` is what keeps the generic report from overwriting a real
+    one: a worker that already reported — by hand, with a PR or a blocker —
+    silences it. It is no longer load-bearing for *frequency* (issue #120): the
+    hook fires once, at session end, rather than at every turn boundary.
 
     Spelled out rather than hidden behind a terse flag because a human reading
     the seeded settings file should be able to see exactly what will be sent on
@@ -203,6 +218,15 @@ def run_spawn(
     )
 
     task_id, branch = task_identifiers(issue)
+    wt_path = project_root / config.worktree_dir / task_id
+    # Checked before the worktree is created, not after: a path that does not
+    # exist yet cannot be hosting anything, so this only ever fires for a reuse
+    # (`reuse=True` accepts a pristine checkout) and never leaves a worktree
+    # behind when it refuses. Two agents on one branch is the end state issue
+    # #117 reached the hard way, and nothing about it is recoverable after the
+    # fact — the second session is already editing.
+    if wt_path.exists():
+        _refuse_a_second_session(wt_path, issue, chosen)
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
     )
@@ -223,11 +247,26 @@ def run_spawn(
         # shell has to start in the worktree for the agent to work in it.
         orca.await_indexed([wt_path])
 
-    spawned = chosen.spawn(f"agent-spawn-issue-{issue}", command, wt_path, attach_path=wt_path)
-    # How to reach the worker, written from the handle the surface just
-    # returned — the link that was missing entirely for worktree-spawned
-    # agents (issue #113). A surface with no handle (background) records what
-    # it has and the supervisor polls.
+    try:
+        spawned = chosen.spawn(f"agent-spawn-issue-{issue}", command, wt_path, attach_path=wt_path)
+    except CommandError as exc:
+        # The worktree is fine and the hook is already on it, so a retry is
+        # cheap — but a caller left staring at a bare Orca error has no way to
+        # know that, and issue #117 watched exactly that turn into an
+        # abandoned half-built worktree nobody could account for.
+        raise CommandError(
+            f"{exc}\n"
+            f"nothing is running, but the worktree {wt_path} and branch {branch} were kept "
+            f"with the stop hook already seeded. Either:\n"
+            f"  retry — `agent spawn {issue} --project {project_root}` reuses this worktree\n"
+            f"  start it by hand — cd {wt_path} && {shlex.join(command)}\n"
+            f"  drop it — `agent worktree remove {task_id} --project {project_root}`"
+        ) from exc
+    # How to reach the worker, and who to tell when it is done — the two halves
+    # that were missing for worktree-spawned agents (issues #113, #122). A
+    # surface with no handle (background) records what it has, and a spawn with
+    # no identifiable spawner records None: both degrade to the pollable
+    # per-run mailbox rather than failing.
     messages.record_spawn(
         project_root,
         issue,
@@ -235,6 +274,34 @@ def run_spawn(
         handle=spawned.handle,
         pid=spawned.pid,
         log_path=spawned.log_path,
+        kind=messages.SPAWN_KIND,
+        spawner=messages.current_handle(),
         log=log,
     )
     return Delegated(spawned=spawned, worktree=wt_path, hook_path=hook_path)
+
+
+def _refuse_a_second_session(wt_path: Path, issue: int, chosen: surfaces.Surface) -> None:
+    """Raise if `wt_path` is already hosting an agent session.
+
+    Only the Orca surface can answer this — a background spawn's pid is in the
+    spawn record, which the *next* spawn overwrites, so there is nothing to
+    read back. An Orca that cannot be asked (`terminal_handles` returns None)
+    does not block the spawn: refusing on an unknown would make an Orca blip
+    unable to start work, which is a worse failure than the one being
+    prevented.
+    """
+    if not isinstance(chosen, surfaces.OrcaSurface):
+        return
+    existing = orca.terminal_handles(wt_path)
+    if not existing:
+        return
+    raise CommandError(
+        f"{wt_path} already has {len(existing)} live Orca terminal(s) — "
+        f"{', '.join(sorted(existing))}. Spawning here would put a second agent on "
+        f"{wt_path.name}'s branch, which is never a valid end state (issue #117): both "
+        f"would carry the same stop hook, and whichever exits first would claim the "
+        f"single report slot for #{issue}.\n"
+        f"Use that session, or close it (`orca terminal close --terminal <handle>`) and "
+        f"re-run."
+    )
