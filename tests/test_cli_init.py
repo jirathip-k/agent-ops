@@ -27,6 +27,11 @@ def test_init_scaffolds_project(tmp_path: Path) -> None:
     template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
     assert "Acceptance criteria" in template.read_text()
 
+    # the gate labels are human-applied, so onboarding has to name them
+    assert "gh label create spec-requested" in result.stdout
+    assert "gh label create plan-requested" in result.stdout
+    assert "gh label create agent-ready" in result.stdout
+
 
 def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text("# my existing instructions\n")

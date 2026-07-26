@@ -367,7 +367,11 @@ does, so the rule is: **agent-ops orchestrates, Orca observes.**
   dispatching session. `agent implement` takes over the pre-created
   worktree. It falls back to a background log (kept under the main
   checkout's `.agent-runs/`, where it outlives the worktree) when Orca
-  isn't running.
+  isn't running. That log is one file per attempt —
+  `agent-issue-<N>-<YYYYMMDD>-<HHMMSS>.log` — so a re-dispatch or an
+  `agent resume` cycle never overwrites the previous attempt's record, and
+  `ls` orders one issue's attempts. Logs age out after a week, the same
+  retention `.agent-runs/`'s outcome records use.
 - One terminal per task; worktrees guarantee runs never trample each other.
   Keep an interactive `claude` in the main checkout for grooming issues,
   exploring, and writing acceptance criteria.

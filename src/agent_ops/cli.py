@@ -11,7 +11,6 @@ from agent_ops import __version__, github, messages, registry, stubs, surfaces, 
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
-from agent_ops.stubs import triage_caller_drift
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
@@ -26,6 +25,7 @@ from agent_ops.workflows import (
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
+from agent_ops.workflows.triage import LABEL_COLORS
 
 app = typer.Typer(
     name="agent",
@@ -46,12 +46,85 @@ def _err(message: str) -> None:
 
 GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
 
+# Every label the lanes read or write, with the colors the pipelines use.
+# The triage/groom/scout lanes create their own verdict labels at run time
+# (LABEL_COLORS, merged in below), but the gate labels are applied by a human
+# — they have to exist before anyone can request work, so `init` prints the
+# whole set at onboarding rather than leaving it to the first failed run.
+ONBOARDING_LABELS: dict[str, str] = {
+    "spec-requested": "5319e7",
+    "plan-requested": "1d76db",
+    "approved-for-agent": "1d76db",
+    "blocked": "b60205",
+    "triage:done": "ededed",
+    "ready-to-merge": "0e8a16",
+    "hotfix-ready": "d93f0b",
+    "hotfix-backmerge": "5319e7",
+    **LABEL_COLORS,
+}
+
 
 def _missing_gitignore_markers(root: Path) -> list[str]:
     """Markers absent from the project's .gitignore (all of them if it has none)."""
     gitignore = root / ".gitignore"
     text = gitignore.read_text() if gitignore.exists() else ""
     return [marker for marker in GITIGNORE_MARKERS if marker not in text]
+
+
+def _stub_label(stub: Path) -> Path:
+    """A shipped stub as `stubs/managed-repo-<lane>.yml`, anything else in full.
+
+    relative_to raises for a stub outside PLATFORM_ROOT, which only happens
+    when it's been pointed elsewhere — fall back to the full path rather than
+    turning a warning into a traceback.
+    """
+    try:
+        return stub.relative_to(PLATFORM_ROOT)
+    except ValueError:
+        return stub
+
+
+def _report_caller_drift(root: Path) -> None:
+    """Report stub drift for every CI lane the repo has a caller for.
+
+    A summary line names the lanes checked and the ones the repo hasn't wired
+    up (not opting into a lane isn't drift), then one line per lane that
+    actually drifted — so six lanes stay as scannable as one, and a clean repo
+    is a single line.
+
+    Goes through the `stubs` module attribute rather than a from-import so
+    tests can repoint stubs.STUBS_DIR and have the check follow it.
+    """
+    results = stubs.caller_drift(root)
+    if not results:
+        return  # no agent-ops lanes wired up at all — nothing to compare
+
+    problems: list[str] = []
+    for drift in results:
+        if drift.error:
+            problems.append(f"! {drift.lane} drift check skipped: {drift.error}")
+        elif drift.secrets or drift.permissions:
+            parts = []
+            if drift.secrets:
+                parts.append(f"secrets: {', '.join(drift.secrets)}")
+            if drift.permissions:
+                parts.append(f"permissions: {', '.join(drift.permissions)}")
+            caller = drift.path or stubs.WORKFLOWS_REL
+            problems.append(
+                f"! {caller} is behind {_stub_label(drift.stub)} — missing {'; '.join(parts)}"
+            )
+
+    checked = {drift.lane for drift in results}
+    absent = [lane for lane in stubs.known_lanes() if lane not in checked]
+    tail = f" (not wired: {', '.join(absent)})" if absent else ""
+    lanes = ", ".join(drift.lane for drift in results)
+    typer.echo(
+        f"! CI lane callers checked: {lanes}{tail}"
+        if problems
+        else f"✓ CI lane callers in sync: {lanes}{tail}"
+    )
+    for line in problems:
+        typer.echo(line)
 
 
 def _checkout_drift(root: Path) -> str | None:
@@ -553,6 +626,14 @@ def init(project: ProjectOpt = Path(".")) -> None:
             fh.write(f"\n{marker}\n")
         typer.echo(f"added {marker} to .gitignore")
 
+    # Labels live in GitHub, not on disk, so init can only tell you about them
+    # — but it has to, because a gate label nobody created is a lane nobody can
+    # request: the CI pipelines select on it, and a missing label just selects
+    # nothing.
+    typer.echo("\nlabels the lanes use — run once per repo:")
+    for name, color in ONBOARDING_LABELS.items():
+        typer.echo(f"  gh label create {name} --color {color} --force")
+
 
 @app.command()
 def doctor(project: ProjectOpt = Path(".")) -> None:
@@ -591,27 +672,7 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
     if missing:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
 
-    drift = triage_caller_drift(project.resolve())
-    if drift is not None:
-        if drift.error:
-            typer.echo(f"! triage.yml drift check skipped: {drift.error}")
-        elif drift.secrets or drift.permissions:
-            parts = []
-            if drift.secrets:
-                parts.append(f"secrets: {', '.join(drift.secrets)}")
-            if drift.permissions:
-                parts.append(f"permissions: {', '.join(drift.permissions)}")
-            # Module attribute, not a from-import: tests patch stubs.TRIAGE_STUB,
-            # and a by-value import would leave this path pointing elsewhere.
-            # relative_to raises for a stub outside PLATFORM_ROOT, which only
-            # happens when it's been pointed elsewhere — fall back to the full
-            # path rather than turning a warning into a traceback.
-            try:
-                stub_rel = stubs.TRIAGE_STUB.relative_to(PLATFORM_ROOT)
-            except ValueError:
-                stub_rel = stubs.TRIAGE_STUB
-            caller_rel = drift.path or stubs.WORKFLOWS_REL
-            typer.echo(f"! {caller_rel} is behind {stub_rel} — missing {'; '.join(parts)}")
+    _report_caller_drift(project.resolve())
     checkout_note = _checkout_drift(PLATFORM_ROOT)
     if checkout_note:
         typer.echo(f"! {checkout_note}")

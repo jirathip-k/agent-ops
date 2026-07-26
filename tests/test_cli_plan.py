@@ -184,6 +184,7 @@ def test_plan_surface_auto_falls_back_to_background_when_orca_unavailable(
 
     spawned = implement.dispatch_plan(tmp_path, 45, surface_name="auto")
 
-    log_path = tmp_path / ".agent-runs" / "agent-plan-issue-45.log"
-    assert log_path.exists()
+    assert spawned.log_path is not None
+    assert spawned.log_path.exists()
+    assert list((tmp_path / ".agent-runs").glob("agent-plan-issue-45-*.log")) == [spawned.log_path]
     assert "background pid" in spawned.where

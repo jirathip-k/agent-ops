@@ -38,11 +38,13 @@ For EACH managed repo, run these once (replace OWNER/REPO):
   gh api repos/OWNER/REPO/git/refs -f ref="refs/heads/staging" \
     -f sha="$(gh api repos/OWNER/REPO/git/refs/heads/main --jq .object.sha)"
 
-  # labels the pipeline uses
+  # labels the pipeline uses (`agent init` prints this same set)
   for L in "triage:done:ededed" "needs-human:d93f0b" "blocked:b60205" \
            "ready-to-merge:0e8a16" "hotfix-ready:d93f0b" \
            "approved-for-agent:1d76db" "found-by-audit:fbca04" \
-           "backlog:c5def5" "hotfix-backmerge:5319e7"; do
+           "backlog:c5def5" "hotfix-backmerge:5319e7" \
+           "agent-ready:1d76db" "proposed-by-agent:bfd4f2" \
+           "spec-requested:5319e7" "plan-requested:1d76db"; do
     NAME="${L%:*}"; COLOR="${L##*:}"
     gh label create "$NAME" --repo OWNER/REPO --color "$COLOR" --force
   done
