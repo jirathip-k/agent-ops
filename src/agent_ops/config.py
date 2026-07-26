@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,17 @@ class ModelTierError(RuntimeError):
     RuntimeError so the CLI's existing error handling reports it as a clean
     message; the alternative is handing a foreign model name to a CLI and
     letting it 400 halfway through a run.
+
+    Carries the runtime/tier/role as fields as well as in the message, so a
+    diagnostic can group gaps ("codex has no 'smart' for planner, reviewer")
+    instead of re-parsing three near-identical sentences.
     """
+
+    def __init__(self, message: str, *, runtime: str, tier: str, role: str) -> None:
+        super().__init__(message)
+        self.runtime = runtime
+        self.tier = tier
+        self.role = role
 
 
 class Commands(BaseModel):
@@ -127,9 +138,12 @@ class ProjectConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     # Per-runtime tier names → concrete models, e.g.
-    # {"claude_code": {"smart": "fable", "fast": "sonnet"}}. Roles reference
-    # tiers ("smart") so upgrading every role is a one-line change, and
-    # floating vendor aliases keep tiers pointing at the latest models.
+    # {"claude_code": {"smart": "fable", "fast": "sonnet"}}. A tier names a job
+    # — `smart` for planning and review, `fast` for implementation — not a
+    # vendor, so roles reference tiers and upgrading every role is a one-line
+    # change. Keyed by runtime because what a model string means is the
+    # runtime's business; a tier the effective runtime does not define raises
+    # ModelTierError rather than reaching a CLI that cannot serve it.
     model_tiers: dict[str, dict[str, str]] = Field(default_factory=dict)
     # Per-runtime fallback ladders, keyed by the same names as model_tiers:
     # {"claude_code": {"smart": ["fable", "opus"]}}. Used ONLY when a model
@@ -172,7 +186,10 @@ class ProjectConfig(BaseModel):
                 raise ModelTierError(
                     f"runtime {runtime!r} has no model for tier {requested!r} "
                     f"(role {role_name!r}); model_tiers.{runtime} defines {defined}. "
-                    f"Add the tier to model_tiers.{runtime} or pin a concrete model on the role."
+                    f"Add the tier to model_tiers.{runtime} or pin a concrete model on the role.",
+                    runtime=runtime,
+                    tier=requested,
+                    role=role_name,
                 )
 
         return ResolvedRole(
@@ -219,22 +236,46 @@ class RoleReport:
     model: str | None = None
     fallbacks: list[str] = field(default_factory=list)
     error: str | None = None
+    # Set only when `error` is a missing tier: the tier that has no entry.
+    missing_tier: str | None = None
 
 
-def role_reports(config: ProjectConfig) -> list[RoleReport]:
+@dataclass(frozen=True)
+class RuntimeReport:
+    """What every role would run with if this runtime were the one in effect."""
+
+    runtime: str
+    roles: list[RoleReport]
+
+    def missing_tiers(self) -> dict[str, list[str]]:
+        """Tier → the roles that would be refused for want of it, in role order."""
+        gaps: dict[str, list[str]] = {}
+        for role in self.roles:
+            if role.missing_tier is not None:
+                gaps.setdefault(role.missing_tier, []).append(role.name)
+        return gaps
+
+
+def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[RoleReport]:
     """Resolve every role for `agent doctor`, turning failures into report rows.
 
     A misconfigured ladder or a tier the runtime does not define should be
     visible before a run dies on it, so resolution errors are reported per role
     instead of aborting the whole check.
+
+    `runtime` resolves as though `--runtime <name>` had been passed, so the
+    same code answers both "what will this project run" and "what would this
+    project run on that other runtime".
     """
     reports: list[RoleReport] = []
     for name in ROLE_NAMES:
-        runtime = config.effective_runtime(name)
+        effective = config.effective_runtime(name, runtime)
         try:
-            resolved = config.resolve_role(name)
+            resolved = config.resolve_role(name, runtime_override=runtime)
         except ModelTierError as exc:
-            reports.append(RoleReport(name=name, runtime=runtime, error=str(exc)))
+            reports.append(
+                RoleReport(name=name, runtime=effective, error=str(exc), missing_tier=exc.tier)
+            )
             continue
         reports.append(
             RoleReport(
@@ -245,6 +286,56 @@ def role_reports(config: ProjectConfig) -> list[RoleReport]:
             )
         )
     return reports
+
+
+def runtime_reports(config: ProjectConfig, runtimes: Iterable[str]) -> list[RuntimeReport]:
+    """`role_reports` for each of `runtimes`, as if each were the one in effect.
+
+    A runtime with no tier table refuses at resolution rather than handing a
+    foreign model name to a CLI — which is the right behaviour, and useless if
+    the only way to discover it is to start a run. This is what lets `agent
+    doctor` say so first.
+
+    The runtime names are passed in rather than read from `agent_ops.runtimes`:
+    config stays a leaf module that knows tier tables are keyed by runtime and
+    nothing whatsoever about which runtimes exist.
+    """
+    return [
+        RuntimeReport(runtime=name, roles=role_reports(config, runtime=name)) for name in runtimes
+    ]
+
+
+def ladder_warnings(config: ProjectConfig) -> list[str]:
+    """Ways a `model_fallbacks` table disagrees with the `model_tiers` beside it.
+
+    Neither case is an error: a ladder is inert until a model goes unavailable.
+    That is exactly the problem — both stay invisible until the day they matter,
+    which is a day a run is already failing. See docs/workflow.md.
+    """
+    warnings: list[str] = []
+    tier_names = config.tier_names()
+    for runtime in sorted(config.model_fallbacks):
+        tiers = config.model_tiers.get(runtime, {})
+        for tier, rungs in sorted(config.model_fallbacks[runtime].items()):
+            if not rungs:
+                continue  # an emptied ladder is how a project opts out
+            if tier not in tiers:
+                if tier in tier_names:
+                    warnings.append(
+                        f"model_fallbacks.{runtime}.{tier} is a ladder for a tier "
+                        f"model_tiers.{runtime} does not define, so nothing can reach it"
+                    )
+                continue
+            model = tiers[tier]
+            resolved = [tiers.get(rung, rung) for rung in rungs]
+            if model not in resolved:
+                warnings.append(
+                    f"model_tiers.{runtime}.{tier} is {model!r}, which is not on "
+                    f"model_fallbacks.{runtime}.{tier} ({' → '.join(resolved)}). The ladder is "
+                    f"trimmed below the active model only when the active model is on it, so an "
+                    f"availability failure would step UP into {resolved[0]!r}"
+                )
+    return warnings
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
