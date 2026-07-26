@@ -179,17 +179,44 @@ def pipeline_coverage(config: RegistryConfig, log: Callable[[str], None] = print
 # repeatedly or once, short enough that a bad fleet still fits one screen.
 FAILURE_LIMIT = 5
 
-# Per-repo bound for the failure sweep. `gh run list` is a single API
+# Per-repo bound for the failure sweep. Each `gh run list` is a single API
 # round-trip, so a repo still silent after this long is wedged (a credential
 # prompt, a hung proxy), not slow — and the sweep is a fan-out, where the
 # fleet-wide default would let one such repo hold every remaining repo behind
 # it for two full minutes. Tight enough to keep the sweep interactive,
-# generous enough for a bad network day.
+# generous enough for a bad network day. The per-conclusion asks below share
+# this bound rather than dividing it: `run()` raises on the first expiry, so a
+# wedged repo still costs one timeout and then gets skipped, not four.
 FAILURE_TIMEOUT_S = 30.0
 
+# Conclusions that mean a run did not do its job. `failure` is only the
+# ordinary one: a caller that has drifted from the reusable pipeline it calls
+# never starts at all (`startup_failure`), a wedged run gets `cancelled` by a
+# human or by a re-run, and a hung one ends `timed_out`. Sweeping for
+# `failure` alone reported repos whose triage lane had been dead for days —
+# five straight `startup_failure` runs — as clean.
+FAILED_CONCLUSIONS = ("failure", "startup_failure", "cancelled", "timed_out")
 
-def _failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
-    """The `limit` most recent failed workflow runs for `repo`, newest first.
+# Column tag per conclusion: short enough to sit between the workflow name and
+# the timestamp without pushing URLs off the right edge, distinct enough that
+# `startup` never reads as an ordinary red build.
+CONCLUSION_TAGS = {
+    "failure": "failed",
+    "startup_failure": "startup",
+    "cancelled": "cancelled",
+    "timed_out": "timed-out",
+}
+
+
+def _tag(run_info: dict[str, Any]) -> str:
+    """Short label for why a run counted as failed; unknown values pass through
+    verbatim rather than being flattened into a misleading `failed`."""
+    conclusion = str(run_info.get("conclusion") or "?")
+    return CONCLUSION_TAGS.get(conclusion, conclusion)
+
+
+def _runs_with_conclusion(repo: str, conclusion: str, limit: int) -> list[dict[str, Any]]:
+    """The `limit` most recent runs of `repo` with exactly this conclusion.
 
     Raises `CommandError` for anything that makes the repo unreadable — 404,
     no access, renamed, wedged `gh`. The sweep turns that into a skip: one
@@ -203,7 +230,7 @@ def _failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
             "--repo",
             repo,
             "--status",
-            "failure",
+            conclusion,
             "--limit",
             str(limit),
             "--json",
@@ -219,6 +246,22 @@ def _failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
         detail = proc.stderr.strip().splitlines()
         raise CommandError(detail[-1] if detail else f"gh run list exited {proc.returncode}")
     return json.loads(proc.stdout)
+
+
+def _failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
+    """The `limit` most recent failed workflow runs for `repo`, newest first.
+
+    `gh run list --status` takes one value, so this asks once per conclusion in
+    `FAILED_CONCLUSIONS` and merges by recency. Asking beats widening the
+    window and filtering locally: a repo with busy CI could bury a dead lane
+    under any fixed number of green runs, which is the blind spot this sweep
+    exists to close.
+    """
+    merged: list[dict[str, Any]] = []
+    for conclusion in FAILED_CONCLUSIONS:
+        merged.extend(_runs_with_conclusion(repo, conclusion, limit))
+    merged.sort(key=lambda info: str(info.get("createdAt", "")), reverse=True)
+    return merged[:limit]
 
 
 def _when(created_at: str) -> str:
@@ -261,6 +304,7 @@ def fleet_failures(
 
     failing = clean = 0
     skipped: list[str] = []
+    startup_repos: list[str] = []
     for repo in config.repos:
         try:
             runs = _failed_runs(repo, limit)
@@ -272,17 +316,33 @@ def fleet_failures(
             clean += 1
             continue
         failing += 1
-        log(f"\n\033[1m{repo}\033[0m — {len(runs)} recent failed run(s)")
+        # A run that never started is a contract problem, not a flaky build, so
+        # its count belongs in the header where the reader decides what to open.
+        startup = sum(1 for r in runs if r.get("conclusion") == "startup_failure")
+        if startup:
+            startup_repos.append(repo)
+        note = f" · ⚠ {startup} startup_failure" if startup else ""
+        log(f"\n\033[1m{repo}\033[0m — {len(runs)} recent failed run(s){note}")
         # Columns are sized per repo, not per fleet: one repo's long workflow
         # names would otherwise indent every other repo's URLs off the screen.
         rows = [
-            (str(r.get("name", "?")), _when(str(r.get("createdAt", ""))), _branch(r), r.get("url"))
+            (
+                str(r.get("name", "?")),
+                _tag(r),
+                _when(str(r.get("createdAt", ""))),
+                _branch(r),
+                r.get("url"),
+            )
             for r in runs
         ]
-        name_w = max(len(name) for name, _, _, _ in rows)
-        branch_w = max(len(branch) for _, _, branch, _ in rows)
-        for name, when, branch, url in rows:
-            log(f"  {name.ljust(name_w)}  {when}  {branch.ljust(branch_w)}  {url or ''}")
+        name_w = max(len(name) for name, _, _, _, _ in rows)
+        tag_w = max(len(tag) for _, tag, _, _, _ in rows)
+        branch_w = max(len(branch) for _, _, _, branch, _ in rows)
+        for name, tag, when, branch, url in rows:
+            log(
+                f"  {name.ljust(name_w)}  {tag.ljust(tag_w)}  {when}  "
+                f"{branch.ljust(branch_w)}  {url or ''}"
+            )
 
     if failing:
         parts = [f"{failing} repo(s) with failures", f"{clean} clean"]
@@ -291,6 +351,11 @@ def fleet_failures(
     if skipped:
         parts.append(f"{len(skipped)} skipped ({', '.join(skipped)})")
     log(("\n" if failing else "") + " · ".join(parts))
+    if startup_repos:
+        log(
+            "\n⚠ startup_failure = the run never started, almost always caller/callee "
+            f"contract drift. Run `agent doctor` in: {', '.join(startup_repos)}"
+        )
 
 
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
