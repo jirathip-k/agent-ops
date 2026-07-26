@@ -86,10 +86,11 @@ class Surface(Protocol):
 def _attempt_orca_attach(path: Path, label: str, command: list[str]) -> tuple[str | None, str]:
     """Try one `orca terminal create --worktree path:<path>`.
 
-    Returns `(handle, stderr)`. `handle` is `None` when Orca reports
-    `selector_not_found` (the card isn't indexed yet — worth retrying).
-    Any other failure (bad flags, orca crash, ...) raises `CommandError`
-    immediately since retrying it would not help.
+    Returns `(handle, stderr)`. `handle` is `None` for any failure Orca reports
+    as transient (`orca.is_transient`): the card isn't indexed yet (issue #20),
+    or the create timed out waiting for its handle (issue #117). Anything else
+    — a bad flag, a permission refusal, Orca not running — raises `CommandError`
+    immediately, since retrying it would only fail more slowly.
     """
     proc = run(
         [
@@ -108,7 +109,7 @@ def _attempt_orca_attach(path: Path, label: str, command: list[str]) -> tuple[st
     )
     if proc.returncode != 0:
         stderr = proc.stderr.strip() or proc.stdout.strip()
-        if orca.SELECTOR_NOT_FOUND in stderr:
+        if orca.is_transient(stderr):
             return None, stderr
         raise CommandError(f"`orca terminal create` failed:\n{stderr}")
     try:
@@ -121,15 +122,55 @@ def _attempt_orca_attach(path: Path, label: str, command: list[str]) -> tuple[st
     return handle, ""
 
 
+def _attach_with_retry(path: Path, label: str, command: list[str]) -> tuple[str | None, str, bool]:
+    """Retry `_attempt_orca_attach` on `path`, adopting whatever it leaves behind.
+
+    Returns `(handle, last_error, adopted)`.
+
+    The retry is deliberately *not* additive. Issue #117's failure message —
+    "Timed out waiting for terminal handle after creation" — says the terminal
+    was created and only the handle was late, so retrying blind makes a second
+    one: verified in the wild as two live agent sessions on one worktree and
+    one branch, with the spawn record naming only one of them. So each failed
+    attempt first asks whether a terminal appeared that wasn't there before,
+    and takes that handle instead of creating another.
+
+    The baseline is a set of handles, not a count or a title, because Orca
+    hands the title over to the agent the moment it starts printing — the
+    orphan in #117 was already called "Bound runtime adapters with timeouts"
+    by the time anyone looked. A `None` baseline means Orca could not be asked
+    (typically the card is not indexed yet, so nothing can exist on it): no
+    diff is possible, so nothing is adopted, and it is re-asked each round
+    until it answers.
+    """
+    known = orca.terminal_handles(path)
+    last_err = ""
+    for attempt in range(_ATTACH_ATTEMPTS):
+        if known is None:
+            known = orca.terminal_handles(path)
+        handle, stderr = _attempt_orca_attach(path, label, command)
+        if handle is not None:
+            return handle, "", False
+        last_err = stderr
+        if known is not None:
+            appeared = sorted((orca.terminal_handles(path) or set()) - known)
+            if appeared:
+                return appeared[0], stderr, True
+        if attempt < _ATTACH_ATTEMPTS - 1:
+            time.sleep(_ATTACH_DELAY_S)
+    return None, last_err, False
+
+
 class OrcaSurface:
     """New terminal in the Orca IDE, attached to a worktree card.
 
     The agent process lives in an Orca-managed terminal, so the app shows it
     working live and the run survives this session ending. The terminal is
     attached to `attach_path`'s card (the task worktree); Orca can take a
-    moment to index a brand-new external worktree, so a `selector_not_found`
-    response is retried with backoff before falling back to the project
-    root's card.
+    moment to index a brand-new external worktree, and `terminal create` can
+    time out waiting for a handle it has already minted, so both are retried
+    with backoff — adopting an already-created terminal rather than adding one
+    — before falling back to the project root's card.
     """
 
     name = "orca"
@@ -141,18 +182,15 @@ class OrcaSurface:
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
     ) -> Spawned:
         target = attach_path or cwd
-        last_err = ""
-        for attempt in range(_ATTACH_ATTEMPTS):
-            handle, stderr = _attempt_orca_attach(target, label, command)
-            if handle is not None:
-                return Spawned(
-                    where=f"orca terminal {label!r} (handle {handle})",
-                    surface=self.name,
-                    handle=handle,
+        handle, last_err, adopted = _attach_with_retry(target, label, command)
+        if handle is not None:
+            where = f"orca terminal {label!r} (handle {handle})"
+            if adopted:
+                where += (
+                    " — adopted the terminal a timed-out `orca terminal create` had already "
+                    "made, rather than starting a second session on this worktree"
                 )
-            last_err = stderr
-            if attempt < _ATTACH_ATTEMPTS - 1:
-                time.sleep(_ATTACH_DELAY_S)
+            return Spawned(where=where, surface=self.name, handle=handle)
 
         has_fallback = attach_path is not None and attach_path != cwd
         if has_fallback:
@@ -176,8 +214,8 @@ class OrcaSurface:
             last_err = stderr
 
         raise CommandError(
-            f"orca terminal create failed for {label!r}: worktree card {target} was never "
-            f"indexed by Orca after {_ATTACH_ATTEMPTS} attempt(s)"
+            f"orca terminal create failed for {label!r}: no terminal on the worktree card "
+            f"{target} after {_ATTACH_ATTEMPTS} attempt(s)"
             + (" plus a project-root fallback attempt" if has_fallback else "")
             + f":\n{last_err}"
         )

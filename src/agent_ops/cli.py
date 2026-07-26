@@ -303,6 +303,11 @@ def dispatch(
         handle=spawned.handle,
         pid=spawned.pid,
         log_path=spawned.log_path,
+        # `dispatch`, not `spawn`: the worker here is `agent implement`, which
+        # `runs.live_runs` finds in `ps` and whose Orca terminal outlives it —
+        # so its handle is an address, never a liveness signal (issue #116).
+        kind=messages.DISPATCH_KIND,
+        spawner=messages.current_handle(),
         log=_err,
     )
     typer.echo(f"dispatched issue #{issue} → {spawned.where}")
@@ -381,7 +386,10 @@ def report(
         str, typer.Option("--state", help=f"Terminal state: {' | '.join(REPORT_STATES)}")
     ],
     project: ProjectOpt = Path("."),
-    pr: Annotated[str | None, typer.Option("--pr", help="URL of the PR this run opened")] = None,
+    pr: Annotated[
+        str | None,
+        typer.Option("--pr", help="URL of the PR this run opened (a bare number is expanded)"),
+    ] = None,
     reason: Annotated[
         str | None, typer.Option("--reason", help="Why it ended this way (blocker, failure, ...)")
     ] = None,
@@ -408,9 +416,20 @@ def report(
     if state not in REPORT_STATES:
         _err(f"unknown state {state!r} — expected one of: {', '.join(REPORT_STATES)}")
         return
+    root = project.resolve()
+    if pr is not None:
+        # Validated here rather than accepted and stored: `pr_url` is read back
+        # by `agent runs`, which renders whatever is in it (issue #122).
+        # Refusing is safe because the session-end hook never passes `--pr` —
+        # only a caller who can read this message and try again does.
+        try:
+            pr = github.normalise_pr_url(pr, root)
+        except CommandError as exc:
+            _err(f"{exc} — nothing recorded for #{issue}")
+            return
     try:
         report_outcome(
-            project.resolve(),
+            root,
             issue,
             state=state,
             pr_url=pr,

@@ -68,15 +68,27 @@ PERMISSION_MODES = (
 # reach a commit.
 SETTINGS_REL = Path(".claude") / "settings.local.json"
 
-# `Stop` fires when the agent finishes responding — for a delegated worker that
-# is the terminal moment, whether it finished the job, gave up, or stopped to
-# escalate. It deliberately does *not* fire on a user interrupt, which is why
-# `SessionEnd` is seeded alongside it: between them the only uncovered case is
-# the process dying without running anything (SIGKILL, power loss), which stays
-# what it has always been — silence the supervisor resolves by polling.
-STOP_HOOK_EVENTS = ("Stop", "SessionEnd")
+# `SessionEnd`, and *only* `SessionEnd`. `Stop` was seeded here too until issue
+# #120, on the reading that a turn ends because the agent is stuck. It does not:
+# a turn ends whenever the assistant finishes speaking, which on a healthy run
+# is within the first minute and then repeatedly after. Combined with
+# `--if-unreported`, which binds the single report slot to the first caller,
+# that guaranteed the earliest and least informative report was the one that
+# stuck — every spawned agent recorded `halted` about a turn after it started,
+# and stayed that way while it worked.
+#
+# `SessionEnd` fires when the session actually ends, which is what "stopped
+# without reporting" is trying to describe. What that gives up is detecting a
+# worker that goes idle mid-task; that was never what `Stop` detected, and
+# issue #115 removed the case it was mostly there for by giving spawned
+# sessions a permission mode they do not stall under. Two cases stay uncovered
+# and stay silence the supervisor resolves by polling: the process dying
+# without running anything (SIGKILL, power loss), and a worker that finishes,
+# says nothing, and leaves the session open — for which `runs.spawn_state`
+# truthfully reports `running` rather than guessing.
+STOP_HOOK_EVENTS = ("SessionEnd",)
 
-# Seconds Claude Code gives the hook before killing it. `Stop` runs in the
+# Seconds Claude Code gives the hook before killing it. The hook runs in the
 # session's critical path, so the bound matters: the reporting command has its
 # own inner timeout, and this is the backstop under it.
 _HOOK_TIMEOUT_S = 30
@@ -289,7 +301,7 @@ def write_stop_hook(
     *,
     log: Callable[[str], None] = lambda _: None,
 ) -> Path | None:
-    """Seed `command` as this worktree's Stop/SessionEnd hook. Best-effort.
+    """Seed `command` as this worktree's session-end hook. Best-effort.
 
     Must run *before* the session starts: Claude Code snapshots its hooks at
     startup, so a settings file written after the CLI launches is read by

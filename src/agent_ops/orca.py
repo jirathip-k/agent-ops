@@ -27,6 +27,31 @@ _CARD_LIMIT = 200
 # shared with `surfaces`, which retries the same condition for terminals.
 SELECTOR_NOT_FOUND = "selector_not_found"
 
+# Orca's error code for a handle it no longer knows: the terminal was closed,
+# or the app restarted since. Unlike every other failure this is *positive*
+# evidence that the session is gone, which is what lets `runs` reach a terminal
+# verdict for a spawn instead of waiting on it forever (issue #116).
+HANDLE_STALE = "terminal_handle_stale"
+
+# Failures worth another attempt rather than aborting on. `selector_not_found`
+# is the brand-new worktree card (issue #20). The rest is the class issue #117
+# found the hard way: `orca terminal create` answering "Timed out waiting for
+# terminal handle after creation", which is transient by construction — the
+# identical command succeeded immediately afterwards.
+#
+# Deliberately a whitelist matched against the response text. A bad flag, a
+# permission refusal or an Orca that is not running must still fail on the
+# first attempt: turning the whole error surface into blind retries would only
+# make those fail three times more slowly, and hide why.
+_TRANSIENT_MARKERS = (
+    SELECTOR_NOT_FOUND,
+    "timed out",
+    "timeout",
+    "not ready",
+    "temporarily unavailable",
+    "try again",
+)
+
 # Orca picks up a brand-new external worktree on a periodic rescan, not
 # instantly (issue #20) — observed at 13-25s, so the budget here covers ~36s.
 # Module level so tests can monkeypatch `orca.time.sleep`.
@@ -53,6 +78,87 @@ def available() -> bool:
     if shutil.which(exe) is None:
         return False
     return run([exe, "status", "--json"], check=False).returncode == 0
+
+
+def error_of(output: str) -> tuple[str, str]:
+    """`(code, message)` out of a failed `orca ... --json` response.
+
+    Orca prints its envelope (`{"ok": false, "error": {...}}`) on stdout even
+    when it fails, so callers pass whatever they captured. Anything that is not
+    that envelope yields `("", output)` — the raw text, so a caller matching on
+    substrings still has something to match.
+    """
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return "", output
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return "", output
+    return str(error.get("code") or ""), str(error.get("message") or "")
+
+
+def is_transient(output: str) -> bool:
+    """Is this failed `orca` response worth retrying, rather than aborting on?
+
+    Matches `_TRANSIENT_MARKERS` against the error code, its message and the
+    raw response together: Orca reports the same condition as a code in some
+    commands and as prose in others (the handle timeout in issue #117 arrived
+    as `runtime_error` + "Timed out waiting for terminal handle after
+    creation"), and a caller should not have to know which.
+    """
+    code, message = error_of(output)
+    haystack = f"{code} {message} {output}".lower()
+    return any(marker in haystack for marker in _TRANSIENT_MARKERS)
+
+
+def terminal_handles(path: Path) -> set[str] | None:
+    """Handles of the live Orca terminals on `path`, or None when Orca can't say.
+
+    None means *unknown*, never "none": `orca terminal list` answers
+    `selector_not_found` for a worktree it has not indexed yet, which is
+    otherwise indistinguishable from an indexed worktree with no terminals.
+    `surfaces` diffs two of these to notice a terminal a failed `create` left
+    behind (issue #117), and a false empty baseline there would make it adopt
+    somebody else's session.
+    """
+    if not available():
+        return None
+    proc = run(
+        [executable(), "terminal", "list", "--worktree", f"path:{path}", "--json"], check=False
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    entries = result.get("terminals") if isinstance(result, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return {
+        str(entry["handle"]) for entry in entries if isinstance(entry, dict) and entry.get("handle")
+    }
+
+
+def terminal_alive(handle: str) -> bool | None:
+    """Does Orca still host this terminal? None when it could not be asked.
+
+    Tri-state on purpose — the shape #86/PR #89 established for
+    `runs.discover_runs`'s `trustworthy` flag. "Orca did not answer" must never
+    collapse into "the session is gone", or an Orca outage would hand `agent
+    runs --wait` a terminal verdict it has no evidence for (issue #116). Only
+    `HANDLE_STALE` is evidence of death; every other failure is unknown.
+    """
+    if not available():
+        return None
+    proc = run([executable(), "terminal", "show", "--terminal", handle, "--json"], check=False)
+    if proc.returncode == 0:
+        return True
+    response = f"{proc.stdout}\n{proc.stderr}"
+    code, _ = error_of(proc.stdout)
+    return False if code == HANDLE_STALE or HANDLE_STALE in response else None
 
 
 def report(

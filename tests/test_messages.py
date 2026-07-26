@@ -329,3 +329,126 @@ def test_wait_for_message_returns_false_when_the_cli_wedges(
 
     assert messages.wait_for_message(tmp_path, 98, 15.0, log=logged.append) is False
     assert any("did not finish" in line for line in logged)
+
+
+# --- addressing: worker on one end, spawner on the other (issue #122) ------
+
+
+def test_a_record_written_before_spawners_existed_still_loads(tmp_path: Path) -> None:
+    """`.agent-runs/` survives an upgrade; a record with no `kind`/`spawner`
+    must read as the conservative half rather than fail to parse."""
+    path = messages.spawn_path(tmp_path, 98)
+    path.parent.mkdir()
+    path.write_text(json.dumps({"issue": 98, "surface": "orca", "handle": "term_worker"}))
+
+    record = messages.load_spawn(tmp_path, 98)
+
+    assert record is not None
+    assert record.spawner is None
+    assert record.kind == messages.DISPATCH_KIND
+
+
+def test_send_outcome_addresses_the_spawner_and_signs_as_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both ends were the worker's own handle, so the report landed in the
+    worker's inbox and the party that delegated the work was never told."""
+    _orca_on(monkeypatch)
+    messages.record_spawn(
+        tmp_path,
+        98,
+        surface="orca",
+        handle="term_worker",
+        kind=messages.SPAWN_KIND,
+        spawner="term_coordinator",
+    )
+    calls = _fake_run(monkeypatch)
+
+    assert messages.send_outcome(tmp_path, 98, state="done", pr_url="https://x/pull/9") is True
+
+    (cmd,) = calls
+    assert _value(cmd, "--to") == "term_coordinator"
+    assert _value(cmd, "--from") == "term_worker"
+
+
+def test_collect_reads_the_mailbox_the_report_was_sent_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Addressing the spawner would silently break `agent runs --wait` if the
+    reader still watched the worker's handle."""
+    _orca_on(monkeypatch)
+    messages.record_spawn(
+        tmp_path,
+        98,
+        surface="orca",
+        handle="term_worker",
+        kind=messages.SPAWN_KIND,
+        spawner="term_coordinator",
+    )
+    calls = _fake_run(monkeypatch, stdout=_check_payload(issue=98, state="done"))
+
+    found = messages.collect(tmp_path, [98])
+
+    assert found[98].state == "done"
+    assert _value(calls[0], "--terminal") == "term_coordinator"
+
+
+def test_a_background_spawn_can_still_notify_the_spawner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No worker handle at all, but the coordinator's is on file — that is an
+    address, and using it beats notifying nobody."""
+    _orca_on(monkeypatch)
+    messages.record_spawn(
+        tmp_path,
+        98,
+        surface="background",
+        pid=4242,
+        kind=messages.SPAWN_KIND,
+        spawner="term_coordinator",
+    )
+    calls = _fake_run(monkeypatch)
+
+    assert messages.send_outcome(tmp_path, 98, state="done") is True
+    assert _value(calls[0], "--to") == "term_coordinator"
+
+
+def test_no_identifiable_spawner_keeps_todays_pollable_mailbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _orca_on(monkeypatch)
+    messages.record_spawn(
+        tmp_path, 98, surface="orca", handle="term_worker", kind=messages.SPAWN_KIND
+    )
+    calls = _fake_run(monkeypatch)
+
+    assert messages.send_outcome(tmp_path, 98, state="done") is True
+    assert _value(calls[0], "--to") == "term_worker"
+
+
+def test_a_spawner_that_is_also_the_worker_is_not_treated_as_a_second_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defensive: a record naming the same handle twice must behave like one
+    with no spawner, not send a run its own report on purpose."""
+    _orca_on(monkeypatch)
+    messages.record_spawn(
+        tmp_path,
+        98,
+        surface="orca",
+        handle="term_worker",
+        kind=messages.SPAWN_KIND,
+        spawner="term_worker",
+    )
+    calls = _fake_run(monkeypatch)
+
+    messages.send_outcome(tmp_path, 98, state="done")
+
+    assert _value(calls[0], "--to") == _value(calls[0], "--from") == "term_worker"
+
+
+def test_current_handle_is_none_outside_an_orca_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(messages._HANDLE_ENV, raising=False)
+    assert messages.current_handle() is None
+    monkeypatch.setenv(messages._HANDLE_ENV, "term_here")
+    assert messages.current_handle() == "term_here"

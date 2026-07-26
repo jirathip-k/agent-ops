@@ -22,7 +22,11 @@ Two properties this module exists to preserve:
 
 The spawn record (`.agent-runs/issue-N-spawn.json`) is deliberately *not* one
 of `runs.discover_runs`'s signal patterns. It is an address book — how to
-reach a run — not evidence that one exists.
+reach a run, and who asked for it — not evidence that one exists. It has two
+ends because a notification needs two: the worker's own surface identity, and
+the terminal that spawned it. Addressing both ends to the worker (issue #122)
+delivered every completion report into the worker's own session and told the
+party waiting on the work precisely nothing.
 """
 
 from __future__ import annotations
@@ -49,12 +53,20 @@ MESSAGE_TYPES = ("worker_done", "escalation")
 # (`agent resume`), so it goes out as an escalation.
 _TYPE_BY_STATE = {"done": "worker_done", "failed": "worker_done", "halted": "escalation"}
 
-# Orca sets this in every terminal it creates. Only a fallback: the spawn
-# record is authoritative, because its handle is by construction the one the
-# supervisor is watching. A run whose parent shell happened to be an Orca
-# terminal would otherwise report to that terminal instead, which nobody
-# checks — harmless, but not useful.
+# Orca sets this in every terminal it creates. Two uses: it is what a run
+# records as its *spawner* (the terminal that asked for the work), and it is
+# the last-resort address for a run with no spawn record at all.
 _HANDLE_ENV = "ORCA_TERMINAL_HANDLE"
+
+# What the identity in a spawn record describes, since the two are watched by
+# different means. `dispatch` puts `agent implement` on a surface — a process
+# `runs.live_runs` finds in `ps`, whose Orca terminal outlives it. `spawn` puts
+# an interactive agent session there, and the surface's own handle is the only
+# thing that knows whether it still exists (issue #116). Records written before
+# this distinction existed read as `dispatch`, the conservative half: no
+# liveness is inferred from them.
+SPAWN_KIND = "spawn"
+DISPATCH_KIND = "dispatch"
 
 # Headroom over the `--timeout-ms` we hand Orca, so `utils.run`'s own bound
 # only ever fires when the CLI itself has wedged rather than racing its
@@ -77,6 +89,15 @@ class SpawnRecord:
     machine-readable identity of a dispatched worker. `pid`/`log_path` are the
     background surface's equivalent; they are recorded so the record describes
     every surface, not only the one with a message bus.
+
+    `spawner` is the other end of that link: the terminal that asked for the
+    work. Without it a completion report has nowhere to go but the worker's own
+    handle, which is where issue #122 found it being delivered — the worker
+    interrupted by, and spending a turn reasoning about, its own report, while
+    the party that delegated the work was never told anything.
+
+    `kind` says which of the two lanes wrote this (`SPAWN_KIND`/`DISPATCH_KIND`),
+    because only one of them can have its liveness read off the handle.
     """
 
     issue: int
@@ -85,6 +106,8 @@ class SpawnRecord:
     pid: int | None = None
     log_path: str | None = None
     spawned_at: float = 0.0
+    kind: str = DISPATCH_KIND
+    spawner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +134,17 @@ def spawn_path(project_root: Path, issue: int) -> Path:
     return project_root / ".agent-runs" / f"issue-{issue}-spawn.json"
 
 
+def current_handle() -> str | None:
+    """This process's own Orca terminal, when it is running inside one.
+
+    The spawner's identity is not something a caller can be asked for — it is
+    simply where `agent spawn` was typed. Outside an Orca terminal (a plain
+    shell, CI, a cron job) there is nobody to notify, which is the "no
+    identifiable spawner" case issue #122 requires to degrade rather than fail.
+    """
+    return os.environ.get(_HANDLE_ENV) or None
+
+
 def record_spawn(
     project_root: Path,
     issue: int,
@@ -119,6 +153,8 @@ def record_spawn(
     handle: str | None = None,
     pid: int | None = None,
     log_path: Path | None = None,
+    kind: str = DISPATCH_KIND,
+    spawner: str | None = None,
     log: Callable[[str], None] = lambda _: None,
 ) -> None:
     """Persist how to reach this run, overwriting any previous cycle's record.
@@ -138,6 +174,8 @@ def record_spawn(
         "pid": pid,
         "log_path": str(log_path) if log_path is not None else None,
         "spawned_at": time.time(),
+        "kind": kind,
+        "spawner": spawner,
     }
     try:
         path.parent.mkdir(exist_ok=True)
@@ -169,6 +207,7 @@ def load_spawn(
             raise TypeError("spawn record is not a JSON object")
         handle = data.get("handle")
         pid = data.get("pid")
+        spawner = data.get("spawner")
         return SpawnRecord(
             issue=issue,
             surface=str(data.get("surface") or "unknown"),
@@ -176,18 +215,48 @@ def load_spawn(
             pid=int(pid) if pid is not None else None,
             log_path=str(data["log_path"]) if data.get("log_path") else None,
             spawned_at=float(data.get("spawned_at") or 0.0),
+            kind=str(data.get("kind") or DISPATCH_KIND),
+            spawner=str(spawner) if spawner else None,
         )
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         log(f"warning: could not read the spawn record for #{issue} at {path}: {exc}")
         return None
 
 
-def _handle_for(project_root: Path, issue: int, *, log: Callable[[str], None]) -> str | None:
-    """The terminal handle to address this run's messages to, if there is one."""
+@dataclass(frozen=True)
+class Address:
+    """Where one run's report goes, and who it comes from.
+
+    `to` is the mailbox both ends agree on: `send_outcome` posts there and
+    `collect`/`wait_for_message` read there, so a supervisor never has to know
+    which of the two identities was available at spawn time.
+    """
+
+    to: str
+    sender: str
+
+
+def _address_for(project_root: Path, issue: int, *, log: Callable[[str], None]) -> Address | None:
+    """Who to notify about `issue`, or None when there is nobody to notify.
+
+    The spawner is preferred, which is the whole of issue #122: a report
+    addressed to the worker itself notifies nobody and interrupts the one
+    session that should be finishing cleanly. Falling back to the worker's own
+    handle is not a consolation prize — it is precisely today's behaviour, a
+    per-run mailbox a supervisor can poll, and it is what a run started by hand
+    (no Orca terminal to inherit an identity from) still gets.
+    """
     record = load_spawn(project_root, issue, log=log)
-    if record is not None and record.handle:
-        return record.handle
-    return os.environ.get(_HANDLE_ENV) or None
+    worker = record.handle if record is not None and record.handle else current_handle()
+    spawner = record.spawner if record is not None else None
+    if spawner and spawner != worker:
+        # `sender` falls back to the spawner when the worker has no handle of
+        # its own (the background surface): a message from the mailbox's owner
+        # is odd but deliverable, and the alternative is not notifying at all.
+        return Address(to=spawner, sender=worker or spawner)
+    if worker is None:
+        return None
+    return Address(to=worker, sender=worker)
 
 
 def send_outcome(
@@ -213,8 +282,8 @@ def send_outcome(
     """
     if not orca.available():
         return False
-    handle = _handle_for(project_root, issue, log=log)
-    if handle is None:
+    address = _address_for(project_root, issue, log=log)
+    if address is None:
         return False
     payload = {
         "issue": issue,
@@ -229,9 +298,9 @@ def send_outcome(
         "orchestration",
         "send",
         "--to",
-        handle,
+        address.to,
         "--from",
-        handle,
+        address.sender,
         "--type",
         _TYPE_BY_STATE.get(state, "worker_done"),
         "--subject",
@@ -251,11 +320,11 @@ def send_outcome(
         # timeout bound fired on a wedged CLI. This function promises not to
         # crash a finished run, so both are caught here rather than at every
         # call site.
-        log(f"could not push the {state!r} outcome for #{issue} to {handle}: {exc}")
+        log(f"could not push the {state!r} outcome for #{issue} to {address.to}: {exc}")
         return False
     if proc.returncode != 0:
         log(
-            f"could not push the {state!r} outcome for #{issue} to {handle}: "
+            f"could not push the {state!r} outcome for #{issue} to {address.to}: "
             f"{proc.stderr.strip() or proc.stdout.strip() or 'no output'}"
         )
         return False
@@ -361,10 +430,10 @@ def collect(
         return {}
     found: dict[int, RunMessage] = {}
     for issue in issues:
-        handle = _handle_for(project_root, issue, log=log)
-        if handle is None:
+        address = _address_for(project_root, issue, log=log)
+        if address is None:
             continue
-        raw = _check(handle, mode="--unread", wait_ms=None, timeout_s=_CHECK_TIMEOUT_S, log=log)
+        raw = _check(address.to, mode="--unread", wait_ms=None, timeout_s=_CHECK_TIMEOUT_S, log=log)
         if not raw:
             continue
         for message in raw:
@@ -394,11 +463,11 @@ def wait_for_message(
     """
     if timeout_s <= 0 or not orca.available():
         return False
-    handle = _handle_for(project_root, issue, log=log)
-    if handle is None:
+    address = _address_for(project_root, issue, log=log)
+    if address is None:
         return False
     raw = _check(
-        handle,
+        address.to,
         mode="--peek",
         wait_ms=int(timeout_s * 1000),
         timeout_s=timeout_s + _WAIT_GRACE_S,
