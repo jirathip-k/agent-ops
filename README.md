@@ -37,10 +37,11 @@ agent doctor                   # confirm gates are configured
 other runtimes share one instruction file. Existing files are never
 overwritten.
 
-`agent init` also prints the label set the lanes use — run those `gh label
-create` lines once in the repo. The gate labels (`spec-requested`,
-`plan-requested`, `approved-for-agent`) are applied by hand, so the lanes
-that select on them stay idle until the labels exist.
+`agent init` also syncs the label set the lanes use (create-or-update, once
+per repo — `--print-labels` shows the `gh` commands instead of applying
+them). The gate labels (`spec-requested`, `plan-requested`,
+`approved-for-agent`) are still applied to individual issues by hand — `init`
+only makes sure the labels themselves exist to apply.
 
 ## Use it
 

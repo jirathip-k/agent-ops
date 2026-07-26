@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -164,3 +166,110 @@ def open_prs_for_issue(issue_number: int, cwd: Path) -> list[dict[str, Any]]:
     except CommandError:
         return []
     return [pr for pr in prs if pr_references_issue(pr, issue_number)]
+
+
+@dataclass(frozen=True)
+class Label:
+    color: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class LabelSync:
+    """What `sync_labels` did to each label it was given, by name."""
+
+    created: list[str]
+    updated: list[str]
+    unchanged: list[str]
+    failed: list[tuple[str, str]]
+
+
+def why(stderr: str, stdout: str) -> str:
+    """The one line of a failed `gh` invocation worth quoting."""
+    for stream in (stderr, stdout):
+        lines = [line for line in stream.strip().splitlines() if line.strip()]
+        if lines:
+            return lines[0]
+    return "no output"
+
+
+def sync_labels(
+    project_root: Path, labels: Mapping[str, Label], *, repo: str | None = None
+) -> LabelSync:
+    """Create or update every label in `labels` to match its color/description.
+
+    Idempotent: the repo's current labels are read once, so a repo already in
+    sync makes no `gh label create` calls at all — this runs on every `init`
+    and every triage/groom/scout invocation, and has to be silent when there
+    is nothing to do. Each label is created with `check=False` so one failure
+    (e.g. no write scope) is recorded and skipped rather than aborting the rest.
+
+    `repo`, when given, is passed to `gh` as `--repo` on every call instead of
+    letting `gh` resolve the repo from `cwd` itself: for a fork, that
+    resolution lands on the upstream parent, not `origin` — silently writing
+    labels to a repo nobody named. Pass the caller's own `remote_slug` here to
+    pin it.
+    """
+    repo_args = ["--repo", repo] if repo else []
+    proc = run(
+        [
+            "gh",
+            "label",
+            "list",
+            "--json",
+            "name,color,description",
+            "--limit",
+            "1000",
+            *repo_args,
+        ],
+        cwd=project_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise CommandError(f"could not list labels: {why(proc.stderr, proc.stdout)}")
+    current = {
+        entry["name"]: (
+            entry["color"].lstrip("#").lower(),
+            (entry.get("description") or "").strip(),
+        )
+        for entry in json.loads(proc.stdout)
+    }
+
+    created: list[str] = []
+    updated: list[str] = []
+    unchanged: list[str] = []
+    failed: list[tuple[str, str]] = []
+    for name, label in labels.items():
+        existing = current.get(name)
+        wanted = (label.color.lstrip("#").lower(), label.description.strip())
+        if existing == wanted:
+            unchanged.append(name)
+            continue
+        try:
+            create = run(
+                [
+                    "gh",
+                    "label",
+                    "create",
+                    name,
+                    "--color",
+                    label.color,
+                    "--description",
+                    label.description,
+                    "--force",
+                    *repo_args,
+                ],
+                cwd=project_root,
+                check=False,
+            )
+        except CommandError as exc:
+            # `run` raises on a timeout regardless of `check=False` — the
+            # per-label try/except is what keeps a wedged label 3 of 14 from
+            # taking the other thirteen down with it.
+            failed.append((name, str(exc)))
+            continue
+        if create.returncode != 0:
+            failed.append((name, why(create.stderr, create.stdout)))
+            continue
+        (updated if existing is not None else created).append(name)
+    return LabelSync(created=created, updated=updated, unchanged=unchanged, failed=failed)

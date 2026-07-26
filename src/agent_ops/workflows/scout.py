@@ -5,11 +5,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import worktree
+from agent_ops import github, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
-from agent_ops.utils import SLOW_GIT_TIMEOUT_S, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import LABEL_COLORS
 
@@ -53,12 +53,17 @@ def run_scout(
     config = load_project_config(project_root)
 
     # The agent files issues with these labels mid-run — they must exist first.
-    for name in ("backlog", "proposed-by-agent"):
-        run(
-            ["gh", "label", "create", name, "--color", LABEL_COLORS[name], "--force"],
-            cwd=project_root,
-            check=False,
+    try:
+        sync = github.sync_labels(
+            project_root,
+            {name: LABEL_COLORS[name] for name in ("backlog", "proposed-by-agent")},
+            repo=github.remote_slug(project_root),
         )
+    except (CommandError, OSError) as exc:
+        log(f"could not sync labels: {exc}")
+    else:
+        for name, reason in sync.failed:
+            log(f"could not sync label {name}: {reason}")
 
     # Scout against the WORKING branch — a TODO already resolved on staging
     # must not become an issue.
