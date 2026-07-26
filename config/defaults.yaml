@@ -8,7 +8,13 @@ worktree_dir: .worktrees
 runtime:
   name: claude_code        # claude_code | codex
   model: null              # runtime default
-  permission_mode: acceptEdits
+  permission_mode: acceptEdits    # headless runs (`implement`/`resume`)
+  # Interactive sessions (`agent spawn`). Higher than the headless mode on
+  # purpose: nobody is watching a delegated worker, and a prompt it cannot
+  # answer stalls it until a human clicks — which the stop hook then reports
+  # as `halted`. It runs in a throwaway worktree; tighten per project here or
+  # per spawn with `agent spawn --permission-mode`.
+  interactive_permission_mode: bypassPermissions
   max_turns: null
   stream: true             # print agent activity (tool calls, text) live —
                            # makes Orca terminals show real progress

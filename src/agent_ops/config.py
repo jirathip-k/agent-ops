@@ -48,6 +48,13 @@ class RuntimeConfig(BaseModel):
     name: str = "claude_code"
     model: str | None = None
     permission_mode: str = "acceptEdits"
+    # The mode for `agent spawn`'s interactive sessions, kept separate from the
+    # headless one above because the two paths fail in opposite directions. A
+    # headless run has nobody to ask, so an unapproved tool is *denied* and the
+    # run carries on; an interactive one *waits*, and a delegated worker that
+    # waits looks dead — its stop hook fires and reports it halted (issue #115).
+    # Loosen or tighten per project here, or per spawn with `--permission-mode`.
+    interactive_permission_mode: str = "bypassPermissions"
     max_turns: int | None = None
     stream: bool = True
 

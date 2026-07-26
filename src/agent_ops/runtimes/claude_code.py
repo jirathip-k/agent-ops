@@ -38,6 +38,21 @@ _TRANSIENT_MARKERS = (
     "503",
 )
 
+# What `claude --permission-mode` accepts, as of CLI 2.1.x. `default` is the
+# legacy spelling of `manual` — still accepted, no longer advertised in
+# `--help`, and what `config/defaults.yaml` gives the planner and reviewer, so
+# it stays in the list. Verify with `claude --permission-mode <anything>`: the
+# CLI's rejection prints the current set.
+PERMISSION_MODES = (
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+    "manual",
+    "default",
+    "dontAsk",
+    "plan",
+)
+
 # Project-local settings, not the shared `.claude/settings.json`: the hook is
 # one spawn's wiring, not a fact about the repo, and nothing here should ever
 # reach a commit.
@@ -94,8 +109,10 @@ class ClaudeCodeRuntime:
     def classify_failure(self, result: RunResult) -> FailureKind:
         return classify_failure(result)
 
-    def interactive_command(self, prompt: str | None, *, model: str | None = None) -> list[str]:
-        return build_interactive_command(prompt, model=model)
+    def interactive_command(
+        self, prompt: str | None, *, permission_mode: str, model: str | None = None
+    ) -> list[str]:
+        return build_interactive_command(prompt, permission_mode=permission_mode, model=model)
 
     def seed_stop_hook(self, worktree: Path, command: list[str]) -> Path | None:
         return write_stop_hook(worktree, command)
@@ -190,19 +207,42 @@ def build_command(request: RunRequest) -> list[str]:
     return cmd
 
 
-def build_interactive_command(prompt: str | None, *, model: str | None = None) -> list[str]:
+def build_interactive_command(
+    prompt: str | None, *, permission_mode: str, model: str | None = None
+) -> list[str]:
     """`claude` as a terminal session, with `prompt` as its opening brief.
 
     Deliberately not `build_command`'s `-p`: this is the form a human can
     watch, interrupt and type into, which is the whole point of putting a
     delegated worker on a visible surface rather than in a log file.
+
+    `--permission-mode` is passed here for the same reason `build_command`
+    passes it, and matters more: an interactive session with no mode falls back
+    to asking, and a delegated worker nobody is watching just stops (#115).
     """
-    cmd = ["claude"]
+    cmd = ["claude", "--permission-mode", _checked_mode(permission_mode)]
     if model:
         cmd += ["--model", model]
     if prompt:
         cmd.append(prompt)
     return cmd
+
+
+def _checked_mode(mode: str) -> str:
+    """`mode` if the CLI takes it, else ValueError naming the ones it does.
+
+    Refusing here rather than letting `claude` refuse is the point: the CLI's
+    own rejection happens inside a terminal nobody is reading, and the session
+    dies before its stop hook is ever loaded — so a mistyped mode would look
+    exactly like a worker that vanished. Failing at spawn time puts the error
+    in front of the person who typed it.
+    """
+    if mode not in PERMISSION_MODES:
+        raise ValueError(
+            f"unknown claude permission mode {mode!r}; "
+            f"expected one of: {', '.join(PERMISSION_MODES)}"
+        )
+    return mode
 
 
 def write_stop_hook(

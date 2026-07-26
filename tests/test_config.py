@@ -61,6 +61,14 @@ def test_platform_defaults_tier_models_by_role(tmp_path: Path) -> None:
     assert {planner.runtime, implementer.runtime, reviewer.runtime} == {"claude_code"}
 
 
+def test_interactive_sessions_default_to_a_mode_that_never_stops_to_ask(tmp_path: Path) -> None:
+    """A spawned worker has nobody to answer a prompt, so it must not raise one (#115)."""
+    config = load_project_config(tmp_path)
+    assert config.runtime.interactive_permission_mode == "bypassPermissions"
+    # ...and the headless path is untouched by that: it has the loop watching it.
+    assert config.runtime.permission_mode == "acceptEdits"
+
+
 def test_model_tiers_map_per_runtime(tmp_path: Path) -> None:
     _write_config(
         tmp_path,

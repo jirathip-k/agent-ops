@@ -188,6 +188,66 @@ def test_spawn_passes_the_brief_to_the_interactive_command(
     assert "agent report 113" in command[-1]
 
 
+def test_spawn_gives_the_session_a_permission_mode_it_can_work_under(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug in #115: no mode meant the worker stopped on every edit, and the
+    stop hook then reported a worker waiting for one click as `halted`."""
+    _claude_installed(monkeypatch)
+    fake = _fake_surface(monkeypatch)
+
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    _label, command, _cwd, _attach = fake.calls[0]
+    assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_spawn_takes_the_mode_from_the_project_config(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_installed(monkeypatch)
+    fake = _fake_surface(monkeypatch)
+    config = repo / ".agent" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("runtime:\n  interactive_permission_mode: acceptEdits\n")
+
+    runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    _label, command, _cwd, _attach = fake.calls[0]
+    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_a_single_spawn_can_tighten_the_mode(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _claude_installed(monkeypatch)
+    fake = _fake_surface(monkeypatch)
+
+    result = runner.invoke(
+        app, ["spawn", "113", "--project", str(repo), "--permission-mode", "plan"]
+    )
+
+    assert result.exit_code == 0, result.output
+    _label, command, _cwd, _attach = fake.calls[0]
+    assert command[command.index("--permission-mode") + 1] == "plan"
+
+
+def test_a_mode_the_runtime_cannot_use_fails_before_a_worktree_exists(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise the session dies on the flag before its stop hook loads — the
+    worker looks like it vanished, which is the failure this path exists to stop."""
+    _claude_installed(monkeypatch)
+    fake = _fake_surface(monkeypatch)
+
+    result = runner.invoke(
+        app, ["spawn", "113", "--project", str(repo), "--permission-mode", "vibes"]
+    )
+
+    assert result.exit_code == 1
+    assert "vibes" in result.output
+    assert fake.calls == []
+    assert not (repo.resolve() / ".worktrees" / "issue-113").exists()
+
+
 def test_spawn_reuses_a_pristine_worktree_so_a_retry_is_cheap(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -218,7 +278,10 @@ def test_spawn_says_so_when_the_runtime_has_no_stop_hook(
 
     assert result.exit_code == 0, result.output
     assert "no stop hook" in result.output
-    assert fake.calls[0][1][0] == "codex"
+    command = fake.calls[0][1]
+    assert command[0] == "codex"
+    # ...and the mode still reaches it, in the vocabulary codex actually takes.
+    assert command[command.index("--ask-for-approval") + 1] == "never"
     assert not (repo.resolve() / ".worktrees" / "issue-113" / claude_code.SETTINGS_REL).exists()
 
 

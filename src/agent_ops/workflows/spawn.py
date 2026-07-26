@@ -164,6 +164,7 @@ def run_spawn(
     prompt: str | None = None,
     surface_name: str = "auto",
     runtime_name: str | None = None,
+    permission_mode: str | None = None,
     log: Callable[[str], None] = lambda _: None,
 ) -> Delegated:
     """Put a coding-agent session in a fresh worktree for `issue`, wired to report.
@@ -180,6 +181,11 @@ def run_spawn(
     through to the background surface, `record_spawn` writes a record with no
     handle, and `send_outcome` no-ops — the worker runs, and the supervisor
     polls, which is what it did before any of this existed.
+
+    `permission_mode` overrides `runtime.interactive_permission_mode` for this
+    one spawn. It is resolved and validated *before* the worktree is created,
+    so a bad mode costs nothing to correct: the alternative is a checkout and a
+    terminal for a session that dies on an unparsable flag (#115).
     """
     config = load_project_config(project_root)
     role = config.resolve_role("implementer", runtime_override=runtime_name)
@@ -187,6 +193,14 @@ def run_spawn(
     if not runtime.available():
         raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
     chosen = surfaces.pick(surface_name)
+    # Built up front, before anything is created: it is the only step that can
+    # still reject its inputs, and an unusable permission mode should not cost
+    # a worktree first.
+    command = runtime.interactive_command(
+        opening_brief(project_root, issue, prompt),
+        permission_mode=permission_mode or config.runtime.interactive_permission_mode,
+        model=role.model,
+    )
 
     task_id, branch = task_identifiers(issue)
     wt_path = worktree.create(
@@ -209,9 +223,6 @@ def run_spawn(
         # shell has to start in the worktree for the agent to work in it.
         orca.await_indexed([wt_path])
 
-    command = runtime.interactive_command(
-        opening_brief(project_root, issue, prompt), model=role.model
-    )
     spawned = chosen.spawn(f"agent-spawn-issue-{issue}", command, wt_path, attach_path=wt_path)
     # How to reach the worker, written from the handle the surface just
     # returned — the link that was missing entirely for worktree-spawned

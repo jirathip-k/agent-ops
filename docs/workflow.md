@@ -182,7 +182,19 @@ puts a plain interactive coding agent in the issue's worktree instead:
 agent spawn 113                                  # brief defaults to "work on issue #113"
 agent spawn 113 --prompt "rebase onto main"      # or your own
 agent spawn 113 --prompt-file brief.md
+agent spawn 113 --permission-mode acceptEdits    # tighten this one session
 ```
+
+The session runs at `runtime.interactive_permission_mode`, which defaults to
+`bypassPermissions` — higher than the headless `permission_mode`, on purpose.
+The two paths fail in opposite directions: a headless run has nobody to ask, so
+an unapproved tool is denied and the run carries on, while an interactive one
+*waits* — and a delegated worker that waits looks dead, because `Stop` fires
+and reports it `halted` (issue #115). It works in a throwaway worktree, so the
+mode buys unattended progress rather than reach. Tighten it per project under
+`runtime:` in `.agent/config.yaml`, or per spawn with `--permission-mode`.
+Codex has no `--permission-mode`; the adapter translates the mode into the
+`--sandbox`/`--ask-for-approval` pair it does take.
 
 The difference from starting one by hand (`orca worktree create --agent
 claude`) is that a hand-started session is invisible: it writes no spawn

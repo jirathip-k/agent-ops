@@ -78,12 +78,22 @@ class SpawnableRuntime(Runtime, Protocol):
     stays a valid `Runtime`.
     """
 
-    def interactive_command(self, prompt: str | None, *, model: str | None = None) -> list[str]:
+    def interactive_command(
+        self, prompt: str | None, *, permission_mode: str, model: str | None = None
+    ) -> list[str]:
         """Argv that starts this CLI as a *human-shaped* session, not a `-p` run.
 
         `run()` is the headless path the loop drives; this is the one a surface
         hands to a terminal so a person can watch it and type into it. `prompt`
         is the opening brief, if there is one.
+
+        `permission_mode` has no default, unlike `model` — a runtime picking its
+        own model is a sane fallback, a session picking its own permission
+        policy is the bug in issue #115. Adapters translate it into whatever
+        their CLI understands and raise `ValueError` for a mode they cannot,
+        because a session that dies on an unparsable flag never starts its stop
+        hook either: it is a silent worker, the one failure this whole path
+        exists to prevent.
         """
         ...
 

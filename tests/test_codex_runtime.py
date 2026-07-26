@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 import agent_ops.runtimes.codex as codex_mod
+from agent_ops.runtimes import claude_code as claude_mod
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
-from agent_ops.runtimes.codex import CodexRuntime, classify_failure
+from agent_ops.runtimes.codex import CodexRuntime, approval_flags, classify_failure
 
 # The exact envelope `codex exec` wrote to stderr when `agent review --runtime
 # codex` handed it a Claude model name (issue #39). Kept verbatim — matching is
@@ -191,3 +192,43 @@ def test_run_raw_carries_stdout_stderr_and_returncode(monkeypatch: pytest.Monkey
     _stub_run(monkeypatch, returncode=1, stdout="out", stderr="err")
     result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
     assert result.raw == {"stdout": "out", "stderr": "err", "returncode": 1}
+
+
+# --- the interactive form (`agent spawn`) ----------------------------------
+
+
+def test_interactive_command_translates_the_mode_into_sandbox_and_approval() -> None:
+    """Codex has no `--permission-mode`; it splits the same question in two."""
+    cmd = CodexRuntime().interactive_command(
+        "fix it", permission_mode="bypassPermissions", model="gpt-5-codex"
+    )
+
+    assert cmd[0] == "codex"
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    # Never asks — the point of the default: nobody is watching to answer.
+    assert cmd[cmd.index("--ask-for-approval") + 1] == "never"
+    assert cmd[cmd.index("--model") + 1] == "gpt-5-codex"
+    assert cmd[-1] == "fix it"
+
+
+def test_a_read_only_mode_maps_to_a_read_only_sandbox() -> None:
+    assert approval_flags("plan") == ["--sandbox", "read-only", "--ask-for-approval", "never"]
+
+
+def test_the_bypass_mode_keeps_the_sandbox() -> None:
+    """`bypassPermissions` buys a session that never stops, not one with no walls."""
+    assert "--dangerously-bypass-approvals-and-sandbox" not in approval_flags("bypassPermissions")
+
+
+def test_every_claude_mode_has_a_codex_translation() -> None:
+    """Config carries one vocabulary; a mode the platform can set must map here."""
+    for mode in claude_mod.PERMISSION_MODES:
+        assert approval_flags(mode)
+
+
+def test_an_untranslatable_mode_is_refused_rather_than_guessed() -> None:
+    with pytest.raises(ValueError) as exc:
+        approval_flags("acceptEdit")
+
+    assert "acceptEdit" in str(exc.value)
+    assert "bypassPermissions" in str(exc.value)
