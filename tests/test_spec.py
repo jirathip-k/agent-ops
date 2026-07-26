@@ -163,6 +163,33 @@ def test_run_spec_escalate_raises_and_posts_nothing(
     assert removed == [("spec-7-tmp", True)]
 
 
+def test_run_spec_posts_a_spec_that_opens_by_ruling_escalation_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #128 regression: prose mentioning ESCALATE is not an escalation.
+
+    A real sendmeter run opened this way and the finished spec was discarded,
+    the label left on, and the pipeline exited 1 — reporting failure while
+    throwing away work already paid for.
+    """
+    _stub_issue(monkeypatch, issue_number=7)
+    _stub_fetch(monkeypatch)
+    removed, _refs = _stub_worktree(monkeypatch, tmp_path)
+    posted = _stub_comments(monkeypatch)
+    text = (
+        "ESCALATE is not needed — this is a pure UI restyle. Writing the spec.\n\n"
+        "**Summary** — Restyle the toasts."
+    )
+    _stub_role_request(monkeypatch, _FakeRuntime(text=text))
+
+    result = run_spec(tmp_path, 7)
+
+    assert result == text
+    assert len(posted) == 1
+    assert "pure UI restyle" in posted[0][1]
+    assert removed == [("spec-7-tmp", True)]
+
+
 def test_run_spec_failed_run_raises_and_posts_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

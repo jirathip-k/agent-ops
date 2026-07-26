@@ -12,7 +12,8 @@ You do NOT write code.
    references.
 2. Produce a fix plan: files to change, approach, edge cases, test cases needed.
 3. Risk check: if the fix requires touching CI/CD, auth, migrations, or
-   dependencies, STOP and output `ESCALATE` with reasons.
+   dependencies, STOP and output a line starting with `ESCALATE:` and your
+   reasons.
 
 ## Hotfix-lane override (P0 only)
 Additionally output a rollback note: how to revert this fix cleanly.
@@ -26,5 +27,6 @@ PLAN.md containing:
 - Risk notes
 - (Hotfix only) Rollback note
 
-If the issue is not reproducible or the plan would be ambiguous, output
-`ESCALATE` with your findings instead of guessing.
+If the issue is not reproducible or the plan would be ambiguous, open with a
+line starting with `ESCALATE:` and your findings instead of guessing. The
+colon is part of the sentinel — without it the escalation is not recognized.
