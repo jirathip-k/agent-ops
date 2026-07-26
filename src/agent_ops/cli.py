@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, github, registry, stubs, surfaces, worktree
+from agent_ops import __version__, github, messages, registry, stubs, surfaces, worktree
 from agent_ops.config import PROJECT_CONFIG_REL, load_project_config, role_reports
 from agent_ops.fallback import artifact_footer
 from agent_ops.runtimes import get_runtime, runtime_names
@@ -197,7 +197,7 @@ def dispatch(
         raise typer.Exit(1) from exc
 
     try:
-        where = chosen.spawn(f"agent-issue-{issue}", command, root, attach_path=wt_path)
+        spawned = chosen.spawn(f"agent-issue-{issue}", command, root, attach_path=wt_path)
     except CommandError as exc:
         # The worktree itself is fine — only the surface attach (e.g. Orca not
         # yet indexing the brand-new worktree) failed. Keep the worktree and
@@ -211,7 +211,18 @@ def dispatch(
             f"or attach manually: agent implement {issue} --project {root}"
         )
         raise typer.Exit(1) from exc
-    typer.echo(f"dispatched issue #{issue} → {where}")
+    # How to reach the run once it is going, so `agent runs --wait` can be woken
+    # by it instead of inferring its state from the outside (issue #98).
+    messages.record_spawn(
+        root,
+        issue,
+        surface=spawned.surface,
+        handle=spawned.handle,
+        pid=spawned.pid,
+        log_path=spawned.log_path,
+        log=_err,
+    )
+    typer.echo(f"dispatched issue #{issue} → {spawned.where}")
 
 
 @app.command()
@@ -268,7 +279,7 @@ def resume(
     except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    typer.echo(f"resumed issue #{issue} → {where}")
+    typer.echo(f"resumed issue #{issue} → {where.where}")
 
 
 @app.command()
@@ -297,7 +308,7 @@ def plan(
         except (ValueError, CommandError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
-        typer.echo(f"dispatched plan for issue #{issue} → {where}")
+        typer.echo(f"dispatched plan for issue #{issue} → {where.where}")
         return
 
     config = load_project_config(root)
@@ -391,7 +402,7 @@ def review(
             _err(str(exc))
             raise typer.Exit(1) from exc
         label = f"PR #{pr_numbers[0]}" if len(pr_numbers) == 1 else f"{len(pr_numbers)} PRs"
-        typer.echo(f"dispatched review of {label} → {where}")
+        typer.echo(f"dispatched review of {label} → {where.where}")
         return
 
     if len(pr_numbers) == 1:

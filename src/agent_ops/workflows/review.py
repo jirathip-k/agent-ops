@@ -252,8 +252,8 @@ def dispatch_review(
     surface_name: str = "auto",
     post_comment: bool = False,
     runtime_name: str | None = None,
-) -> str:
-    """Spawn `agent review` on a visible surface; return a 'where it went' string.
+) -> surfaces.Spawned:
+    """Spawn `agent review` on a visible surface; return where it went.
 
     Unlike `agent dispatch` there is no task worktree to attach to — a review
     is read-only and runs against the project root — so the run is shown on the
