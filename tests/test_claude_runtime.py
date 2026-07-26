@@ -8,8 +8,10 @@ import pytest
 from agent_ops.runtimes import claude_code as claude_mod
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.runtimes.claude_code import (
+    PERMISSION_MODES,
     ClaudeCodeRuntime,
     build_command,
+    build_interactive_command,
     classify_failure,
     format_event,
     parse_result,
@@ -172,6 +174,41 @@ def test_build_command_includes_allowed_tools_and_model() -> None:
 def test_build_command_stream_uses_stream_json_verbose() -> None:
     cmd = build_command(RunRequest(prompt="x", cwd=Path("."), stream=True))
     assert cmd[-3:] == ["--output-format", "stream-json", "--verbose"]
+
+
+# --- the interactive form (`agent spawn`) ----------------------------------
+
+
+def test_interactive_command_carries_a_permission_mode() -> None:
+    """Without it the session asks, and a delegated worker has nobody to ask (#115)."""
+    cmd = build_interactive_command("fix it", permission_mode="bypassPermissions", model="sonnet")
+
+    assert cmd[0] == "claude"
+    assert "-p" not in cmd  # still the interactive form, not the headless one
+    idx = cmd.index("--permission-mode")
+    assert cmd[idx + 1] == "bypassPermissions"
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[-1] == "fix it"
+
+
+def test_interactive_command_passes_a_tightened_mode_through() -> None:
+    cmd = build_interactive_command(None, permission_mode="plan")
+    assert cmd == ["claude", "--permission-mode", "plan"]
+
+
+def test_interactive_command_rejects_a_mode_the_cli_would_reject() -> None:
+    """`claude` would reject it too — but inside a terminal nobody is reading,
+    and the session dies before its stop hook loads, so the worker just vanishes."""
+    with pytest.raises(ValueError) as exc:
+        build_interactive_command("x", permission_mode="acceptEdit")
+
+    assert "acceptEdit" in str(exc.value)
+    assert "acceptEdits" in str(exc.value)  # the message names what to use instead
+
+
+def test_the_modes_the_headless_path_configures_are_all_spawnable() -> None:
+    """`default` is the legacy spelling planner/reviewer still use in defaults.yaml."""
+    assert {"default", "acceptEdits", "plan", "bypassPermissions"} <= set(PERMISSION_MODES)
 
 
 # The exact text Claude Code printed when the account hit its Fable spend

@@ -314,6 +314,16 @@ def spawn(
     ] = None,
     surface: Annotated[str, typer.Option(help="Where to run: auto | orca | background")] = "auto",
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
+    permission_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--permission-mode",
+            # The valid set is per-runtime, so it is not spelled out here: the
+            # runtime rejects an unknown mode by name before anything is built.
+            help="Override runtime.interactive_permission_mode for this spawn "
+            "(claude: bypassPermissions | acceptEdits | plan | ...)",
+        ),
+    ] = None,
 ) -> None:
     """Put an interactive coding agent in a fresh worktree, wired to report when it stops.
 
@@ -322,6 +332,10 @@ def spawn(
     not model — and seeds a stop hook so its completion is reported even if it
     dies, is interrupted, or stops early (issue #113). Wait on it with
     `agent runs <issue> --wait`.
+
+    The session runs at `runtime.interactive_permission_mode` — high by default,
+    because a delegated worker that stops to ask has nobody to ask (issue #115).
+    Tighten it for one spawn with `--permission-mode`.
     """
     root = project.resolve()
     try:
@@ -337,6 +351,7 @@ def spawn(
             prompt=prompt,
             surface_name=surface,
             runtime_name=runtime,
+            permission_mode=permission_mode,
             log=typer.echo,
         )
     except (ValueError, FileExistsError, CommandError, RuntimeError) as exc:
