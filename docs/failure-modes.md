@@ -14,6 +14,11 @@ back.** The system stayed up, produced output, and looked healthy — while
 skipping the thing it was there to do. When adding a degradation path, the
 question is not "does it recover?" but "does anyone find out?"
 
+Tests and review are not who finds out. Every mode in the spawn lane below
+shipped through both and none survived one real use: a path that only runs
+against a live terminal, a real approval prompt or a second process is
+unexercised code however green the suite is.
+
 ## CI lane
 
 | Failure | Why it was invisible | What catches it now |
@@ -84,6 +89,40 @@ The one state it adds rather than hurries is `failed`: a run whose gates never
 passed leaves a worktree, no PR and no feedback, which is indistinguishable
 from an abandoned one. No table row can recover that — only the run itself
 knows.
+
+## Spawn lane — nothing catches these yet
+
+`agent spawn` shipped in #114 with 419 lines of passing tests, green CI and a
+careful review. The three modes below were found within five minutes of its
+first real use and all remain open, so the third column names the issue rather
+than a guard — there is no guard. That gap between "verified" and "exercised"
+is the entry, as much as any one row.
+
+| Failure | Why it was invisible | What catches it now |
+|---|---|---|
+| A spawned interactive session runs with no permission mode | `build_interactive_command` (`runtimes/claude_code.py:193`) never passes `--permission-mode`, which the headless `build_command` always does (`:174`). The worker stops for approval on every edit, and delegated work waiting on a human who may not be watching looks exactly like delegated work in progress | Nothing — #115 open |
+| A live spawn reads as `stopped`, and the wait the tool recommends confirms it | `_RUN_VERBS` (`runs.py:171`) omits spawn and could not help anyway — the process on the surface is `claude`, not `agent` — and `classify` never consults the spawn record, so a working agent gets "worktree kept, no PR, no feedback — inspect". `agent spawn` then prints "wait with `agent runs <N> --wait`", and since #86/#89 two consecutive `stopped` polls are terminal: the recommended wait returns success after ~30s. The same false-`stopped` class as #86, back through a path the classifier does not know exists | Nothing — #116 open |
+| A transient attach timeout orphans a live terminal | `_attempt_orca_attach` (`surfaces.py:86`) retries only `selector_not_found` and raises on anything else. A real `agent spawn 108` raised `Timed out waiting for terminal handle after creation` — *after* the terminal had been created — and the retry made a second one. Verified: two live sessions on one worktree and one branch, with the spawn record naming only one handle, so the other is invisible to `agent runs` and unaddressable by `messages.send_outcome`. Shared with `dispatch`, not unique to spawn | Nothing — #117 open |
+
+### What they do together
+
+The three compose into a fourth, which is worse than any of them. That same
+orphaned spawn left two agents on one branch; both carried the per-worktree
+stop hook #114 seeds, and `--if-unreported` gives whichever exits first the
+single report slot. The orphan noticed the other, stood down, and took it:
+
+> halted — "Duplicate dispatch: two agent processes (pid 81644 and 82661) …
+> racing edits into runtimes/base.py"
+
+So `agent runs 108` showed `halted`, needs-human, while the real agent was
+seven minutes into the task and working. A supervisor reading that verdict
+would have concluded the opposite of the truth, twice over — the run that
+reported was the one that should not have existed.
+
+The part worth keeping is not the misreport. Two uncoordinated agents shared a
+branch, and the only thing standing between them and interleaved edits was one
+agent noticing the other and choosing to stand down. Nothing in the platform
+arranged that, detected it, or would have stopped it. Record it as luck.
 
 ## Tests
 
