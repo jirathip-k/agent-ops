@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_ops import github
-from agent_ops.utils import CommandError
+from agent_ops.utils import CommandError, run
 
 
 def test_get_issue_requests_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,3 +167,54 @@ def test_open_prs_for_issue_filters_to_matching_prs(
     monkeypatch.setattr(github, "run", fake_run)
     result = github.open_prs_for_issue(132, cwd=tmp_path)
     assert [pr["number"] for pr in result] == [140, 142]
+
+
+# --- `--pr` is a URL, or it is refused (issue #122) ------------------------
+
+
+def _repo_with_remote(tmp_path: Path, url: str) -> Path:
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+    run(["git", "remote", "add", "origin", url], cwd=tmp_path)
+    return tmp_path
+
+
+def test_normalise_pr_url_expands_a_bare_number(tmp_path: Path) -> None:
+    """`--pr 121` stored `{"pr_url": "121"}`, which `agent runs` rendered as
+    `PR #121 — 121` — a field named `_url` holding something that isn't one."""
+    repo = _repo_with_remote(tmp_path, "git@github.com:jirathip-k/agent-ops.git")
+
+    assert (
+        github.normalise_pr_url("121", repo) == "https://github.com/jirathip-k/agent-ops/pull/121"
+    )
+    # ...and the `#121` an agent is equally likely to type.
+    assert github.normalise_pr_url("#121", repo).endswith("/pull/121")
+
+
+def test_normalise_pr_url_reads_an_https_remote_too(tmp_path: Path) -> None:
+    repo = _repo_with_remote(tmp_path, "https://github.com/jirathip-k/agent-ops.git")
+    assert github.normalise_pr_url("121", repo).endswith("jirathip-k/agent-ops/pull/121")
+
+
+def test_normalise_pr_url_passes_a_real_url_through(tmp_path: Path) -> None:
+    url = "https://github.com/jirathip-k/agent-ops/pull/121"
+    assert github.normalise_pr_url(url, tmp_path) == url
+    assert github.normalise_pr_url(url + "/", tmp_path) == url
+
+
+def test_normalise_pr_url_refuses_what_it_cannot_make_a_url_of(tmp_path: Path) -> None:
+    for value in ("soon", "https://github.com/jirathip-k/agent-ops", "  "):
+        with pytest.raises(CommandError):
+            github.normalise_pr_url(value, tmp_path)
+
+
+def test_normalise_pr_url_says_so_when_a_number_cannot_be_expanded(tmp_path: Path) -> None:
+    """No remote to derive the URL from — better to refuse at the boundary than
+    to store the number and render it as a URL later."""
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+
+    with pytest.raises(CommandError, match="pass the full URL"):
+        github.normalise_pr_url("121", tmp_path)
+
+
+def test_remote_slug_is_none_outside_a_repo(tmp_path: Path) -> None:
+    assert github.remote_slug(tmp_path) is None

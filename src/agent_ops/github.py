@@ -1,10 +1,64 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from agent_ops.utils import CommandError, run
+
+# What a PR URL has to look like to be stored in a field called `pr_url`.
+# Host-agnostic on purpose (GitHub Enterprise, a proxy), but it must be a URL
+# ending in `/pull/<n>` — which is the form `runs._outcome_detail` parses the
+# number off, and the form `agent runs` renders.
+_PR_URL_RE = re.compile(r"^https?://\S+/pull/\d+/?$")
+_REMOTE_RE = re.compile(
+    r"^(?:git@[^:]+:|(?:ssh|git|https?)://[^/]+/)(?P<slug>[^/]+/.+?)(?:\.git)?$"
+)
+
+
+def remote_slug(cwd: Path) -> str | None:
+    """`owner/name` from this repo's `origin` remote, or None when unreadable.
+
+    Read from git rather than from `gh`, so it costs no network round trip: its
+    one caller is `normalise_pr_url`, which can be reached from a session-end
+    hook running in a finishing agent's critical path.
+    """
+    try:
+        proc = run(["git", "remote", "get-url", "origin"], cwd=cwd, check=False)
+    except (CommandError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = _REMOTE_RE.match(proc.stdout.strip())
+    return match.group("slug") if match is not None else None
+
+
+def normalise_pr_url(value: str, cwd: Path) -> str:
+    """A `--pr` value as a real URL, or `CommandError` saying why it isn't one.
+
+    `agent report --pr` is documented as taking a URL and was a bare `str`. An
+    agent passed `--pr 121`, so the outcome record held `{"pr_url": "121"}` and
+    `agent runs` — which parses the number off the end of the URL — rendered
+    `PR #121 — 121` (issue #122). A number is what an agent will type, so it is
+    accepted and expanded here rather than stored in a field named `_url` that
+    is not one. Anything that is neither is rejected at this boundary, where
+    the caller can still fix it, rather than after it is on disk.
+    """
+    text = value.strip().lstrip("#")
+    if not text:
+        raise CommandError("--pr was empty — pass the PR's URL, or just its number")
+    if text.isdigit():
+        slug = remote_slug(cwd)
+        if slug is None:
+            raise CommandError(
+                f"--pr {text} is a PR number, and this repo's `origin` remote could not be "
+                "read to expand it into a URL — pass the full URL instead"
+            )
+        return f"https://github.com/{slug}/pull/{text}"
+    if _PR_URL_RE.match(text):
+        return text.rstrip("/")
+    raise CommandError(f"--pr {value!r} is neither a PR URL (…/pull/<number>) nor a PR number")
 
 
 def get_issue(number: int, cwd: Path) -> dict[str, Any]:
