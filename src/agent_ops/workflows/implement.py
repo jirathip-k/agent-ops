@@ -9,7 +9,7 @@ from agent_ops import github, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
-from agent_ops.prompts import escalated, render_task
+from agent_ops.prompts import escalated, opens_with_escalation_word, render_task
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, flush_print, run
@@ -144,6 +144,11 @@ def make_plan(
         raise RuntimeError(f"Planner run failed: {result.text}")
     if escalated(result.text):
         raise RuntimeError(f"Planner escalated:\n{result.text}")
+    if opens_with_escalation_word(result.text):
+        log(
+            "note: the plan opens with the word ESCALATE but not as the sentinel "
+            "(`ESCALATE:` or a line of its own) — treating it as a plan"
+        )
     return request, result
 
 

@@ -30,8 +30,14 @@ the source of truth to build on — do not re-derive the analysis from scratch.
 
 ## Output
 
-Either a line starting with `ESCALATE:` and your reasoning, or a markdown
-plan with exactly these sections:
+Either an escalation or a plan, never both.
+
+To escalate, the FIRST line must start with `ESCALATE:` — nothing before it —
+followed by your reasoning. That word is a sentinel a script matches on, so
+never open a plan with it: if you weighed escalating and decided against it,
+just write the plan and say nothing about escalating.
+
+Otherwise, a markdown plan with exactly these sections:
 
 - **Root cause / target** (file:line references)
 - **Proposed change** (files, approach)

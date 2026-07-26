@@ -5,6 +5,7 @@ import pytest
 from agent_ops import github, worktree
 from agent_ops.config import ProjectConfig
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
+from agent_ops.utils import CommandError
 from agent_ops.workflows import spec as spec_mod
 from agent_ops.workflows.spec import run_spec
 
@@ -47,7 +48,11 @@ def _stub_role_request(monkeypatch: pytest.MonkeyPatch, runtime: object) -> None
     monkeypatch.setattr(spec_mod, "role_request", fake_role_request)
 
 
-def _stub_issue(monkeypatch: pytest.MonkeyPatch, issue_number: int = 7) -> None:
+def _stub_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_number: int = 7,
+    comments: list[dict[str, str]] | None = None,
+) -> None:
     monkeypatch.setattr(
         github,
         "get_issue",
@@ -56,6 +61,7 @@ def _stub_issue(monkeypatch: pytest.MonkeyPatch, issue_number: int = 7) -> None:
             "title": "some idea",
             "body": "elaborate on this",
             "labels": [],
+            "comments": comments or [],
         },
     )
 
@@ -145,8 +151,15 @@ def test_run_spec_post_false_returns_text_without_posting(
     assert removed == [("spec-7-tmp", True)]
 
 
-@pytest.mark.parametrize("escalation_text", ["ESCALATE: needs a human", "  escalate: lowercase"])
-def test_run_spec_escalate_raises_and_posts_nothing(
+@pytest.mark.parametrize(
+    "escalation_text",
+    [
+        "ESCALATE: needs a human",
+        "  escalate: lowercase",
+        "ESCALATE\n\nthe sentinel standing on its own line",
+    ],
+)
+def test_run_spec_escalate_raises_and_posts_no_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escalation_text: str
 ) -> None:
     _stub_issue(monkeypatch)
@@ -159,35 +172,78 @@ def test_run_spec_escalate_raises_and_posts_nothing(
     with pytest.raises(RuntimeError, match="escalated"):
         run_spec(tmp_path, 7)
 
-    assert posted == []
+    # the escalation is kept where a human reads it; the spec is not posted,
+    # because there is no spec
+    assert [body.splitlines()[0] for _n, body in posted] == [spec_mod.ESCALATION_HEADER]
+    assert escalation_text.strip() in posted[0][1]
     assert removed == [("spec-7-tmp", True)]
 
 
-def test_run_spec_posts_a_spec_that_opens_by_ruling_escalation_out(
+def test_run_spec_escalation_is_posted_once_not_once_per_scheduled_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The #128 regression: prose mentioning ESCALATE is not an escalation.
+    """The gate label only clears on success, so the same run repeats nightly."""
+    already = f"{spec_mod.ESCALATION_HEADER}\n\nasked last night"
+    _stub_issue(monkeypatch, comments=[{"body": already}])
+    _stub_fetch(monkeypatch)
+    _stub_worktree(monkeypatch, tmp_path)
+    posted = _stub_comments(monkeypatch)
+    _stub_role_request(monkeypatch, _FakeRuntime(text="ESCALATE: needs a human"))
+
+    with pytest.raises(RuntimeError, match="escalated"):
+        run_spec(tmp_path, 7)
+
+    assert posted == []
+
+
+def test_run_spec_escalation_survives_a_failing_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` that cannot comment must not replace the escalation with its own error."""
+    _stub_issue(monkeypatch)
+    _stub_fetch(monkeypatch)
+    _stub_worktree(monkeypatch, tmp_path)
+
+    def boom(number: int, body: str, cwd: Path) -> None:
+        raise CommandError("gh: not authenticated")
+
+    monkeypatch.setattr(github, "comment_on_issue", boom)
+    _stub_role_request(monkeypatch, _FakeRuntime(text="ESCALATE: needs a human"))
+    logged: list[str] = []
+
+    with pytest.raises(RuntimeError, match="escalated"):
+        run_spec(tmp_path, 7, log=logged.append)
+
+    assert any("could not post escalation" in line for line in logged)
+
+
+def test_run_spec_posts_a_spec_that_opens_by_ruling_escalation_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declined_escalation_reply: str
+) -> None:
+    """The #128/#129 regression: prose mentioning ESCALATE is not an escalation.
 
     A real sendmeter run opened this way and the finished spec was discarded,
     the label left on, and the pipeline exited 1 — reporting failure while
-    throwing away work already paid for.
+    throwing away work already paid for. The reply is the captured one from
+    `conftest`, so the phrasing that actually broke can't drift out of the
+    suite.
     """
     _stub_issue(monkeypatch, issue_number=7)
     _stub_fetch(monkeypatch)
     removed, _refs = _stub_worktree(monkeypatch, tmp_path)
     posted = _stub_comments(monkeypatch)
-    text = (
-        "ESCALATE is not needed — this is a pure UI restyle. Writing the spec.\n\n"
-        "**Summary** — Restyle the toasts."
-    )
-    _stub_role_request(monkeypatch, _FakeRuntime(text=text))
+    _stub_role_request(monkeypatch, _FakeRuntime(text=declined_escalation_reply))
+    logged: list[str] = []
 
-    result = run_spec(tmp_path, 7)
+    result = run_spec(tmp_path, 7, log=logged.append)
 
-    assert result == text
+    assert result == declined_escalation_reply
     assert len(posted) == 1
+    assert posted[0][1].startswith("## Agent spec")
     assert "pure UI restyle" in posted[0][1]
     assert removed == [("spec-7-tmp", True)]
+    # let through, but not in silence
+    assert any("not as the sentinel" in line for line in logged)
 
 
 def test_run_spec_failed_run_raises_and_posts_nothing(
