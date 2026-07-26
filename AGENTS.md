@@ -46,3 +46,11 @@ triage pipeline. This repo manages itself with its own tooling.
 - `prompts/orchestrator.md` safety rules and `config/defaults.yaml` safety
   defaults (auto-merge caps, blocked paths) — human-reviewed changes only
 - `pyproject.toml` dependencies and `uv.lock`
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in
+this project. Do not repeat what the codebase already shows; point to the
+authoritative file or command instead. Prefer rewriting or pruning existing
+entries over appending new ones. When updating this file, preserve this bar
+for all agents and keep entries concise.
