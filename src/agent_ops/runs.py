@@ -8,6 +8,7 @@ go stale or to reconcile after a crash.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Callable
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import github, messages, worktree
+from agent_ops import github, messages, orca, worktree
 from agent_ops.utils import CommandError, run
 
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
@@ -65,6 +66,69 @@ class Outcome:
     state: str
     pr_url: str | None
     reason: str | None
+
+
+@dataclass(frozen=True)
+class SpawnState:
+    """Whether the session `agent spawn` attached still exists, and what to call it.
+
+    `alive is None` is "could not be determined" and is never evidence of
+    anything — see `spawn_state`.
+    """
+
+    alive: bool | None
+    where: str
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while a process with this pid exists.
+
+    `os.kill(pid, 0)` rather than a `ps` scan: this is the background surface's
+    only liveness signal, and it should not depend on parsing another command's
+    output — the failure mode `agent runs` already hit twice (see
+    docs/failure-modes.md). A recycled pid reads as alive, which errs toward
+    `running`; that is the same direction `live_runs` errs in and the safe one,
+    since a false `running` costs a wait and a false `stopped` ends one.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by somebody else
+    except OSError:
+        return False
+    return True
+
+
+def spawn_state(record: messages.SpawnRecord) -> SpawnState | None:
+    """Is the interactive session `agent spawn` attached still there?
+
+    None means *there is nothing to ask* — no surface identity, or a record
+    from `agent dispatch`, whose worker is an `agent implement` process
+    `live_runs` already finds in `ps` and whose Orca terminal outlives it. That
+    is not a degraded answer: it is a run with no liveness channel, watched by
+    polling exactly as it always was, and it must never mark a poll
+    untrustworthy.
+
+    The two surfaces get their own answers rather than one inherited from Orca
+    (issue #116): an Orca terminal is a handle only Orca can resolve, and a
+    background run is a pid this process can signal. Only the Orca side can
+    come back unknown, and only when Orca itself cannot be reached.
+
+    What "alive" means here is that the *session* exists, not that the agent
+    inside it is still typing. A worker that finishes and sits at a prompt
+    reads as alive — which is why `classify` ranks the outcome record above
+    this, and why the stop hook writing that record at session end (issue #120)
+    is what ends the run rather than this.
+    """
+    if record.kind != messages.SPAWN_KIND:
+        return None
+    if record.pid is not None:
+        return SpawnState(_pid_alive(record.pid), f"pid {record.pid}")
+    if record.handle:
+        return SpawnState(orca.terminal_alive(record.handle), f"orca terminal {record.handle}")
+    return None
 
 
 def _fmt_elapsed(etime: str) -> str:
@@ -285,6 +349,7 @@ def classify(
     has_feedback: bool,
     pr: dict[str, Any] | None,
     outcome: Outcome | None = None,
+    spawn: SpawnState | None = None,
 ) -> Run | None:
     """One issue's state from its signals, in the precedence the issue lays out.
 
@@ -297,10 +362,23 @@ def classify(
     by a run that was never cleanly resumed through `_finish_run` would report
     `halted` forever, even after the outcome it recorded (e.g. a merged PR)
     supersedes it (issue #78).
+
+    A live *spawned session* (`spawn`) ranks last of the positive signals,
+    immediately above the `stopped` arm — deliberately, and not where a
+    liveness signal would naturally go. It answers exactly the case issue #116
+    is about: no outcome, no findings, no PR, a worktree, and an agent working
+    in it, which read as "worktree kept, no PR, no feedback — inspect". It must
+    not outrank the three signals above it, because the session is a terminal
+    Orca keeps open after the agent inside it has stopped: put it any higher
+    and a run that reported `done`, or halted with findings, would report
+    `running` for as long as somebody left the tab open.
+
+    `running` is not in `TERMINAL_STATES`, which is the other half of #116: the
+    state a live spawn reports has to be one `--wait` keeps waiting on.
     """
+    prefix = f"worktree {worktree_path}, " if worktree_path is not None else ""
     if live is not None:
         pid, etime, verb = live
-        prefix = f"worktree {worktree_path}, " if worktree_path is not None else ""
         # `dispatch` is the pre-spawn window: the worktree exists but the child
         # implement hasn't execed yet. Say so rather than implying the work is
         # under way.
@@ -314,6 +392,8 @@ def classify(
         return Run(issue, "halted", f"self-review — resume with `agent resume {issue}`")
     if pr is not None:
         return Run(issue, "done", f"PR #{pr['number']}")
+    if spawn is not None and spawn.alive:
+        return Run(issue, "running", f"{prefix}spawned agent — {spawn.where}")
     if worktree_path is not None:
         # Deliberately not "re-dispatch": worktree.create(reuse=True) accepts a
         # pristine checkout, so acting on that advice spawns a second agent into
@@ -499,6 +579,14 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     caller comparing across polls (`wait_for_runs`) needs to know not to
     trust it as positive evidence of either.
 
+    An Orca that cannot say whether a spawned session is still alive degrades
+    the same way and for the same reason (issue #116): the row it leaves is
+    `stopped`, which two consecutive trustworthy polls turn into a terminal
+    verdict, so an unreachable Orca must not be allowed to supply them. Only an
+    *unanswerable* question degrades a poll — a run with no liveness channel at
+    all (no Orca ever, the background surface with no pid, a `dispatch` record)
+    is not a question, and polls exactly as it always did.
+
     Outcome records are not part of that judgement: they are read straight off
     the local `.agent-runs/` directory, with no `gh`/`git` call that could
     degrade, so a poll that finds one is as trustworthy as the filesystem.
@@ -542,6 +630,25 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
                 pr_by_issue[issue] = pr
                 break
 
+    # Only asked for the issues where the answer could change the verdict —
+    # everything else already has a higher-precedence signal in `classify`, and
+    # each question is an `orca terminal show` round trip.
+    spawn_by_issue: dict[int, SpawnState] = {}
+    for issue in sorted(candidates):
+        if issue in live or issue in outcomes or issue in feedback_issues or issue in pr_by_issue:
+            continue
+        record = messages.load_spawn(project_root, issue, log=log)
+        state = spawn_state(record) if record is not None else None
+        if state is None:
+            continue
+        spawn_by_issue[issue] = state
+        if state.alive is None:
+            trustworthy = False
+            log(
+                f"warning: could not tell whether the spawned session for #{issue} is still "
+                f"alive ({state.where}); runs may be misreported as stopped"
+            )
+
     runs: list[Run] = []
     for issue in candidates:
         wt_path = worktree_by_issue.get(issue)
@@ -558,6 +665,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
             has_feedback=issue in feedback_issues,
             pr=pr_by_issue.get(issue),
             outcome=outcomes.get(issue),
+            spawn=spawn_by_issue.get(issue),
         )
         if found is not None:
             runs.append(found)
@@ -664,9 +772,10 @@ def wait_for_runs(
     `stopped` is not trusted on a single observation: `dispatch` leaves the
     same signature (worktree exists, nothing live yet) for the few seconds
     before the child `agent implement` execs, and a `gh`/`git worktree list`
-    outage degrades a real `done` to `stopped` too (`discover_runs`'s
-    untrustworthy-poll fallback). Both look identical to a genuinely
-    abandoned run for one poll. `stopped` only counts as terminal once it has
+    outage — or an Orca that cannot say whether a spawned session is still
+    alive — degrades a real `done`/`running` to `stopped` too
+    (`discover_runs`'s untrustworthy-poll fallback). All three look identical
+    to a genuinely abandoned run for one poll. `stopped` only counts as terminal once it has
     held for two consecutive *trustworthy* polls; `done`, `halted` and `gone`
     come from positive evidence and count immediately — except that a watched
     issue missing from an untrustworthy poll's results is never read as

@@ -1535,3 +1535,270 @@ def test_wait_for_runs_stale_handle_costs_one_interval_and_nothing_more(
     assert any("running → done" in line for line in lines)
     assert sleeps[0] == pytest.approx(15.0, abs=1.0)
     assert any("--wait" in cmd for cmd in calls)  # it did try the fast path
+
+
+# --- a live spawned session (issue #116) -----------------------------------
+
+
+def _spawn_record(**kwargs: object) -> messages.SpawnRecord:
+    defaults: dict = {"issue": 108, "surface": "orca", "kind": messages.SPAWN_KIND}
+    return messages.SpawnRecord(**{**defaults, **kwargs})
+
+
+def test_classify_reports_a_live_spawned_session_as_running_not_stopped() -> None:
+    """The whole of #116: `agent spawn` created the worktree, the agent is
+    working in it, and every other signal is legitimately absent — which read
+    as "worktree kept, no PR, no feedback — inspect"."""
+    run = runs.classify(
+        108,
+        worktree_path=Path(".worktrees/issue-108"),
+        live=None,
+        has_feedback=False,
+        pr=None,
+        spawn=runs.SpawnState(alive=True, where="orca terminal term_abc"),
+    )
+
+    assert run is not None
+    assert run.state == "running"
+    assert "term_abc" in run.detail
+
+
+def test_a_live_spawns_state_is_one_wait_keeps_waiting_on() -> None:
+    """`agent spawn` prints "wait with `agent runs N --wait`", and since
+    #86/#89 two consecutive `stopped` polls are terminal — so the recommended
+    wait returned success in ~30s while the agent worked. Whatever a live spawn
+    reports must not be terminal, or `--wait` lies in a new way."""
+    run = runs.classify(
+        108,
+        worktree_path=Path(".worktrees/issue-108"),
+        live=None,
+        has_feedback=False,
+        pr=None,
+        spawn=runs.SpawnState(alive=True, where="orca terminal term_abc"),
+    )
+
+    assert run is not None
+    assert run.state not in runs.TERMINAL_STATES
+    assert run.state != "gone"
+
+
+def test_classify_still_reaches_stopped_once_the_session_is_gone() -> None:
+    """A closed terminal or a rebooted machine has to end the wait, not extend
+    it forever."""
+    run = runs.classify(
+        108,
+        worktree_path=Path(".worktrees/issue-108"),
+        live=None,
+        has_feedback=False,
+        pr=None,
+        spawn=runs.SpawnState(alive=False, where="orca terminal term_abc"),
+    )
+
+    assert run == runs.Run(108, "stopped", STOPPED_DETAIL)
+
+
+def test_a_live_session_never_outranks_the_runs_own_account_of_itself() -> None:
+    """Orca keeps the terminal open after the agent inside it stops, so ranking
+    liveness any higher would report `running` for as long as somebody left the
+    tab open — hiding a `done`, a halt, or a PR."""
+    live = runs.SpawnState(alive=True, where="orca terminal term_abc")
+    wt = Path(".worktrees/issue-108")
+
+    reported = runs.classify(
+        108,
+        worktree_path=wt,
+        live=None,
+        has_feedback=False,
+        pr=None,
+        outcome=runs.Outcome("done", "https://x/pull/9", None),
+        spawn=live,
+    )
+    halted = runs.classify(108, worktree_path=wt, live=None, has_feedback=True, pr=None, spawn=live)
+    merged = runs.classify(
+        108, worktree_path=wt, live=None, has_feedback=False, pr=_pr(9, issue=108), spawn=live
+    )
+
+    assert reported is not None and reported.state == "done"
+    assert halted is not None and halted.state == "halted"
+    assert merged is not None and merged.state == "done"
+
+
+def test_spawn_state_reads_liveness_off_the_orca_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: True)
+    state = runs.spawn_state(_spawn_record(handle="term_abc"))
+    assert state is not None and state.alive is True and "term_abc" in state.where
+
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: None)
+    unknown = runs.spawn_state(_spawn_record(handle="term_abc"))
+    assert unknown is not None and unknown.alive is None
+
+
+def test_spawn_state_gives_the_background_surface_its_own_answer() -> None:
+    """The background surface has no handle at all, so it cannot inherit the
+    Orca one (#116) — `pid` is its identity and a signal-0 its liveness."""
+    mine = runs.spawn_state(_spawn_record(surface="background", pid=os.getpid()))
+    assert mine is not None and mine.alive is True
+
+    # A pid nothing could plausibly be using. `os.kill` on it raises
+    # ProcessLookupError, which is the answer.
+    gone = runs.spawn_state(_spawn_record(surface="background", pid=0x7FFFFFFF))
+    assert gone is not None and gone.alive is False
+
+
+def test_spawn_state_asks_nothing_of_a_dispatch_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`dispatch` puts `agent implement` on the surface — a process `live_runs`
+    finds in `ps`, whose Orca terminal outlives it. Reading liveness off that
+    handle would report a crashed implement as `running` forever."""
+
+    def boom(handle: str) -> bool:
+        raise AssertionError("a dispatch record's handle is an address, not a liveness signal")
+
+    monkeypatch.setattr(runs.orca, "terminal_alive", boom)
+
+    assert runs.spawn_state(_spawn_record(kind=messages.DISPATCH_KIND, handle="term_abc")) is None
+
+
+def test_spawn_state_is_none_when_there_is_no_channel_to_ask() -> None:
+    """No Orca, no handle: not a degraded answer, just a run watched by polling
+    exactly as it always was."""
+    assert runs.spawn_state(_spawn_record(surface="background")) is None
+
+
+def _one_spawned_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: dict) -> None:
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-108", "fix/issue-108")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(tmp_path, 108, **record)
+
+
+def test_discover_runs_reports_a_working_spawn_as_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _one_spawned_worktree(
+        tmp_path,
+        monkeypatch,
+        {"surface": "orca", "handle": "term_abc", "kind": messages.SPAWN_KIND},
+    )
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: True)
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert [(r.issue, r.state) for r in result] == [(108, "running")]
+    assert trustworthy is True
+
+
+def test_discover_runs_will_not_call_a_spawn_stopped_on_an_orca_it_cannot_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#86/PR #89's pattern, reused rather than reinvented: the row degrades to
+    `stopped`, which two trustworthy polls turn terminal — so an unreachable
+    Orca must not be allowed to supply them."""
+    _one_spawned_worktree(
+        tmp_path,
+        monkeypatch,
+        {"surface": "orca", "handle": "term_abc", "kind": messages.SPAWN_KIND},
+    )
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: None)
+    warnings: list[str] = []
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=warnings.append)
+
+    assert [(r.issue, r.state) for r in result] == [(108, "stopped")]
+    assert trustworthy is False
+    assert any("could not tell whether the spawned session" in w for w in warnings)
+
+
+def test_discover_runs_stays_trustworthy_for_a_run_with_no_liveness_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Orca stays optional. A spawn with no handle is not an unanswered
+    question — it is a run that never had a push channel, and it must poll with
+    no error and no degradation."""
+    _one_spawned_worktree(
+        tmp_path, monkeypatch, {"surface": "background", "kind": messages.SPAWN_KIND}
+    )
+
+    def boom(handle: str) -> bool:
+        raise AssertionError("nothing to ask Orca about")
+
+    monkeypatch.setattr(runs.orca, "terminal_alive", boom)
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert [(r.issue, r.state) for r in result] == [(108, "stopped")]
+    assert trustworthy is True
+
+
+def test_discover_runs_does_not_ask_orca_once_the_run_has_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outcome record outranks liveness, so the question never arises — and
+    asking anyway would cost a round trip per poll for every finished run."""
+    _one_spawned_worktree(
+        tmp_path,
+        monkeypatch,
+        {"surface": "orca", "handle": "term_abc", "kind": messages.SPAWN_KIND},
+    )
+    runs.write_outcome(tmp_path, 108, state="done", pr_url="https://x/pull/9")
+
+    def boom(handle: str) -> bool:
+        raise AssertionError("the run already said how it ended")
+
+    monkeypatch.setattr(runs.orca, "terminal_alive", boom)
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert [(r.issue, r.state) for r in result] == [(108, "done")]
+    assert trustworthy is True
+
+
+def test_wait_does_not_return_while_a_spawned_session_is_still_working(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The false finish in #116: `agent runs 108 --wait` returned success after
+    ~30s because two `stopped` polls are terminal. It must run out its timeout
+    instead."""
+    _one_spawned_worktree(
+        tmp_path,
+        monkeypatch,
+        {"surface": "orca", "handle": "term_abc", "kind": messages.SPAWN_KIND},
+    )
+    monkeypatch.setattr(runs.orca, "terminal_alive", lambda handle: True)
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+
+    finished = runs.wait_for_runs(
+        tmp_path, issue=108, timeout_s=3.0, interval_s=1.0, log=lambda _: None
+    )
+
+    assert finished is False
+
+
+def test_wait_returns_once_the_spawned_session_is_actually_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """...and it does have to end: a closed terminal is a terminal state, not a
+    wait that hangs forever."""
+    _one_spawned_worktree(
+        tmp_path,
+        monkeypatch,
+        {"surface": "orca", "handle": "term_abc", "kind": messages.SPAWN_KIND},
+    )
+    alive = [True, True, False, False, False]
+    monkeypatch.setattr(
+        runs.orca, "terminal_alive", lambda handle: alive.pop(0) if alive else False
+    )
+    monkeypatch.setattr(runs.time, "sleep", lambda s: None)
+
+    finished = runs.wait_for_runs(
+        tmp_path, issue=108, timeout_s=60.0, interval_s=1.0, log=lambda _: None
+    )
+
+    assert finished is True
