@@ -15,6 +15,12 @@ from agent_ops.workflows.triage import LABEL_COLORS
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s*[—-]+\s*(.+)$")
 
+#: How much repo-authored focus text may reach the prompt. Repo text is
+#: trusted at the same level as AGENTS.md, but a long one would still crowd
+#: out the filing rules it sits above, so it is bounded rather than trusted
+#: to be short.
+FOCUS_MAX_CHARS = 2000
+
 
 @dataclass(frozen=True)
 class ScoutResult:
@@ -36,6 +42,31 @@ def parse_scout(text: str) -> list[ScoutResult] | None:
         if m:
             results.append(ScoutResult(int(m.group(1)), m.group(2).strip()))
     return results
+
+
+def focus_block(focus: str) -> str:
+    """The `{repo_focus}` section of the scout prompt, or "" when unconfigured.
+
+    Same shape as `skills.load_skills`: the workflow builds the block and the
+    template just holds the placeholder. A blank focus renders the prompt
+    byte-identically to a repo that never configured one, which is why the
+    block carries its own surrounding newlines and the template line does not.
+
+    The block sits below the "ground every candidate in a signal" rule and
+    above `## Filing`, and closes by pointing at the rules that follow: a repo
+    may say what to look for, never what scout is allowed to file.
+    """
+    text = focus.strip()
+    if not text:
+        return ""
+    if len(text) > FOCUS_MAX_CHARS:
+        text = text[:FOCUS_MAX_CHARS].rstrip() + " […truncated]"
+    return (
+        "\n## Repo focus\n\n"
+        f"{text}\n\n"
+        "Candidates from this section still need a concrete signal, and the\n"
+        "caps, duplicate check and danger-zone ban below still apply.\n"
+    )
 
 
 def run_scout(
@@ -79,7 +110,11 @@ def run_scout(
         runtime, request = role_request(
             config,
             "planner",
-            render_task("scout", max_issues=str(max_issues)),
+            render_task(
+                "scout",
+                max_issues=str(max_issues),
+                repo_focus=focus_block(config.scout.focus),
+            ),
             scout_wt,
             # may FILE issues (never fix); reads merged PRs for deferral threads
             extra_allowed_tools=(

@@ -28,7 +28,7 @@ TASK_FIELDS = {
         "feedback": "please add a test",
         "skills": "",
     },
-    "scout": {"max_issues": "3"},
+    "scout": {"max_issues": "3", "repo_focus": "\n## Repo focus\n\npages with no meta\n"},
     "triage": {"issues": "### #1: t"},
     "groom": {"issues": "### #1: t"},
     "distill": {

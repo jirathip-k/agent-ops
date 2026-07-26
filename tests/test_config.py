@@ -343,3 +343,15 @@ def test_role_overrides_fall_back_to_base_runtime(tmp_path: Path) -> None:
     assert reviewer.runtime == "claude_code"
     assert reviewer.model == "haiku"
     assert reviewer.permission_mode == "default"  # platform default kept
+
+
+def test_scout_focus_loads_from_the_target_repo(tmp_path: Path) -> None:
+    """The focus travels with the repo scout runs against, not the platform."""
+    _write_config(tmp_path, 'scout:\n  focus: "Pages with no meta description."\n')
+    assert load_project_config(tmp_path).scout.focus == "Pages with no meta description."
+
+
+def test_scout_focus_defaults_to_empty(tmp_path: Path) -> None:
+    assert load_project_config(tmp_path).scout.focus == ""
+    _write_config(tmp_path, "base_branch: develop\n")
+    assert load_project_config(tmp_path).scout.focus == ""

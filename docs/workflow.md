@@ -39,7 +39,13 @@ TODO/FIXME comments, merged-PR review threads that deferred work
 modules — and files at most N issues labeled `backlog` + `proposed-by-agent`,
 each citing its signal (file:line or PR link). It never brainstorms from a
 blank page and never fixes anything; filed issues enter the same groom/spec
-funnel as yours. In CI it runs daily via the scout lane (01:00 Asia/Bangkok,
+funnel as yours. A repo whose value doesn't live in those signals — a static
+or marketing site, say — can add `scout: {focus: "..."}` to its
+`.agent/config.yaml` naming the *signals* it wants mined instead ("pages
+missing meta descriptions", "posts not updated in 12 months" — never a goal
+like "do SEO research", which is the brainstorming scout refuses); the caps,
+duplicate check and danger-zone ban apply to those candidates unchanged.
+In CI it runs daily via the scout lane (01:00 Asia/Bangkok,
 feeding the same morning's triage and groom runs); run it locally whenever
 the queue runs dry.
 

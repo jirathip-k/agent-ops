@@ -58,6 +58,8 @@ you'd see it under the repo's **Actions** tab.
 - **Scout** (`agent scout`, run it when the queue is dry) mines the code for
   work worth doing — TODO comments, review threads that said "later", error
   handling gaps — and files a few `backlog` issues, each citing its evidence.
+  If those signals are thin in a repo, set `scout.focus` in its
+  `.agent/config.yaml` to name the signals that aren't (see `docs/workflow.md`).
 - **Distill** (`agent distill`, run it once AGENTS.md grows long) cuts spent
   run-by-run narration from AGENTS.md and folds anything durable into the
   right section. What it leaves alone is a configured list
