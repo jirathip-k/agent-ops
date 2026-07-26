@@ -92,6 +92,13 @@ merge:
   stable_branch: main
   max_changed_lines: 400
   max_changed_files: 12
+  # The caps above count non-test files/lines only; test detection is
+  # merge.test_paths, whose defaults live in config.MergeConfig (same pattern
+  # as blocked_paths below). Backstop = cap * total_cap_ratio, counting ALL
+  # files including tests, so excluding test lines from the caps above still
+  # leaves a ceiling on total diff size. Rationale and owner sign-off for this
+  # danger-zone change: issue #136.
+  total_cap_ratio: 4
   # blocked_paths defaults live in code (config.MergeConfig); override here
   # per project if needed
 
