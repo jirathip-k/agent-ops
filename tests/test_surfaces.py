@@ -10,8 +10,10 @@ from agent_ops.utils import CommandError
 
 
 def test_background_surface_spawns_and_logs(tmp_path: Path) -> None:
-    where = surfaces.BackgroundSurface().spawn("demo", ["sh", "-c", "echo surface-works"], tmp_path)
-    assert "background pid" in where
+    spawned = surfaces.BackgroundSurface().spawn(
+        "demo", ["sh", "-c", "echo surface-works"], tmp_path
+    )
+    assert "background pid" in spawned.where
     log = tmp_path / ".agent-runs" / "demo.log"
     for _ in range(50):
         if log.exists() and "surface-works" in log.read_text():
@@ -43,13 +45,13 @@ def _orca_spawn_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 def test_orca_surface_attaches_terminal_to_attach_path(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _orca_spawn_calls(monkeypatch)
-    where = surfaces.OrcaSurface().spawn(
+    spawned = surfaces.OrcaSurface().spawn(
         "agent-issue-7",
         ["agent", "implement", "7", "--project", "/repo"],
         Path("/repo"),
         attach_path=Path("/repo/.worktrees/issue-7"),
     )
-    assert "term_abc" in where
+    assert "term_abc" in spawned.where
     (cmd,) = calls
     assert cmd[1:3] == ["terminal", "create"]
     assert "path:/repo/.worktrees/issue-7" in cmd
@@ -92,14 +94,14 @@ def test_orca_surface_retries_selector_not_found_then_succeeds(
     monkeypatch.setattr(surfaces, "run", fake_run)
     monkeypatch.setattr(surfaces.time, "sleep", lambda s: sleeps.append(s))
 
-    where = surfaces.OrcaSurface().spawn(
+    spawned = surfaces.OrcaSurface().spawn(
         "agent-issue-7",
         ["agent", "implement", "7", "--project", "/repo"],
         Path("/repo"),
         attach_path=Path("/repo/.worktrees/issue-7"),
     )
 
-    assert "term_abc" in where
+    assert spawned.handle == "term_abc"
     assert len(calls) == 2
     assert all(_worktree_selector(c) == "path:/repo/.worktrees/issue-7" for c in calls)
     assert sleeps == [surfaces._ATTACH_DELAY_S]
@@ -120,16 +122,20 @@ def test_orca_surface_falls_back_to_project_root_after_persistent_selector_not_f
     monkeypatch.setattr(surfaces, "run", fake_run)
     monkeypatch.setattr(surfaces.time, "sleep", lambda s: None)
 
-    where = surfaces.OrcaSurface().spawn(
+    spawned = surfaces.OrcaSurface().spawn(
         "agent-issue-7",
         ["agent", "implement", "7"],
         Path("/repo"),
         attach_path=Path("/repo/.worktrees/issue-7"),
     )
 
-    assert "term_root" in where
-    assert "fell back" in where
-    assert "/repo" in where  # states where the shell actually starts
+    assert "term_root" in spawned.where
+    assert "fell back" in spawned.where
+    assert "/repo" in spawned.where  # states where the shell actually starts
+    # the fallback terminal is still a terminal: its handle must be kept too,
+    # or a run that landed on the project-root card would silently lose its
+    # push channel
+    assert spawned.handle == "term_root"
     assert len(calls) == surfaces._ATTACH_ATTEMPTS + 1
     assert _worktree_selector(calls[-1]) == "path:/repo"
     assert "project root" in calls[-1][calls[-1].index("--title") + 1]
@@ -235,3 +241,15 @@ def test_pick_unavailable_surface_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(surfaces.OrcaSurface, "available", lambda self: False)
     with pytest.raises(ValueError, match="not available"):
         surfaces.pick("orca")
+
+
+def test_background_surface_reports_its_identity_without_a_handle(tmp_path: Path) -> None:
+    """Issue #98: the background surface satisfies the widened protocol by
+    filling in what it has. No handle means no push channel, which is the
+    permanent and expected state here and in the CI lane."""
+    spawned = surfaces.BackgroundSurface().spawn("demo", ["true"], tmp_path)
+
+    assert spawned.surface == "background"
+    assert spawned.handle is None
+    assert spawned.pid is not None
+    assert spawned.log_path == tmp_path / ".agent-runs" / "demo.log"

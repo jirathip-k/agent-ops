@@ -22,9 +22,9 @@ class FakeSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         self.calls.append((label, command, cwd, attach_path))
-        return "fake surface"
+        return surfaces.Spawned(where="fake surface", surface=self.name)
 
 
 class FailingSurface:
@@ -35,7 +35,7 @@ class FailingSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         raise CommandError("spawn exploded")
 
 

@@ -21,9 +21,9 @@ class FakeSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         self.calls.append((label, command, cwd, attach_path))
-        return "fake surface"
+        return surfaces.Spawned(where="fake surface", surface=self.name)
 
 
 class FailingSurface:
@@ -34,7 +34,7 @@ class FailingSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         raise CommandError("spawn exploded")
 
 
@@ -182,8 +182,8 @@ def test_plan_surface_auto_falls_back_to_background_when_orca_unavailable(
 
     monkeypatch.setattr(implement, "plan_command", lambda *args, **kwargs: ["true"])
 
-    where = implement.dispatch_plan(tmp_path, 45, surface_name="auto")
+    spawned = implement.dispatch_plan(tmp_path, 45, surface_name="auto")
 
     log_path = tmp_path / ".agent-runs" / "agent-plan-issue-45.log"
     assert log_path.exists()
-    assert "background pid" in where
+    assert "background pid" in spawned.where

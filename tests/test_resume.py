@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import github, runs, surfaces, worktree
+from agent_ops import github, messages, orca, runs, surfaces, worktree
 from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
 from agent_ops.loop import LoopOutcome
@@ -41,9 +41,9 @@ class FakeSurface:
 
     def spawn(
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
-    ) -> str:
+    ) -> surfaces.Spawned:
         self.calls.append((label, command, cwd, attach_path))
-        return "fake surface"
+        return surfaces.Spawned(where="fake surface", surface=self.name)
 
 
 def _fake_issue(number: int, cwd: Path) -> dict:
@@ -678,3 +678,184 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
 
     assert review.reviewed is True
     assert "new_module.py" in captured["prompt"]
+
+
+# --- pushed outcomes (issue #98) ------------------------------------------
+
+
+def _sent(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Capture what this run would push, without a message bus behind it."""
+    sends: list[dict] = []
+
+    def fake(project_root, issue, *, state, pr_url=None, reason=None, log=lambda _: None) -> bool:
+        sends.append({"issue": issue, "state": state, "pr_url": pr_url, "reason": reason})
+        return True
+
+    monkeypatch.setattr(implement_module.messages, "send_outcome", fake)
+    return sends
+
+
+def test_finish_run_reports_done_with_the_same_facts_as_the_durable_record(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
+    sends = _sent(monkeypatch)
+
+    implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        repo / "wt",
+        RunRequest(prompt="p", cwd=repo / "wt"),
+        _fake_runtime,
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert sends == [{"issue": 7, "state": "done", "pr_url": "https://x/pull/76", "reason": None}]
+    durable = json.loads(implement_module._outcome_path(repo, 7).read_text())
+    assert sends[0]["state"] == durable["state"]
+    assert sends[0]["pr_url"] == durable["pr_url"]
+
+
+def test_finish_run_reports_only_after_the_cleanup_it_announces(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A supervisor takes a pushed `done` as terminal on the spot, so the
+    report must come after the worktree removal, not before it."""
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
+    order: list[str] = []
+    monkeypatch.setattr(
+        implement_module.worktree, "remove", lambda *a, **k: order.append("worktree removed")
+    )
+    monkeypatch.setattr(
+        implement_module.messages,
+        "send_outcome",
+        lambda *a, **k: order.append("reported") or True,
+    )
+
+    implement_module._finish_run(
+        repo,
+        ProjectConfig(),
+        _fake_issue(7, repo),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        repo / "wt",
+        RunRequest(prompt="p", cwd=repo / "wt"),
+        _fake_runtime,
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(repo, repo / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert order == ["worktree removed", "reported"]
+
+
+def test_record_halt_reports_halted_so_blocked_is_not_read_as_finished(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    sends = _sent(monkeypatch)
+
+    implement_module._record_halt(repo, 13, "review found issues", log=lambda _: None)
+
+    assert len(sends) == 1
+    assert sends[0]["state"] == "halted"
+    assert "agent resume 13" in (sends[0]["reason"] or "")
+
+
+def test_record_halt_survives_a_message_bus_that_has_gone_away(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort throughout, exercised through the real `messages` code: the
+    findings must still be stashed and the comment still posted even when the
+    push cannot happen at all."""
+    commented: list[int] = []
+    monkeypatch.setattr(
+        implement_module.github,
+        "comment_on_issue",
+        lambda number, body, cwd: commented.append(number),
+    )
+    monkeypatch.setattr(orca, "available", lambda: True)
+    monkeypatch.setattr(orca, "executable", lambda: "orca")
+    messages.record_spawn(repo, 13, surface="orca", handle="term_abc")
+
+    def vanished(cmd: list[str], **kwargs: object) -> None:
+        raise FileNotFoundError("orca: no such file")
+
+    monkeypatch.setattr(messages, "run", vanished)
+    logged: list[str] = []
+
+    implement_module._record_halt(repo, 13, "review found issues", log=logged.append)
+
+    assert implement_module._feedback_path(repo, 13).read_text() == "review found issues"
+    assert commented == [13]
+    assert any("could not push" in line for line in logged)
+
+
+def test_review_with_nothing_to_review_reports_rather_than_vanishing(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: implement_module.SelfReview(
+            False, "(empty diff — nothing to review)", reviewed=False
+        ),
+    )
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(), repo, 40, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == "failed"
+    assert "nothing to review" in (sends[0]["reason"] or "")
+
+
+def test_dispatch_resume_records_the_new_terminal_as_the_mailbox(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resume terminal owns the issue now, so it is the handle a
+    supervisor should be watching."""
+    messages.record_spawn(repo, 5, surface="orca", handle="term_original")
+    halt = implement_module._feedback_path(repo, 5)
+    halt.parent.mkdir(parents=True, exist_ok=True)
+    halt.write_text("findings")
+    monkeypatch.setattr(
+        implement_module, "_existing_worktree", lambda root, config, number: repo / "wt"
+    )
+
+    class RecordingSurface:
+        name = "orca"
+
+        def available(self) -> bool:
+            return True
+
+        def spawn(
+            self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+        ) -> surfaces.Spawned:
+            return surfaces.Spawned(where="w", surface="orca", handle="term_resumed")
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": RecordingSurface())
+
+    implement_module.dispatch_resume(repo, 5, log=lambda _: None)
+
+    record = messages.load_spawn(repo, 5)
+    assert record is not None
+    assert record.handle == "term_resumed"
