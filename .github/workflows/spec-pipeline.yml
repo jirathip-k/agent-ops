@@ -4,9 +4,13 @@
 # call this via workflow_call (see stubs/managed-repo-spec.yml).
 #
 # Label-gated: only issues carrying `spec-requested` are picked up (or one
-# explicit issue number), so this lane never burns tokens unprompted. The
-# spec lands as an issue comment ("## Agent spec") with checklist acceptance
-# criteria — the human only has to read it and flip the label to agent-ready.
+# explicit issue number), so this lane never runs across the whole issue
+# list. The gate is no longer human-only, though: since #97 the groom lane
+# may apply `spec-requested` itself to issues too thin to promote straight
+# to agent-ready, so a run can be prompted by an agent and this lane can
+# spend tokens without anyone asking it to. The spec lands as an issue
+# comment ("## Agent spec") with checklist acceptance criteria — the human
+# only has to read it and flip the label to agent-ready.
 # An ESCALATE from the spec agent fails the run visibly, never silently.
 
 name: Reusable · Spec Pipeline

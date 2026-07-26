@@ -26,6 +26,14 @@ LABEL_COLORS = {
     "proposed-by-agent": "bfd4f2",
 }
 
+# The labels the spec/plan CI lanes select on. Not verdict labels for triage,
+# but groom may now emit them (#97), so they live here rather than in the CLI:
+# a lane that applies a label has to be able to create it first.
+GATE_LABELS = {
+    "spec-requested": "5319e7",
+    "plan-requested": "1d76db",
+}
+
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")
 
 

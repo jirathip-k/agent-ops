@@ -1,0 +1,42 @@
+# Generated from agent-ops/stubs/managed-repo-groom.yml for jirathip-k.
+#
+# Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
+# and workflow-reuse access on the agent-ops repo.
+#
+# AUTONOMY (owner-authorised in #97): this is the lane that re-validates
+# already-triaged issues and promotes them without a human prompt — to
+# `agent-ready`, or to `spec-requested` / `plan-requested` when an issue is
+# too thin to promote straight through. Nothing else in this repo ever
+# re-labels a bucketed issue, so before this file existed every promotion
+# was hand-applied. The safeguard the decision leans on is triage.yml's
+# `auto_merge: false`: the loop runs filed → groomed → implemented → PR
+# opened, and stops there for a human. Revisit this deployment if
+# auto_merge is ever flipped to true.
+
+name: Agent Groom
+
+on:
+  schedule:
+    # 08:00 Asia/Bangkok (UTC+7), daily. Deliberately one hour after the
+    # 00:00 triage tick (`0 */4 * * *`): triage-pipeline caps at 55 minutes,
+    # so a full-length triage run has closed out before groom is due. Groom
+    # and triage also share the `agent-triage-<repo>` concurrency group, so
+    # an overrunning triage queues this run rather than racing it on the
+    # same labels. The 04:00 tick is the next one groom could collide with,
+    # and groom's own 30-minute cap clears well before it.
+    - cron: '0 1 * * *'
+  workflow_dispatch: {}   # manual "run now" button for testing
+
+jobs:
+  groom:
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: read
+      issues: write
+    uses: jirathip-k/agent-ops/.github/workflows/groom-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
