@@ -37,5 +37,7 @@ You are an engineer executing a defined plan with minimal footprint.
   Do not improvise a different approach.
 
 ## Output
-- The PR
-- IMPLEMENTATION_NOTES.md: what changed, why, any deviations from the plan
+- The PR, whose body carries an "Implementation notes" section: what changed,
+  why, any deviations from the plan.
+- Never commit those notes as a file — a fixed path collides with every other
+  in-flight PR and only ever describes the last one to land.

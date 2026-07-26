@@ -187,6 +187,12 @@ jobs:
           path: target
           fetch-depth: 0
 
+      - name: Install uv
+        if: steps.precheck.outputs.count != '0'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Run orchestrator
         if: steps.precheck.outputs.count != '0'
         uses: anthropics/claude-code-action@v1
@@ -209,7 +215,7 @@ jobs:
           # toolchains need their runner added here.
           claude_args: >-
             --model claude-sonnet-5
-            --allowedTools "Bash(gh:*),Bash(git:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(pnpm:*),Bash(yarn:*),Bash(uv:*),Bash(python:*),Bash(pytest:*),Read,Grep,Glob,Edit,Write,Task,TodoWrite"
+            --allowedTools "Bash(gh:*),Bash(git:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(pnpm:*),Bash(yarn:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Read,Grep,Glob,Edit,Write,Task,TodoWrite"
           prompt: |
             TARGET_REPO: ${{ inputs.target_repo }}
             MAX_ISSUES: ${{ inputs.max_issues }}

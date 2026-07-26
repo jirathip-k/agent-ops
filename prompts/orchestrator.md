@@ -73,7 +73,8 @@ Everywhere below, `BASE_BRANCH` and `STABLE_BRANCH` mean these resolved names.
 ## Step 2A — Normal lane: 4-agent pipeline (P1/P2)
 For each selected issue, run four subagents IN SEQUENCE, each with fresh context:
 1. PLANNER (prompts/agents/planner.md) → PLAN.md, or ESCALATE
-2. IMPLEMENTER (prompts/agents/implementer.md) → PR to `BASE_BRANCH` + IMPLEMENTATION_NOTES.md
+2. IMPLEMENTER (prompts/agents/implementer.md) → PR to `BASE_BRANCH`,
+   implementation notes in the PR body (never committed as a file)
 3. TESTER (prompts/agents/tester.md) → TEST_REPORT.md (PASS/FAIL)
 4. REVIEWER (prompts/agents/reviewer.md) → APPROVE / REQUEST CHANGES
 
