@@ -5,13 +5,23 @@ import json
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
-from agent_ops.utils import run
+from agent_ops.runtimes.base import (
+    FailureKind,
+    IdleLineReader,
+    IdleTimeout,
+    RunRequest,
+    RunResult,
+    idle_timeout_result,
+    terminate_and_reap,
+    wall_clock_timeout_result,
+)
+from agent_ops.utils import CommandError, run
 
 # Claude Code reports these conditions as prose, not as codes, so matching is
 # on the phrases the CLI actually prints. Keep the fixtures in
@@ -99,11 +109,20 @@ class ClaudeCodeRuntime:
         cmd = build_command(request)
         if request.stream:
             return self._run_streaming(cmd, request)
-        # timeout=None keeps today's unbounded behaviour: an agent run
-        # legitimately takes tens of minutes, so `run`'s short default would
-        # kill it. Bounding this path is issue #108's job — it needs an *idle*
-        # timeout (silence), not a wall-clock one.
-        proc = run(cmd, cwd=request.cwd, input_text=request.prompt, check=False, timeout=None)
+        # No stream to measure silence against here — `run()` (subprocess.run
+        # underneath) captures everything and returns only at the end — so
+        # this path gets a generous wall-clock bound instead of the streaming
+        # path's idle timeout.
+        try:
+            proc = run(
+                cmd,
+                cwd=request.cwd,
+                input_text=request.prompt,
+                check=False,
+                timeout=request.run_timeout_seconds,
+            )
+        except CommandError:
+            return wall_clock_timeout_result(request.run_timeout_seconds)
         return parse_result(proc)
 
     def classify_failure(self, result: RunResult) -> FailureKind:
@@ -125,6 +144,11 @@ class ClaudeCodeRuntime:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # A new session makes this pid its own process group leader, so
+            # `terminate_and_reap` can signal the whole group — including a
+            # tool call (e.g. a long Bash invocation) that inherited these
+            # same pipes — rather than leaving one running with them open.
+            start_new_session=sys.platform != "win32",
         )
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
         stdin = proc.stdin
@@ -157,22 +181,36 @@ class ClaudeCodeRuntime:
         # monthly spend limit…"). Dropping them would hide exactly the text
         # failure classification needs, so keep them for the fallback path.
         plain: list[str] = []
-        for line in stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                plain.append(line)
-                print(line, flush=True)
-                continue
-            if event.get("type") == "result":
-                final = event
-                continue
-            summary = format_event(event, cwd=request.cwd)
-            if summary:
-                print(summary, flush=True)
+        reader = IdleLineReader(stdout)
+        try:
+            for line in reader.lines(request.idle_timeout_seconds):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    plain.append(line)
+                    print(line, flush=True)
+                    continue
+                if event.get("type") == "result":
+                    final = event
+                    continue
+                summary = format_event(event, cwd=request.cwd)
+                if summary:
+                    print(summary, flush=True)
+        except IdleTimeout:
+            terminate_and_reap(proc)
+            stdin_thread.join()
+            stderr_thread.join()
+            if final is not None:
+                # The run itself already finished — the CLI's own result event
+                # arrived — and the child merely took too long to exit after
+                # that (e.g. slow hook teardown). The exit code from a forced
+                # kill reflects our signal, not the run, so don't let a slow
+                # goodbye turn an already-successful run into a failure.
+                return result_from_json(final, 0)
+            return idle_timeout_result(request.idle_timeout_seconds, stderr=stderr_chunks[0])
 
         returncode = proc.wait()
         stdin_thread.join()

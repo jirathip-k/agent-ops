@@ -39,6 +39,15 @@ class LoopConfig(BaseModel):
     # under the CI lane's 55-minute job timeout so a wedged gate still leaves
     # room for the run to report.
     gate_timeout_seconds: float = 1800.0
+    # Streaming runs: kill (and reap) the child if it produces no output for
+    # this long. Never a total-duration cap — a run still emitting events
+    # keeps going no matter how long it has been running (issue #108).
+    idle_timeout_seconds: float = 1200.0
+    # Non-streaming runs: there is no stream to measure silence against, so
+    # this is a real wall-clock bound instead — sized comfortably under the
+    # CI lane's 55-minute job timeout (README.md) so a wedged run still fails
+    # inside that window.
+    run_timeout_seconds: float = 3000.0
     plan: bool = True
     self_review: bool = True
     auto_merge: bool = False  # after opening a PR, merge it into staging if merge rules pass

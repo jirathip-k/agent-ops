@@ -5,8 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
-from agent_ops.utils import run
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, wall_clock_timeout_result
+from agent_ops.utils import CommandError, run
 
 # Codex reports refusals as one JSON object per line on stderr, e.g.
 # {"type":"error","status":400,"error":{"type":"invalid_request_error",
@@ -75,10 +75,13 @@ class CodexRuntime:
             cmd += ["--model", request.model]
         cmd.append(prompt)
 
-        # timeout=None keeps today's unbounded behaviour — see the same note in
-        # claude_code.py: agent runs need the idle timeout issue #108 adds, not
-        # `run`'s short wall-clock default.
-        proc = run(cmd, cwd=request.cwd, check=False, timeout=None)
+        # `codex exec` has no streaming path (yet) to measure silence against,
+        # so this call gets a wall-clock bound instead — the same one the
+        # non-streaming path in claude_code.py uses.
+        try:
+            proc = run(cmd, cwd=request.cwd, check=False, timeout=request.run_timeout_seconds)
+        except CommandError:
+            return wall_clock_timeout_result(request.run_timeout_seconds)
         text = proc.stdout.strip() or proc.stderr.strip()
         # stderr is kept even when stdout wins the `text` slot: the error JSON
         # lands on stderr, and classification needs it.

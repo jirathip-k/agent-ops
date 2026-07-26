@@ -40,6 +40,7 @@ unexercised code however green the suite is.
 | Orca card status was dropped when a worktree card wasn't indexed yet | The run was visible in a terminal on a card whose status never changed | `orca.report` follows the surface's fallback, sticky once used (#68) |
 | The editable install ran a stale working tree | `agent dispatch --help` correctly showed no `--plan-file`; the tree was four commits behind, so the CLI was right about itself and wrong about the world | `agent doctor` reports the checkout behind its upstream (#67) |
 | Ad-hoc `--message` overwrote the stored halt findings | The self-review was lost permanently; a later bare `agent resume` replayed the one-line note instead | Ad-hoc messages stage to their own path (#75) |
+| A stalled streaming run (wedged tool call, dead API connection) never exited | The pid stayed real and `agent runs` still reported `running`; the worktree stayed claimed and a re-dispatch would have reused a checkout a live process still owned | `_run_streaming` gets an idle timeout (silence, not total duration); the non-streaming `run()` path gets a wall-clock bound since it has no stream to watch for silence — both surface as a normal failed `RunResult` (#108) |
 
 ## Answering "is this run finished?"
 

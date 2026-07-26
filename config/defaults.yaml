@@ -70,6 +70,10 @@ loop:
   gates: [test, lint, typecheck]   # run in order; gates without a command are skipped
   gate_timeout_seconds: 1800   # per-gate (and setup) wall clock; a gate that
                            # overruns fails that gate instead of hanging the run
+  idle_timeout_seconds: 1200   # streaming runs: kill the child after this long
+                           # with no output at all; never a total-duration cap
+  run_timeout_seconds: 3000    # non-streaming runs: wall-clock bound, since
+                           # there's no output stream to watch for silence
   plan: true               # planner agent runs first; ESCALATE stops the workflow
   self_review: true        # run a read-only review agent before committing
 

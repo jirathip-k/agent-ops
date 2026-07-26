@@ -88,7 +88,9 @@ def _stub_run(
         cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
     ) -> subprocess.CompletedProcess[str]:
         assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
-        assert timeout is None, "an agent run must opt out of `run`'s short default bound"
+        assert timeout == RunRequest(prompt="", cwd=Path(".")).run_timeout_seconds, (
+            "a non-streaming run must get the request's wall-clock bound, not `run`'s short default"
+        )
         calls.append(cmd)
         return subprocess.CompletedProcess(
             args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
@@ -152,7 +154,7 @@ def test_run_forwards_cwd_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
         cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
     ) -> subprocess.CompletedProcess[str]:
         assert check is False, "CodexRuntime.run must not raise on a non-zero exit"
-        assert timeout is None, "an agent run must opt out of `run`'s short default bound"
+        assert timeout == RunRequest(prompt="", cwd=Path(".")).run_timeout_seconds
         captured_cwd.append(cwd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="done", stderr="")
 
@@ -192,6 +194,28 @@ def test_run_raw_carries_stdout_stderr_and_returncode(monkeypatch: pytest.Monkey
     _stub_run(monkeypatch, returncode=1, stdout="out", stderr="err")
     result = CodexRuntime().run(RunRequest(prompt="p", cwd=Path(".")))
     assert result.raw == {"stdout": "out", "stderr": "err", "returncode": 1}
+
+
+def test_run_wall_clock_timeout_is_a_normal_failed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stream to watch for silence here, so an expired `run()` timeout must
+    surface as an ordinary failed RunResult, not an escaped exception."""
+    from agent_ops.utils import CommandError
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
+    ) -> subprocess.CompletedProcess[str]:
+        raise CommandError(f"`{' '.join(cmd)}` did not finish within {timeout:g}s")
+
+    monkeypatch.setattr(codex_mod, "run", fake_run)
+    request = RunRequest(prompt="p", cwd=Path("."), run_timeout_seconds=42.0)
+
+    result = CodexRuntime().run(request)
+
+    assert result.ok is False
+    assert "42" in result.text
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
 
 
 # --- the interactive form (`agent spawn`) ----------------------------------

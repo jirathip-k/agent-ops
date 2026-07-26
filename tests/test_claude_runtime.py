@@ -251,10 +251,12 @@ def test_stderr_is_searched_when_stdout_carried_no_prose() -> None:
     assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE
 
 
-def test_non_streaming_run_opts_out_of_the_default_bound(
+def test_non_streaming_run_gets_the_requests_wall_clock_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent run takes tens of minutes — `utils.run`'s short default would kill it."""
+    """An agent run takes tens of minutes — `utils.run`'s short default would kill
+    it — but there's no stream to watch for silence, so it still needs a real
+    (generous) wall-clock bound rather than none at all."""
     seen: dict[str, object] = {}
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -262,8 +264,29 @@ def test_non_streaming_run_opts_out_of_the_default_bound(
         return _proc('{"result": "done", "is_error": false}')
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
-    ClaudeCodeRuntime().run(RunRequest(prompt="p", cwd=Path("."), stream=False))
-    assert seen["timeout"] is None
+    request = RunRequest(prompt="p", cwd=Path("."), stream=False, run_timeout_seconds=1234.0)
+    ClaudeCodeRuntime().run(request)
+    assert seen["timeout"] == 1234.0
+
+
+def test_non_streaming_wall_clock_timeout_is_a_normal_failed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stream to watch for silence here, so an expired `run()` timeout must
+    surface as an ordinary failed RunResult, not an escaped exception."""
+    from agent_ops.utils import CommandError
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise CommandError(f"`{' '.join(cmd)}` did not finish within {kwargs['timeout']:g}s")
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    request = RunRequest(prompt="p", cwd=Path("."), stream=False, run_timeout_seconds=42.0)
+
+    result = ClaudeCodeRuntime().run(request)
+
+    assert result.ok is False
+    assert "42" in result.text
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
 
 
 # --- _run_streaming deadlock regression tests -------------------------------
@@ -416,3 +439,89 @@ def test_streaming_early_exit_child_does_not_leak_broken_pipe_error() -> None:
     assert result.ok
     assert result.text == "early-exit-ok"
     assert not captured, f"unexpected exception escaped a background thread: {captured}"
+
+
+# --- _run_streaming idle timeout ---------------------------------------------
+
+# Prints once, then goes silent for far longer than any idle_timeout used
+# below without exiting on its own — a stalled API call or wedged tool call
+# looks exactly like this: alive, but producing nothing.
+_CHILD_GOES_SILENT_THEN_SLEEPS = """
+import sys, time
+sys.stdin.read()
+sys.stdout.write('{"type": "start"}\\n')
+sys.stdout.flush()
+time.sleep(30)
+sys.stdout.write('{"type": "result", "result": "late", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+# Emits an event every 0.1s for a total duration well past any idle_timeout
+# used below. Proves the bound is genuinely about silence, not total runtime.
+_CHILD_CHATTY_ACROSS_MANY_IDLE_WINDOWS = """
+import sys, time
+sys.stdin.read()
+for _ in range(30):
+    sys.stdout.write('{"type": "assistant", "message": {"content": []}}\\n')
+    sys.stdout.flush()
+    time.sleep(0.05)
+sys.stdout.write('{"type": "result", "result": "chatty-ok", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+# Emits its terminal result event immediately, then goes silent for far longer
+# than any idle_timeout used below before actually exiting — e.g. slow hook
+# teardown after the CLI has already reported its outcome.
+_CHILD_RESULT_THEN_SLOW_EXIT = """
+import sys, time
+sys.stdin.read()
+sys.stdout.write('{"type": "result", "result": "done-slow-teardown", "is_error": false}\\n')
+sys.stdout.flush()
+time.sleep(30)
+"""
+
+
+def test_streaming_idle_child_is_terminated_and_reaped() -> None:
+    cmd = [sys.executable, "-c", _CHILD_GOES_SILENT_THEN_SLEEPS]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True, idle_timeout_seconds=0.3)
+
+    # `_run_streaming_with_timeout` itself asserts the call returns within its
+    # own (much larger) timeout — if the child were merely abandoned rather
+    # than terminated and reaped, `_run_streaming` would never return and that
+    # outer assertion would fail instead.
+    result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
+
+    assert not result.ok
+    assert "0.3" in result.text
+    assert result.raw is not None
+    assert result.raw["idle_timeout_seconds"] == 0.3
+
+
+def test_streaming_idle_timeout_reaches_classify_failure_as_agent_failure() -> None:
+    """A timeout is a run outcome, not a crash: it must classify like any
+    other failure so `loop.py`'s retry/escalate logic behaves predictably."""
+    cmd = [sys.executable, "-c", _CHILD_GOES_SILENT_THEN_SLEEPS]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True, idle_timeout_seconds=0.3)
+    result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
+
+
+def test_streaming_chatty_child_is_never_killed_regardless_of_total_duration() -> None:
+    """Total duration here (~1.5s) comfortably exceeds idle_timeout_seconds (0.6s)
+    — only a gap between events would trigger the bound, and there is none."""
+    cmd = [sys.executable, "-c", _CHILD_CHATTY_ACROSS_MANY_IDLE_WINDOWS]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True, idle_timeout_seconds=0.6)
+    result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
+    assert result.ok
+    assert result.text == "chatty-ok"
+
+
+def test_streaming_idle_timeout_after_result_keeps_the_already_captured_result() -> None:
+    """The idle timeout can fire *after* the terminal result event (a child
+    slow to exit, e.g. hook teardown). That must not discard an already-known
+    outcome — the exit code from our own forced kill isn't the run's exit code."""
+    cmd = [sys.executable, "-c", _CHILD_RESULT_THEN_SLOW_EXIT]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True, idle_timeout_seconds=0.3)
+    result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
+    assert result.ok
+    assert result.text == "done-slow-teardown"
