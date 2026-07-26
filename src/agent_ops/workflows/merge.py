@@ -11,6 +11,32 @@ from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 
 
+def _is_test_file(path: str, patterns: list[str]) -> bool:
+    """Whether `path` matches one of the test-file patterns.
+
+    Case-sensitive, deliberately unlike `blocked_paths` below. Lowercasing
+    here would fail OPEN: it turns the CamelCase Swift pattern `*Tests/*`
+    into `*tests/*`, which then substring-matches production directories like
+    `src/contests/model.py` or `app/protests/view.py` (fnmatch's `*` spans
+    `/`, so there is no word boundary) and wrongly exempts them from the size
+    caps. `blocked_paths` lowercases too, but over-matching there only blocks
+    *more* paths (fails safe); over-matching here would exempt more paths
+    from the caps (fails open), so the two must not share the same rule.
+
+    Patterns containing `[!/]` (the `test_*.py` family) are matched against
+    the basename, not the full path. `[!/]` only protects the ONE character
+    position right after it — fnmatch's `*` still spans `/` on either side —
+    so `test_[!/]*.py` matched against the full path would match
+    `test_data/schema.py` (and `src/test_data/schema.py`) as if they were
+    `test_<name>.py`, when both are production files that merely start with
+    `test_`. Matching the basename makes the intended anchor-to-filename
+    behavior exact, for both `test_[!/]*.py` and its `*/`-prefixed twin, and
+    changes nothing for any other pattern in the default list.
+    """
+    name = path.rsplit("/", 1)[-1]
+    return any(fnmatch(name if "[!/]" in pattern else path, pattern) for pattern in patterns)
+
+
 def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
     """Return the list of rule violations blocking an agent merge (empty = mergeable)."""
     violations: list[str] = []
@@ -26,10 +52,49 @@ def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
 
     files = pr.get("files", [])
     changed_lines = sum(f["additions"] + f["deletions"] for f in files)
-    if changed_lines > config.merge.max_changed_lines:
-        violations.append(f"{changed_lines} changed lines > cap {config.merge.max_changed_lines}")
-    if len(files) > config.merge.max_changed_files:
-        violations.append(f"{len(files)} changed files > cap {config.merge.max_changed_files}")
+
+    # Production caps: test files are close to zero review risk, so they are
+    # excluded from what counts against max_changed_lines/max_changed_files.
+    # A test-only PR is NOT specially fallen back to raw counts here — it is
+    # governed solely by the backstop below (owner-approved design, issue
+    # #136: an earlier fallback applied the strictest cap to the
+    # lowest-risk PRs, since one production line would exempt a PR from it).
+    prod_files = [f for f in files if not _is_test_file(f["path"], config.merge.test_paths)]
+    effective_lines = sum(f["additions"] + f["deletions"] for f in prod_files)
+    effective_files = len(prod_files)
+
+    if effective_lines > config.merge.max_changed_lines:
+        detail = (
+            f" ({effective_lines} effective, tests excluded)"
+            if effective_lines != changed_lines
+            else ""
+        )
+        violations.append(
+            f"{changed_lines} changed lines{detail} > cap {config.merge.max_changed_lines}"
+        )
+    if effective_files > config.merge.max_changed_files:
+        detail = (
+            f" ({effective_files} effective, tests excluded)"
+            if effective_files != len(files)
+            else ""
+        )
+        violations.append(
+            f"{len(files)} changed files{detail} > cap {config.merge.max_changed_files}"
+        )
+
+    # Backstop: bounds the RAW totals (tests included) so excluding test
+    # lines/files from the caps above doesn't leave a mixed (or test-only) PR
+    # with no ceiling at all.
+    total_line_cap = config.merge.max_changed_lines * config.merge.total_cap_ratio
+    if changed_lines > total_line_cap:
+        violations.append(
+            f"{changed_lines} total changed lines (including tests) > backstop cap {total_line_cap}"
+        )
+    total_file_cap = config.merge.max_changed_files * config.merge.total_cap_ratio
+    if len(files) > total_file_cap:
+        violations.append(
+            f"{len(files)} total changed files (including tests) > backstop cap {total_file_cap}"
+        )
 
     for f in files:
         for pattern in config.merge.blocked_paths:
