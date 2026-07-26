@@ -7,6 +7,7 @@ go stale or to reconcile after a crash.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -20,11 +21,18 @@ from agent_ops.utils import CommandError, run
 _BRANCH_RE = re.compile(r"^fix/issue-(\d+)$")
 _FEEDBACK_RE = re.compile(r"^issue-(\d+)-feedback\.md$")
 _LOG_RE = re.compile(r"^agent-issue-(\d+)\.log$")
+_OUTCOME_RE = re.compile(r"^issue-(\d+)-outcome\.json$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 
 TERMINAL_STATES = ("done", "halted", "stopped")
 _POLL_INTERVAL_S = 15.0
 _DEFAULT_TIMEOUT_S = 3600.0
+# Consecutive untrustworthy polls `wait_for_runs` tolerates before giving up
+# rather than risk reporting a degraded "stopped"/"gone" as real. ~1 minute at
+# the default interval: comfortably above the 2-poll dispatch debounce, far
+# short of the hour-long default timeout.
+_MAX_DEGRADED_POLLS = 4
+_OUTCOME_TTL_S = 7 * 24 * 3600.0  # 7 days — a recent-activity view, not a log
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,13 @@ class Run:
     issue: int
     state: str  # running | halted | stopped | done
     detail: str
+
+
+@dataclass(frozen=True)
+class Outcome:
+    state: str
+    pr_url: str | None
+    reason: str | None
 
 
 def _fmt_elapsed(etime: str) -> str:
@@ -233,6 +248,17 @@ def _ps_output(log: Callable[[str], None]) -> str:
     return proc.stdout
 
 
+def _outcome_detail(outcome: Outcome) -> str:
+    """Render an `Outcome` the same way `classify` renders a live open PR."""
+    if outcome.pr_url is not None:
+        try:
+            number = int(outcome.pr_url.rstrip("/").rsplit("/", 1)[-1])
+        except ValueError:
+            return outcome.pr_url
+        return f"PR #{number} — {outcome.pr_url}"
+    return outcome.reason or "(recorded)"
+
+
 def classify(
     issue: int,
     *,
@@ -240,12 +266,19 @@ def classify(
     live: tuple[int, str, str] | None,
     has_feedback: bool,
     pr: dict[str, Any] | None,
+    outcome: Outcome | None = None,
 ) -> Run | None:
     """One issue's state from its signals, in the precedence the issue lays out.
 
     A live process outranks a halt file: `agent resume` leaves the feedback
     file in place while it runs, so without this order a live resume would
     misreport as still-halted.
+
+    A durable `outcome` record (written by `_finish_run` on the way out, issue
+    #87) outranks a feedback file: without this, a stale halt file left behind
+    by a run that was never cleanly resumed through `_finish_run` would report
+    `halted` forever, even after the outcome it recorded (e.g. a merged PR)
+    supersedes it (issue #78).
     """
     if live is not None:
         pid, etime, verb = live
@@ -257,6 +290,8 @@ def classify(
         if verb == "dispatch":
             detail = f"dispatching — {detail}"
         return Run(issue, "running", detail)
+    if outcome is not None:
+        return Run(issue, outcome.state, _outcome_detail(outcome))
     if has_feedback:
         return Run(issue, "halted", f"self-review — resume with `agent resume {issue}`")
     if pr is not None:
@@ -278,10 +313,63 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
     return issues
 
 
-def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> list[Run]:
-    """Every issue with a run signal, newest first."""
+def _load_outcomes(
+    run_files: list[Path], now: float, log: Callable[[str], None]
+) -> dict[int, Outcome]:
+    """Parse every `issue-N-outcome.json`, pruning ones older than `_OUTCOME_TTL_S`.
+
+    Pruning is keyed on the file's own mtime, not the JSON's `finished_at`
+    field, so a corrupt file still ages out instead of lingering forever —
+    this is a recent-activity view, not an audit log.
+    """
+    outcomes: dict[int, Outcome] = {}
+    for path in run_files:
+        match = _OUTCOME_RE.match(path.name)
+        if match is None:
+            continue
+        issue = int(match.group(1))
+        try:
+            age = now - path.stat().st_mtime
+        except OSError as exc:
+            log(f"warning: could not stat outcome record {path}: {exc}")
+            continue
+        if age > _OUTCOME_TTL_S:
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            data = json.loads(path.read_text())
+            outcomes[issue] = Outcome(
+                state=data["state"], pr_url=data.get("pr_url"), reason=data.get("reason")
+            )
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            log(f"warning: could not read outcome record {path}: {exc}")
+    return outcomes
+
+
+def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tuple[list[Run], bool]:
+    """Every issue with a run signal, newest first, plus whether this poll's
+    signals are trustworthy.
+
+    The second element is `False` whenever `git worktree list` or `gh` (PR
+    listing) failed this round and had to be degraded to "treat as empty" —
+    that shape is indistinguishable from a genuinely stopped/gone run, so a
+    caller comparing across polls (`wait_for_runs`) needs to know not to
+    trust it as positive evidence of either.
+
+    Outcome records are not part of that judgement: they are read straight off
+    the local `.agent-runs/` directory, with no `gh`/`git` call that could
+    degrade, so a poll that finds one is as trustworthy as the filesystem.
+    """
+    trustworthy = True
+
     worktree_by_issue: dict[int, Path] = {}
-    for wt in worktree.list_worktrees(project_root):
+    try:
+        worktrees = worktree.list_worktrees(project_root)
+    except CommandError as exc:
+        log(f"warning: could not list worktrees ({exc}); runs may be misreported as stopped")
+        worktrees = []
+        trustworthy = False
+    for wt in worktrees:
         match = _BRANCH_RE.match(wt.branch)
         if match is not None:
             worktree_by_issue[int(match.group(1))] = wt.path
@@ -290,10 +378,11 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
     run_files = list(runs_dir.iterdir()) if runs_dir.is_dir() else []
     feedback_issues = _matches(_FEEDBACK_RE, run_files)
     log_issues = _matches(_LOG_RE, run_files)
+    outcomes = _load_outcomes(run_files, time.time(), log)
 
-    candidates = set(worktree_by_issue) | feedback_issues | log_issues
+    candidates = set(worktree_by_issue) | feedback_issues | log_issues | set(outcomes)
     if not candidates:
-        return []
+        return [], trustworthy
 
     live = live_runs(_ps_output(log), project_root)
 
@@ -302,6 +391,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
     except CommandError as exc:
         log(f"warning: could not list open PRs ({exc}); runs may be misreported as stopped")
         prs = []
+        trustworthy = False
     pr_by_issue: dict[int, dict[str, Any]] = {}
     for issue in candidates:
         for pr in prs:
@@ -324,17 +414,20 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> lis
             live=live.get(issue),
             has_feedback=issue in feedback_issues,
             pr=pr_by_issue.get(issue),
+            outcome=outcomes.get(issue),
         )
         if found is not None:
             runs.append(found)
     runs.sort(key=lambda r: r.issue, reverse=True)
-    return runs
+    return runs, trustworthy
 
 
 def report_runs(
     project_root: Path, log: Callable[[str], None] = print, issue: int | None = None
 ) -> None:
-    runs = discover_runs(project_root, log=log)
+    # A one-shot snapshot has no other poll to compare against, and the
+    # warning (if any) is already logged by `discover_runs` itself.
+    runs, _trustworthy = discover_runs(project_root, log=log)
     if issue is not None:
         runs = [r for r in runs if r.issue == issue]
     if not runs:
@@ -368,19 +461,39 @@ def wait_for_runs(
 ) -> bool:
     """Block until every watched run reaches a terminal state, printing transitions.
 
-    The watch set is fixed on the first poll: `issue` if given, else every
-    issue `discover_runs` finds at that moment. Runs that appear later are not
-    added — a caller waits for what existed when it asked. A watched issue
-    that later disappears entirely (worktree removed, PR merged) transitions
-    to `gone`, which counts as terminal.
+    The watch set is fixed on the first *trustworthy* poll: `issue` if given,
+    else every issue `discover_runs` finds at that moment. Runs that appear
+    later are not added — a caller waits for what existed when it asked. If
+    the very first poll comes back untrustworthy and shows no sign of the
+    thing being waited on (the named `issue` absent, or nothing at all in
+    watch-all mode), that is not treated as "no run found"/"no agent runs
+    found" either: it retries on the next poll instead, subject to the same
+    `_MAX_DEGRADED_POLLS` bound described below. A watched issue that later
+    disappears entirely (worktree removed, PR merged) transitions to `gone`,
+    which counts as terminal.
 
     `stopped` is not trusted on a single observation: `dispatch` leaves the
     same signature (worktree exists, nothing live yet) for the few seconds
-    before the child `agent implement` execs, and a `gh` outage degrades a
-    real `done` to `stopped` too (`discover_runs`'s `prs = []` fallback). Both
-    look identical to a genuinely abandoned run for one poll. `stopped` only
-    counts as terminal once it has held for two consecutive polls; `done`,
-    `halted` and `gone` come from positive evidence and count immediately.
+    before the child `agent implement` execs, and a `gh`/`git worktree list`
+    outage degrades a real `done` to `stopped` too (`discover_runs`'s
+    untrustworthy-poll fallback). Both look identical to a genuinely
+    abandoned run for one poll. `stopped` only counts as terminal once it has
+    held for two consecutive *trustworthy* polls; `done`, `halted` and `gone`
+    come from positive evidence and count immediately — except that a watched
+    issue missing from an untrustworthy poll's results is never read as
+    `gone`: its previous state carries forward unchanged until a trustworthy
+    poll confirms it one way or the other, the same "unknown is not evidence
+    of death" reasoning `stopped`'s debounce already relies on.
+
+    An untrustworthy poll also resets every watched issue's `stopped`-streak
+    to 0, so a `gh`/worktree blip can never itself advance a run toward the
+    2-poll `stopped` threshold. If polls come back untrustworthy for more
+    than `_MAX_DEGRADED_POLLS` in a row, this raises `CommandError` instead of
+    ever reporting `stopped`/`gone` off degraded data — a sustained outage
+    should surface as "we don't know", not as a false terminal verdict. Any
+    degradation seen during an otherwise-successful wait is summarized in one
+    final log line before returning, since the per-poll `warning:` line is
+    deduped down to a single, possibly long-scrolled-away occurrence.
 
     Returns True once every watched issue is terminal (including the
     nothing-to-watch case), False if `timeout_s` elapses first. `timeout_s`
@@ -390,13 +503,27 @@ def wait_for_runs(
     unlike the no-issue case, there is nothing to wait on, which a caller
     should not mistake for a run finishing.
     """
-    log = _dedup_warnings(log)
+    last_warning: str | None = None
+    deduped_log = _dedup_warnings(log)
+
+    def capture(message: str) -> None:
+        # Remember the raw warning even if `_dedup_warnings` goes on to
+        # suppress it from the printed output — the degraded-streak error
+        # message below still needs the latest one.
+        nonlocal last_warning
+        if message.startswith("warning:"):
+            last_warning = message
+        deduped_log(message)
+
     interval_s = max(1.0, interval_s)
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
 
     watch: set[int] | None = None
     states: dict[int, str] = {}
     stopped_streak: dict[int, int] = {}
+    degraded_streak = 0
+    degraded_polls = 0
+    total_polls = 0
 
     def is_terminal(i: int) -> bool:
         state = states[i]
@@ -405,36 +532,92 @@ def wait_for_runs(
         return state in TERMINAL_STATES or state == "gone"
 
     while True:
-        found = {r.issue: r for r in discover_runs(project_root, log=log)}
+        polled, trustworthy = discover_runs(project_root, log=capture)
+        found = {r.issue: r for r in polled}
+        total_polls += 1
+
+        if trustworthy:
+            degraded_streak = 0
+        else:
+            degraded_streak += 1
+            degraded_polls += 1
+            if degraded_streak > _MAX_DEGRADED_POLLS:
+                last = last_warning or "no warning text captured"
+                raise CommandError(
+                    f"gh/worktree data has been unreliable for {degraded_streak} consecutive "
+                    f"polls (last: {last}) — refusing to report stopped/gone; check gh "
+                    "auth/network and re-run --wait"
+                )
 
         if watch is None:
             if issue is not None:
                 if issue not in found:
-                    raise CommandError(f"no run found for #{issue} — nothing to wait on")
-                watch = {issue}
+                    if trustworthy:
+                        if degraded_polls:
+                            capture(
+                                f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                                f"{total_polls} polls in this wait"
+                            )
+                        raise CommandError(f"no run found for #{issue} — nothing to wait on")
+                    # A degraded first poll not showing the named issue is not
+                    # trustworthy evidence it doesn't exist — the same "unknown
+                    # is not evidence of death" reasoning applied to an
+                    # already-watched issue's disappearance, just before the
+                    # watch set exists to hold state against. Retry rather than
+                    # concluding "no run found"; the degraded_streak bound
+                    # above still applies if this persists.
+                else:
+                    watch = {issue}
             else:
-                watch = set(found)
-                if not watch:
-                    log("no agent runs found")
-                    return True
-            for i in sorted(watch):
-                r = found[i]
-                log(f"#{i}  {r.state:<8}  {r.detail}")
-                states[i] = r.state
-                stopped_streak[i] = 1 if r.state == "stopped" else 0
+                candidate = set(found)
+                if not candidate:
+                    if trustworthy:
+                        capture("no agent runs found")
+                        if degraded_polls:
+                            capture(
+                                f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                                f"{total_polls} polls in this wait"
+                            )
+                        return True
+                    # Same reasoning: an empty result from a degraded poll is
+                    # not trustworthy evidence there are no runs at all — wait
+                    # for a trustworthy poll before concluding that.
+                else:
+                    watch = candidate
+            if watch is not None:
+                for i in sorted(watch):
+                    r = found[i]
+                    capture(f"#{i}  {r.state:<8}  {r.detail}")
+                    states[i] = r.state
+                    stopped_streak[i] = 1 if (trustworthy and r.state == "stopped") else 0
         else:
             for i in sorted(watch):
                 r = found.get(i)
+                if r is None and not trustworthy:
+                    # An unexplained disappearance during a degraded poll is not
+                    # trustworthy evidence the run is actually gone: hold its
+                    # state and streak steady and wait for a clean poll.
+                    continue
                 state = r.state if r is not None else "gone"
-                stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
+                if not trustworthy:
+                    # An unknown observation is not evidence of death: never let
+                    # a degraded poll advance the debounce toward terminal.
+                    stopped_streak[i] = 0
+                else:
+                    stopped_streak[i] = stopped_streak.get(i, 0) + 1 if state == "stopped" else 0
                 if state != states[i]:
                     line = f"#{i}  {states[i]} → {state:<8}"
                     if r is not None:
                         line += f"  {r.detail}"
-                    log(line)
+                    capture(line)
                     states[i] = state
 
-        if all(is_terminal(i) for i in watch):
+        if watch is not None and all(is_terminal(i) for i in watch):
+            if degraded_polls:
+                capture(
+                    f"note: PR/worktree data was unreliable for {degraded_polls} of "
+                    f"{total_polls} polls in this wait"
+                )
             return True
 
         remaining = None if deadline is None else deadline - time.monotonic()
