@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 
 import pytest
+import typer.main
+from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
 from agent_ops import github, runs, worktree
@@ -1151,3 +1153,93 @@ def test_live_runs_still_finds_the_issue_after_a_valued_flag() -> None:
     """The guard must not swallow ordinary value-taking options."""
     ps = "1 00:05 /usr/bin/python3 /x/bin/agent implement --runtime codex 82\n"
     assert runs.live_runs(ps) == {82: (1, "00:05", "implement")}
+
+
+# --- _VALUE_FLAGS mirrors the CLI -------------------------------------------
+
+
+def _value_taking_flags(command_name: str) -> set[str]:
+    """Every opts/secondary_opts spelling of a non-boolean Option on a typer command,
+    excluding the free-text flags handled separately by `_is_free_text_flag`.
+
+    Deliberately pinned to typer internals: since typer 0.27 typer vendors click
+    as `typer._click` and no longer depends on the standalone `click` package, so
+    there is no importable `click.Group`/`click.Option` to narrow against. The
+    concrete classes typer builds the app out of are `typer.core.TyperGroup` and
+    `typer.core.TyperOption` (the vendored `typer._click.core` exposes only the
+    `Command`/`Parameter` bases, which carry neither `.commands` nor `.is_flag`).
+    A typer major bump may move these again; that is the accepted tradeoff versus
+    adding `click` back as a direct dependency just to introspect the CLI.
+
+    `typer.main.get_command` is declared to return a bare `Command`, and
+    `Parameter` (the declared element type of `cmd.params`) doesn't carry
+    `.is_flag` — that's option-only. Both are narrowed with `isinstance` rather
+    than trusted structurally, so this stays clean under pyright.
+
+    Returning an empty set is treated as a bug in *this helper*, never as a fact
+    about the CLI. Every assertion built on it is negative ("X must not be in the
+    set"), so an empty set would let all of them pass while guarding nothing —
+    precisely the silent drift #88 exists to catch. The realistic way that
+    happens: `TyperOption` still imports fine but is no longer the class typer
+    instantiates, so the `isinstance` filter below rejects every parameter.
+    """
+    group = typer.main.get_command(app)
+    assert isinstance(group, TyperGroup)  # every typer command is nested under a group
+    cmd = group.commands[command_name]
+    flags: set[str] = set()
+    for param in cmd.params:
+        if not isinstance(param, TyperOption):  # skip the positional issue Argument
+            continue
+        if param.is_flag:  # boolean flags: `_find_issue` only skips the flag itself
+            continue
+        opts = set(param.opts) | set(param.secondary_opts)
+        if opts & runs._FREE_TEXT_FLAGS:
+            continue  # --message/-m: handled by _is_free_text_flag, not _VALUE_FLAGS
+        flags.update(opts)
+    assert flags, (
+        f"{command_name}: introspection found no value-taking options at all. "
+        f"{command_name} really does declare some, so this means the typer "
+        f"internals this helper reads (TyperGroup/TyperOption) have moved and it "
+        f"is no longer classifying anything — fix the helper rather than trusting "
+        f"the green tests it would otherwise produce"
+    )
+    return flags
+
+
+@pytest.mark.parametrize("command_name", ["implement", "resume", "dispatch"])
+def test_value_flags_mirrors_cli(command_name: str) -> None:
+    declared = _value_taking_flags(command_name)
+    # Positive anchor before the negative check below: --project/-C is declared by
+    # all three commands (the shared ProjectOpt), so finding it proves the helper
+    # is really classifying options rather than returning some non-empty junk that
+    # happens to satisfy `not missing`.
+    assert {"--project", "-C"} <= declared, (
+        f"{command_name}: --project/-C is a value-taking option on every one of "
+        f"these commands but was not detected — the introspection is broken, so "
+        f"the completeness check below would pass without checking anything"
+    )
+    missing = declared - runs._VALUE_FLAGS
+    assert not missing, (
+        f"{command_name}: {sorted(missing)} take a value in the CLI but are missing "
+        f"from runs._VALUE_FLAGS — a phantom-issue-number bug waiting to happen"
+    )
+
+
+def test_value_flags_excludes_boolean_options() -> None:
+    """Sanity check the classifier itself: known boolean flags must never be
+    reported as value-taking, or the completeness test above would be vacuous.
+    """
+    implement_flags = _value_taking_flags("implement")
+    assert "--force" not in implement_flags
+    assert "--no-pr" not in implement_flags
+    assert "--keep-worktree" not in implement_flags
+
+
+def test_value_flags_free_text_message_not_required_in_value_flags() -> None:
+    """--message/-m are deliberately absent from _VALUE_FLAGS (ambiguous width);
+    the completeness check must not demand they be added.
+    """
+    resume_flags = _value_taking_flags("resume")
+    assert "--message" not in resume_flags
+    assert "-m" not in resume_flags
+    assert {"--message", "-m"} <= runs._FREE_TEXT_FLAGS
