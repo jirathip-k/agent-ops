@@ -9,7 +9,12 @@ import pytest
 from agent_ops import github, prompts, worktree
 from agent_ops.runs import Outcome
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
-from agent_ops.utils import SPAWN_FAILURE_RETURNCODE, TIMEOUT_RETURNCODE, CommandError
+from agent_ops.utils import (
+    PLATFORM_ROOT,
+    SPAWN_FAILURE_RETURNCODE,
+    TIMEOUT_RETURNCODE,
+    CommandError,
+)
 from agent_ops.workflows import evolve
 from agent_ops.workflows.evolve import EvolveChange, NoopVerdict, SurveyRow, baseline, build_survey
 
@@ -1230,6 +1235,18 @@ def test_run_evolve_happy_path_opens_draft_pr(
     assert commit_calls and commit_calls[0][-2:] == ["--", "prompts/tasks/spec.md"]
     assert captured.get("removed") is True
     assert captured["remove_kwargs"].get("delete_branch") is True
+
+
+def test_evolve_pipeline_configures_git_identity_before_running_evolve() -> None:
+    """`run_evolve` commits and pushes (see the `git commit`/`git push` calls
+    asserted above), but GitHub-hosted runners set neither `user.name` nor
+    `user.email`. Without a configured identity here, a real run would check
+    out, install uv and the Claude Code CLI, survey a lane — and only then die
+    at commit with "unable to auto-detect email address"."""
+    text = (PLATFORM_ROOT / ".github" / "workflows" / "evolve-pipeline.yml").read_text()
+    identity_pos = text.index("git config --global user.email")
+    run_pos = text.index("uv run agent evolve")
+    assert identity_pos < run_pos
 
 
 def test_run_evolve_worktree_removed_even_when_run_raises(
