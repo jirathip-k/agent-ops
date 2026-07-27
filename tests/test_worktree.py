@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,52 @@ def test_create_tracking_refuses_a_leftover_directory_on_another_branch(repo: Pa
 def test_create_tracking_raises_when_the_branch_does_not_exist(repo: Path) -> None:
     with pytest.raises(CommandError, match="git worktree add failed"):
         worktree.create_tracking(repo, ".worktrees", "issue-99", "fix/issue-99")
+
+
+def test_remote_branch_status_reports_neither_when_branch_is_unknown(repo: Path) -> None:
+    status = worktree.remote_branch_status(repo, "fix/issue-none")
+
+    assert status.local is False
+    assert status.remote is False
+    assert status.diverged is False
+
+
+def test_remote_branch_status_reports_local_only(repo: Path) -> None:
+    run(["git", "branch", "fix/issue-local"], cwd=repo)
+
+    status = worktree.remote_branch_status(repo, "fix/issue-local")
+
+    assert status.local is True
+    assert status.remote is False
+    assert status.ahead == 0
+    assert status.behind == 0
+
+
+def test_remote_branch_status_reports_ahead_behind(tmp_path: Path) -> None:
+    origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-4")
+    run(["git", "branch", "fix/issue-4", "origin/fix/issue-4"], cwd=clone)
+    run(["git", "checkout", "fix/issue-4"], cwd=origin)
+    (origin / "extra.txt").write_text("more\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "origin moves on"], cwd=origin)
+
+    status = worktree.remote_branch_status(clone, "fix/issue-4")
+
+    assert status.local is True
+    assert status.remote is True
+    assert status.ahead == 0
+    assert status.behind == 1
+    assert status.diverged is False
+
+
+def test_prune_drops_a_stale_registration(repo: Path) -> None:
+    path = worktree.create(repo, ".worktrees", "issue-13", "fix/issue-13", "main")
+    shutil.rmtree(path)
+
+    worktree.prune(repo)
+
+    branches = [wt.branch for wt in worktree.list_worktrees(repo)]
+    assert "fix/issue-13" not in branches
 
 
 def test_create_twice_fails(repo: Path) -> None:

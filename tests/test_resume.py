@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -214,6 +215,198 @@ def test_run_resume_raises_when_worktree_is_missing(repo: Path) -> None:
         run_resume(repo, 99)
 
 
+def _clone_with_remote_branch(tmp_path: Path, branch: str) -> tuple[Path, Path]:
+    """(origin, clone) where `branch` exists on the origin only. Mirrors the
+    identically named helper in test_worktree.py — kept local so this module
+    doesn't reach across test files for a fixture."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    run(["git", "init", "-b", "main"], cwd=origin)
+    run(["git", "config", "user.email", "t@example.com"], cwd=origin)
+    run(["git", "config", "user.name", "t"], cwd=origin)
+    (origin / "f.txt").write_text("hi\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "init"], cwd=origin)
+    run(["git", "branch", branch], cwd=origin)
+
+    clone = tmp_path / "clone"
+    run(["git", "clone", str(origin), str(clone)], cwd=tmp_path)
+    # `git clone` doesn't copy local (non-`--global`) config, and a couple of
+    # these tests commit inside the clone (or a worktree off it) to build an
+    # ahead/behind/diverged history.
+    run(["git", "config", "user.email", "t@example.com"], cwd=clone)
+    run(["git", "config", "user.name", "t"], cwd=clone)
+    return origin, clone
+
+
+def test_recovers_worktree_from_a_remote_only_branch(tmp_path: Path) -> None:
+    """Issue #164 case 1: worktree gone, branch survives only on origin —
+    recreated instead of refused, and the recovery names the branch."""
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-20")
+    logged: list[str] = []
+
+    recovered = implement_module._existing_worktree(clone, ProjectConfig(), 20, log=logged.append)
+
+    assert recovered == clone / ".worktrees" / "issue-20"
+    assert recovered.is_dir()
+    assert run(["git", "branch", "--show-current"], cwd=recovered).stdout.strip() == "fix/issue-20"
+    assert any("fix/issue-20" in line and "recovered" in line for line in logged)
+
+
+def test_recovers_worktree_from_a_local_only_branch_with_unpushed_warning(repo: Path) -> None:
+    """Issue #164 case 2: no remote at all, branch exists only locally —
+    recreated, with a warning that it has never been pushed."""
+    run(["git", "branch", "fix/issue-21"], cwd=repo)
+    logged: list[str] = []
+
+    recovered = implement_module._existing_worktree(repo, ProjectConfig(), 21, log=logged.append)
+
+    assert recovered.is_dir()
+    assert run(["git", "branch", "--show-current"], cwd=recovered).stdout.strip() == "fix/issue-21"
+    assert any("not been pushed" in line for line in logged)
+
+
+def test_no_branch_anywhere_keeps_todays_exact_refusal(repo: Path) -> None:
+    """Issue #164 case 3: no worktree, no local branch, no remote branch — the
+    existing refusal message must survive byte for byte (existing callers may
+    match on it)."""
+    with pytest.raises(FileNotFoundError) as excinfo:
+        implement_module._existing_worktree(repo, ProjectConfig(), 22)
+
+    wt_path = repo / ".worktrees" / "issue-22"
+    assert str(excinfo.value) == (
+        f"no worktree for issue #22 at {wt_path} — run `agent dispatch 22` to start one"
+    )
+
+
+def test_recovery_fast_forwards_when_remote_is_ahead_of_local(tmp_path: Path) -> None:
+    """Issue #164 case 4: local branch behind origin — fast-forwarded on
+    recovery, never reset, so no commit is lost."""
+    origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-23")
+    run(["git", "branch", "fix/issue-23", "origin/fix/issue-23"], cwd=clone)
+
+    run(["git", "checkout", "fix/issue-23"], cwd=origin)
+    (origin / "extra.txt").write_text("origin-only work\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "origin moves on"], cwd=origin)
+    origin_tip = run(["git", "rev-parse", "fix/issue-23"], cwd=origin).stdout.strip()
+
+    logged: list[str] = []
+    recovered = implement_module._existing_worktree(clone, ProjectConfig(), 23, log=logged.append)
+
+    assert run(["git", "rev-parse", "HEAD"], cwd=recovered).stdout.strip() == origin_tip
+    assert any("fast-forwarded" in line for line in logged)
+
+
+def test_recovery_keeps_local_commits_when_local_is_ahead_of_remote(tmp_path: Path) -> None:
+    """Issue #164 case 5: local branch ahead of origin — its commits survive
+    the recovery untouched, and it does not error."""
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-24")
+    run(["git", "branch", "fix/issue-24", "origin/fix/issue-24"], cwd=clone)
+    wt = worktree.create_tracking(clone, ".worktrees", "issue-24", "fix/issue-24")
+    (wt / "local.txt").write_text("local-only work\n")
+    run(["git", "add", "."], cwd=wt)
+    run(["git", "commit", "-m", "local moves on"], cwd=wt)
+    local_tip = run(["git", "rev-parse", "fix/issue-24"], cwd=wt).stdout.strip()
+    # Worktree gone, but its branch — carrying the local commit — survives.
+    worktree.remove(clone, ".worktrees", "issue-24")
+
+    recovered = implement_module._existing_worktree(clone, ProjectConfig(), 24)
+
+    assert run(["git", "rev-parse", "HEAD"], cwd=recovered).stdout.strip() == local_tip
+
+
+def test_recovery_refuses_a_diverged_branch_leaving_both_refs_untouched(tmp_path: Path) -> None:
+    """Issue #164 case 6: commits on both sides — refuse rather than guess
+    which to keep, and touch neither ref."""
+    origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-25")
+    run(["git", "branch", "fix/issue-25", "origin/fix/issue-25"], cwd=clone)
+    wt = worktree.create_tracking(clone, ".worktrees", "issue-25", "fix/issue-25")
+    (wt / "local.txt").write_text("local-only work\n")
+    run(["git", "add", "."], cwd=wt)
+    run(["git", "commit", "-m", "local moves on"], cwd=wt)
+    local_tip_before = run(["git", "rev-parse", "fix/issue-25"], cwd=wt).stdout.strip()
+    worktree.remove(clone, ".worktrees", "issue-25")
+
+    run(["git", "checkout", "fix/issue-25"], cwd=origin)
+    (origin / "extra.txt").write_text("origin-only work\n")
+    run(["git", "add", "."], cwd=origin)
+    run(["git", "commit", "-m", "origin moves on"], cwd=origin)
+    origin_tip_before = run(["git", "rev-parse", "fix/issue-25"], cwd=origin).stdout.strip()
+
+    with pytest.raises(CommandError, match="diverged"):
+        implement_module._existing_worktree(clone, ProjectConfig(), 25)
+
+    assert run(["git", "rev-parse", "fix/issue-25"], cwd=clone).stdout.strip() == local_tip_before
+    assert run(["git", "rev-parse", "fix/issue-25"], cwd=origin).stdout.strip() == origin_tip_before
+
+
+def test_healthy_worktree_is_returned_untouched_with_no_fetch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #164 case 7: happy-path regression guard — a present, healthy
+    worktree triggers no fetch at all."""
+    path = worktree.create(repo, ".worktrees", "issue-26", "fix/issue-26", "main")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("remote_branch_status must not run when the worktree is healthy")
+
+    monkeypatch.setattr(worktree, "remote_branch_status", boom)
+
+    recovered = implement_module._existing_worktree(repo, ProjectConfig(), 26)
+
+    assert recovered == path
+
+
+def test_recovery_prunes_a_stale_registration_before_recreating(repo: Path) -> None:
+    """Issue #164 case 8: the worktree directory was deleted by hand (not via
+    `git worktree remove`), so git still lists it as checked out — recovery
+    must prune that registration rather than hand back the dead path."""
+    path = worktree.create(repo, ".worktrees", "issue-27", "fix/issue-27", "main")
+    shutil.rmtree(path)
+
+    recovered = implement_module._existing_worktree(repo, ProjectConfig(), 27)
+
+    assert recovered.is_dir()
+    assert run(["git", "branch", "--show-current"], cwd=recovered).stdout.strip() == "fix/issue-27"
+
+
+def test_recovery_degrades_gracefully_when_the_remote_is_unreachable(repo: Path) -> None:
+    """Issue #164 case 9: `origin` is configured but unreachable (offline) —
+    the fetch fails, and recovery still succeeds from the local branch."""
+    run(["git", "remote", "add", "origin", str(repo / "does-not-exist")], cwd=repo)
+    run(["git", "branch", "fix/issue-29"], cwd=repo)
+
+    recovered = implement_module._existing_worktree(repo, ProjectConfig(), 29)
+
+    assert recovered.is_dir()
+    assert run(["git", "branch", "--show-current"], cwd=recovered).stdout.strip() == "fix/issue-29"
+
+
+def test_run_resume_proceeds_after_recovering_a_remote_only_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #164 case 1, end to end: `run_resume` itself must not treat a
+    recovered worktree any differently from one that was there all along."""
+    _origin, clone = _clone_with_remote_branch(tmp_path, "fix/issue-30")
+    halt = implement_module._feedback_path(clone, 30)
+    halt.parent.mkdir(parents=True, exist_ok=True)
+    halt.write_text("resume this from the recovered branch")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    ok = run_resume(clone, 30)
+
+    assert ok is False  # loop outcome forced to fail — we only care that it got this far
+    assert captured["cwd"] == clone / ".worktrees" / "issue-30"
+
+
 def test_run_implement_halt_writes_feedback_file_and_comments_on_the_issue(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -341,7 +534,7 @@ def test_ad_hoc_message_does_not_overwrite_the_halt_findings(
     fake = FakeSurface()
     monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
     monkeypatch.setattr(
-        implement_module, "_existing_worktree", lambda root, config, number: repo / "wt"
+        implement_module, "_existing_worktree", lambda root, config, number, **kwargs: repo / "wt"
     )
 
     implement_module.dispatch_resume(repo, 5, message="also bump the version")
@@ -951,7 +1144,7 @@ def test_dispatch_resume_records_the_new_terminal_as_the_mailbox(
     halt.parent.mkdir(parents=True, exist_ok=True)
     halt.write_text("findings")
     monkeypatch.setattr(
-        implement_module, "_existing_worktree", lambda root, config, number: repo / "wt"
+        implement_module, "_existing_worktree", lambda root, config, number, **kwargs: repo / "wt"
     )
 
     class RecordingSurface:
