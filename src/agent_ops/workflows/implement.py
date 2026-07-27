@@ -439,8 +439,16 @@ def _run_implement(
         )
         return False
 
+    implementer_text = outcome.last_result.text if outcome.last_result else ""
     if not _review_and_maybe_halt(
-        config, project_root, issue_number, wt_path, card=card, runtime_name=runtime_name, log=log
+        config,
+        project_root,
+        issue_number,
+        wt_path,
+        implementer_text,
+        card=card,
+        runtime_name=runtime_name,
+        log=log,
     ):
         return False
 
@@ -678,8 +686,16 @@ def _run_resume(
         )
         return False
 
+    implementer_text = outcome.last_result.text if outcome.last_result else ""
     if not _review_and_maybe_halt(
-        config, project_root, issue_number, wt_path, card=card, runtime_name=runtime_name, log=log
+        config,
+        project_root,
+        issue_number,
+        wt_path,
+        implementer_text,
+        card=card,
+        runtime_name=runtime_name,
+        log=log,
     ):
         return False
 
@@ -975,11 +991,107 @@ def _refuse_if_stale_base(
     return False
 
 
+def _truncated_first_line(text: str, limit: int = 200) -> str:
+    """The first non-empty line of `text`, trimmed to `limit` characters.
+
+    Feeds the `failed`/`halted` outcome's `reason`: the full transcript
+    already lives in the run log for dispatched runs, so the reason only
+    needs to be a pointer, not a copy.
+    """
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first:
+        return "(empty message)"
+    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
+
+
+def _handle_empty_diff(
+    project_root: Path,
+    issue_number: int,
+    wt_path: Path,
+    implementer_text: str,
+    *,
+    card: _CardReporter,
+    log: Callable[[str], None],
+) -> bool:
+    """True when the diff is empty and a durable outcome has been recorded for it.
+
+    False means either there is a diff to act on, or the diff itself could
+    not be determined (e.g. `wt_path` doesn't exist, as in some tests) — a
+    caller that gets False should proceed to whatever check normally follows,
+    exactly as it did before this existed.
+
+    Detection reuses `_self_review`'s exact recipe (intent-to-add, then `git
+    diff`) so a create-only run counts as "not empty" here too (#75). Called
+    from `_review_and_maybe_halt` before the `config.loop.self_review` early
+    return, so an empty diff is caught even with self-review disabled —
+    otherwise `_finish_run` would `git commit` on a clean tree and raise
+    (issue #199).
+
+    An implementer that produces no changes is not a pass, and it is not
+    folded into the "gates passed on an unchanged tree" success signal. It is
+    one of two distinct, named outcomes instead:
+
+    - `escalated(implementer_text)` — a deliberate refusal. Recorded
+      `halted`, with the full final message posted on the issue (mirrors the
+      CI lane's "escalation posts its reasoning on the issue", #129).
+      Deliberately does NOT write the feedback file: a bare `agent resume`
+      must not replay a refusal as actionable feedback — a human resumes
+      with `--message` once they've decided what to do about it.
+    - Otherwise — an unproductive attempt. Recorded `failed`, with an excerpt
+      of the final message as the reason.
+    """
+    run(["git", "add", "-A", "-N"], cwd=wt_path, check=False)
+    diff = run(["git", "diff"], cwd=wt_path, check=False)
+    if diff.returncode != 0 or diff.stdout.strip():
+        return False
+
+    if escalated(implementer_text):
+        log(f"implementer escalated with an empty diff; worktree kept at {wt_path}")
+        card.note(f"#{issue_number}: implementer escalated — needs a human")
+        try:
+            github.comment_on_issue(
+                issue_number,
+                f"## Agent implement — escalated\n\n{implementer_text}",
+                cwd=project_root,
+            )
+        except CommandError as exc:
+            # Same best-effort guard as `_record_halt`: a comment that can't
+            # be posted (missing `gh`, no remote) must not turn a halt into a
+            # crash — the durable record below is written either way.
+            log(f"could not post escalation comment on issue #{issue_number}: {exc}")
+        reason = (
+            f"implementer escalated: {_truncated_first_line(implementer_text)} — "
+            f"worktree kept at {wt_path}"
+        )
+        # Durable record first, then the best-effort push — mirrors
+        # `spawn.report`'s ordering.
+        runs.write_outcome(project_root, issue_number, state="halted", reason=reason, log=log)
+        messages.send_outcome(project_root, issue_number, state="halted", reason=reason, log=log)
+        return True
+
+    if opens_with_escalation_word(implementer_text):
+        log(
+            "note: the implementer's final message opens with the word ESCALATE but not "
+            "as the sentinel (`ESCALATE:` or a line of its own) — treating this as an "
+            "unproductive attempt, not an escalation"
+        )
+    log(f"implementer finished with an empty diff and no ESCALATE; worktree kept at {wt_path}")
+    card.note(f"#{issue_number}: empty diff, no escalation; worktree kept")
+    reason = (
+        "implementer finished with an empty diff and no ESCALATE — final message: "
+        f"{_truncated_first_line(implementer_text)} — worktree kept at {wt_path}"
+    )
+    runs.write_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
+    messages.send_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
+    return True
+
+
 def _review_and_maybe_halt(
     config: ProjectConfig,
     project_root: Path,
     issue_number: int,
     wt_path: Path,
+    implementer_text: str,
     *,
     card: _CardReporter,
     runtime_name: str | None,
@@ -994,28 +1106,31 @@ def _review_and_maybe_halt(
     """
     if not _refuse_if_stale_base(config, project_root, issue_number, wt_path, card=card, log=log):
         return False
+    if _handle_empty_diff(
+        project_root, issue_number, wt_path, implementer_text, card=card, log=log
+    ):
+        return False
     if not config.loop.self_review:
         return True
     review = _self_review(config, wt_path, log=log, runtime_override=runtime_name)
     if review.ok:
         return True
     if not review.reviewed:
-        # Nothing was reviewed. Still say the worktree was kept and still mark
-        # the card — a halt that logs nothing is the failure mode this whole
-        # issue is about. Only the issue comment and the feedback file are
-        # suppressed: "(empty diff — nothing to review)" is not a finding, and
-        # storing it would hand the next run a note that says nothing.
+        # Defensive delegate, not the primary path: `_handle_empty_diff` above
+        # already covers every empty-diff case with the same git-diff recipe,
+        # so this should be unreachable in practice. Kept rather than removed
+        # so a future divergence between the two checks still writes a
+        # durable outcome record instead of falling back to the silent
+        # "stopped — inspect" shape issue #199 is about.
+        if _handle_empty_diff(
+            project_root, issue_number, wt_path, implementer_text, card=card, log=log
+        ):
+            return False
         log(f"self-review had nothing to review; worktree kept at {wt_path}")
         card.note(f"#{issue_number}: self-review had nothing to review")
-        # Same silent shape as the gate-failure exit: nothing was produced and
-        # nothing was stashed, so only the run itself can say what happened.
-        messages.send_outcome(
-            project_root,
-            issue_number,
-            state="failed",
-            reason=f"self-review had nothing to review; worktree kept at {wt_path}",
-            log=log,
-        )
+        reason = f"self-review had nothing to review; worktree kept at {wt_path}"
+        runs.write_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
+        messages.send_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
         return False
     log(f"self-review requested changes; worktree kept at {wt_path}")
     card.note(f"#{issue_number}: self-review requested changes")
