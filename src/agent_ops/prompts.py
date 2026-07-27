@@ -6,6 +6,12 @@ from agent_ops.utils import PLATFORM_ROOT
 
 TASKS_DIR = PLATFORM_ROOT / "prompts" / "tasks"
 
+#: Shared preamble telling every local-lane prompt that issue/PR/CI content is
+#: data, not instructions, and what outranks it when the two conflict (#141).
+#: Lives in prompts/, not prompts/tasks/, so task_names() doesn't treat it as
+#: a lane and evolve's per-lane edit scope doesn't cover it.
+UNTRUSTED_DATA_GUARD = (TASKS_DIR.parent / "untrusted-data.md").read_text().strip()
+
 #: What the task prompts tell an agent to emit when it needs a human. The colon
 #: is part of the sentinel, not punctuation around it.
 ESCALATE_SENTINEL = "ESCALATE:"
@@ -28,9 +34,12 @@ _DECORATION = " \t*_`>#\"'"
 
 
 def render_task(name: str, **fields: str) -> str:
-    """Load prompts/tasks/<name>.md and substitute {placeholders}."""
+    """Load prompts/tasks/<name>.md, substitute {placeholders}, and prepend the
+    untrusted-data guard. Prepended after `.format()` so guard text never
+    itself passes through the template's format string.
+    """
     template = (TASKS_DIR / f"{name}.md").read_text()
-    return template.format(**fields)
+    return f"{UNTRUSTED_DATA_GUARD}\n\n{template.format(**fields)}"
 
 
 def task_names() -> list[str]:

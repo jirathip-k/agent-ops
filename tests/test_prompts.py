@@ -1,6 +1,15 @@
+import string
+
 import pytest
 
-from agent_ops.prompts import TASKS_DIR, escalated, opens_with_escalation_word, render_task
+from agent_ops.prompts import (
+    TASKS_DIR,
+    UNTRUSTED_DATA_GUARD,
+    escalated,
+    opens_with_escalation_word,
+    render_task,
+    task_names,
+)
 
 # task template → the fields the workflow code supplies (a drifted
 # placeholder fails render_task with KeyError)
@@ -44,6 +53,31 @@ def test_task_templates_render(name: str) -> None:
     text = render_task(name, **TASK_FIELDS[name])
     for value in TASK_FIELDS[name].values():
         assert value in text
+
+
+@pytest.mark.parametrize("name", task_names())
+def test_every_task_template_carries_the_untrusted_data_guard(name: str) -> None:
+    """Glob-driven via `task_names()`, not `TASK_FIELDS` above (which omits
+    `implement`, `review`, and `evolve`) — this is what stops a new
+    prompts/tasks/*.md template from shipping without the guard (#141).
+    """
+    template = (TASKS_DIR / f"{name}.md").read_text()
+    placeholders = {field for _, field, _, _ in string.Formatter().parse(template) if field}
+    rendered = render_task(name, **dict.fromkeys(placeholders, "x"))
+    assert rendered.startswith(UNTRUSTED_DATA_GUARD)
+
+
+def test_untrusted_data_guard_names_authority_and_untrusted_surfaces() -> None:
+    guard = UNTRUSTED_DATA_GUARD
+    assert "AGENTS.md" in guard
+    assert "authoritative" in guard
+    for surface in ("issue", "comment", "PR", "CI log"):
+        assert surface in guard
+    assert "say so" in guard  # the report-it-instead-of-ignoring instruction
+
+
+def test_untrusted_data_fragment_is_not_itself_a_lane() -> None:
+    assert "untrusted-data" not in task_names()
 
 
 @pytest.mark.parametrize(

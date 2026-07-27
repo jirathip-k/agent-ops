@@ -4,7 +4,7 @@ import pytest
 
 from agent_ops import github, worktree
 from agent_ops.config import ProjectConfig
-from agent_ops.prompts import TASKS_DIR, render_task
+from agent_ops.prompts import TASKS_DIR, UNTRUSTED_DATA_GUARD, render_task
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError
 from agent_ops.workflows import scout as scout_module
@@ -195,7 +195,7 @@ def test_no_focus_renders_todays_prompt_byte_for_byte() -> None:
     """Repos that never configure a focus must see no trace of the feature —
     not even the blank line a naive placeholder would leave behind."""
     today = (TASKS_DIR / "scout.md").read_text().replace("{repo_focus}", "")
-    assert _render("") == today.format(max_issues="3")
+    assert _render("") == f"{UNTRUSTED_DATA_GUARD}\n\n{today.format(max_issues='3')}"
     assert "## Repo focus" not in _render("")
     # the join today's prompt has, spelled out so the template can't drift into
     # an extra blank line and still pass
