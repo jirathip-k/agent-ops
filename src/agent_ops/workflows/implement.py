@@ -786,7 +786,15 @@ def dispatch_resume(
     )
     # Overwrites whatever the original dispatch recorded: this terminal is the
     # one that owns the issue now, so it is the mailbox a supervisor should
-    # watch (issue #98).
+    # watch (issue #98). The spawner carries forward rather than resetting:
+    # `current_handle()` is whoever ran `agent resume` (the supervisor, in the
+    # dispatch-then-resume pattern this repo uses), falling back to the prior
+    # record's spawner when resumed from a plain shell — dropping it silences
+    # every halt from round 2 onward (issue #192).
+    prior = messages.load_spawn(project_root, issue_number, log=log)
+    spawner = messages.current_handle() or (prior.spawner if prior is not None else None)
+    if spawner == spawned.handle:
+        spawner = None  # never record the worker as its own spawner
     messages.record_spawn(
         project_root,
         issue_number,
@@ -794,6 +802,7 @@ def dispatch_resume(
         handle=spawned.handle,
         pid=spawned.pid,
         log_path=spawned.log_path,
+        spawner=spawner,
         log=log,
     )
     return spawned
