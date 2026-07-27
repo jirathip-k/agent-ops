@@ -43,6 +43,55 @@ def test_pr_into_stable_branch_is_blocked() -> None:
     assert any("human-only" in v for v in violations)
 
 
+# ---------- single-branch model (base_branch == merge.stable_branch, issue #182) ----------
+
+
+def test_single_branch_clean_pr_is_mergeable() -> None:
+    config = ProjectConfig.model_validate(
+        {"base_branch": "main", "merge": {"stable_branch": "main"}}
+    )
+    pr = _pr([{"path": "src/app.ts", "additions": 30, "deletions": 5}], base="main")
+    assert evaluate_merge(pr, config) == []
+
+
+def test_single_branch_clean_pr_is_mergeable_with_bare_default() -> None:
+    # No `merge` block at all: merge.stable_branch defaults to "main", which
+    # is also the bare-default base_branch — the common no-override shape.
+    config = ProjectConfig.model_validate({"base_branch": "main"})
+    pr = _pr([{"path": "src/app.ts", "additions": 30, "deletions": 5}], base="main")
+    assert evaluate_merge(pr, config) == []
+
+
+def test_single_branch_wrong_base_is_still_blocked_without_contradictory_note() -> None:
+    config = ProjectConfig.model_validate(
+        {"base_branch": "main", "merge": {"stable_branch": "main"}}
+    )
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}], base="feature-x")
+    violations = evaluate_merge(pr, config)
+    assert any("agents may only merge into 'main'" in v for v in violations)
+    assert not any("human-only" in v for v in violations)
+
+
+def test_single_branch_other_rules_still_apply() -> None:
+    config = ProjectConfig.model_validate(
+        {"base_branch": "main", "merge": {"stable_branch": "main"}}
+    )
+
+    big = _pr([{"path": "src/app.ts", "additions": 500, "deletions": 0}], base="main")
+    assert any("changed lines" in v for v in evaluate_merge(big, config))
+
+    blocked_path = _pr([{"path": "package-lock.json", "additions": 1, "deletions": 0}], base="main")
+    assert any("blocked path" in v for v in evaluate_merge(blocked_path, config))
+
+    labeled = _pr(
+        [{"path": "src/app.ts", "additions": 1, "deletions": 0}],
+        base="main",
+        labels=["human-merge-only"],
+    )
+    violations = evaluate_merge(labeled, config)
+    assert any("blocked label" in v and "human-merge-only" in v for v in violations)
+
+
 def test_size_caps() -> None:
     big = _pr([{"path": "src/app.ts", "additions": 500, "deletions": 0}])
     assert any("changed lines" in v for v in evaluate_merge(big, _config()))
