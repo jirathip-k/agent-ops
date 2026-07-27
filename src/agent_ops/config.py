@@ -105,7 +105,13 @@ class ResolvedRole(BaseModel):
 
 
 class MergeConfig(BaseModel):
-    """Rules for agent merges into the working branch (never the stable one)."""
+    """Rules for agent merges into the working branch.
+
+    Only humans merge into the stable branch when it is a separate branch
+    from base_branch (the two-branch/promotion model). When base_branch and
+    stable_branch are the same (the single-branch model, e.g. both `main`),
+    agents merge straight into it — see workflows.merge.evaluate_merge.
+    """
 
     stable_branch: str = "main"  # promotion target; only humans merge into it
     max_changed_lines: int = 400
@@ -162,6 +168,12 @@ class MergeConfig(BaseModel):
             "*.tf",
         ]
     )
+    # A PR carrying one of these labels is a violation `evaluate_merge` raises
+    # regardless of size/path — the actual enforcement behind labels like
+    # `human-merge-only` (evolve.py), which `gh pr merge` does not itself
+    # understand. Code-side default, same precedent as `blocked_paths`: a
+    # project overrides it in `config/defaults.yaml`, not here.
+    blocked_labels: list[str] = Field(default_factory=lambda: ["human-merge-only"])
 
 
 class ReviewConfig(BaseModel):
@@ -187,6 +199,21 @@ class DistillConfig(BaseModel):
             "Maintaining this file",
         ]
     )
+
+
+class ScoutConfig(BaseModel):
+    """What this repo wants mined, on top of scout's standard signal list.
+
+    Free text, written by the repo it scouts. The standard signals (TODOs,
+    deferred review threads, swallowed errors, untested modules, stale docs)
+    are near-empty on a static or marketing site, so scout files nothing
+    there; `focus` is how such a repo names the signals that *do* exist for
+    it. It names signals, never goals — "pages missing meta descriptions",
+    not "do SEO research" — because a goal invites exactly the brainstorming
+    scout is built to refuse.
+    """
+
+    focus: str = ""
 
 
 class ProjectConfig(BaseModel):
@@ -215,6 +242,7 @@ class ProjectConfig(BaseModel):
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
+    scout: ScoutConfig = Field(default_factory=ScoutConfig)
 
     def effective_runtime(self, role_name: str, runtime_override: str | None = None) -> str:
         """The runtime a role will actually run on: CLI override, role, then base."""

@@ -1,12 +1,15 @@
-"""Evidence layer for the evolve pass (#151): gather a lane's recent run history.
+"""Evidence layer (#151) and the diagnose/no-op-or-draft-PR pass (#152) for evolve.
 
-Deterministic, no model in the loop — this module fetches from `gh` and local
-`.agent-runs/` records and reduces them to a survey table and a baseline for
-the CLI to print. The prompt, the verdict, and the PR the evolve pass writes
-from this evidence are #152/#153, not here.
+`gather`/`baseline`/`render_survey`/`render_baseline` are deterministic, no
+model in the loop — they fetch from `gh` and local `.agent-runs/` records and
+reduce them to a survey table and a baseline. `run_evolve` feeds that
+evidence to a planner agent, which diagnoses it against four named failure
+modes and either states a reasoned no-op or proposes a change to exactly one
+lane prompt (`prompts/tasks/<lane>.md`), landed as a draft, human-merge-only
+PR. The scheduled cadence that invokes this on its own is #153, not here.
 
-Two things this deliberately does not surface, verified absent rather than
-merely unimplemented:
+Two things the evidence layer deliberately does not surface, verified absent
+rather than merely unimplemented:
 - Per-run cost: recorded nowhere — `RunResult` has no cost field.
 - Claude session transcripts (`~/.claude/projects/**/*.jsonl`): do not survive
   a CI runner, so there is nothing on disk to read them from in that context.
@@ -20,15 +23,20 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from agent_ops import stubs
+from agent_ops import github, stubs, worktree
+from agent_ops.config import load_project_config
+from agent_ops.fallback import run_with_fallback
+from agent_ops.prompts import render_task
 from agent_ops.runs import Outcome, read_outcome
 from agent_ops.status import FAILED_CONCLUSIONS
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
+from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.spec import ESCALATION_HEADER
 
 # Which lane's escalations look like what. Spec is the only lane that posts
@@ -124,26 +132,26 @@ def _fetch_ci_runs(root: Path, lane: str, limit: int) -> tuple[list[dict[str, An
     runs: list[dict[str, Any]] = []
     truncated = False
     for caller in callers:
+        proc = run(
+            [
+                "gh",
+                "run",
+                "list",
+                "--workflow",
+                caller.name,
+                "--limit",
+                str(limit),
+                "--json",
+                "databaseId,event,status,conclusion,createdAt,updatedAt,url",
+            ],
+            cwd=root,
+            check=False,
+        )
+        if proc.returncode != 0:
+            continue
         try:
-            proc = run(
-                [
-                    "gh",
-                    "run",
-                    "list",
-                    "--workflow",
-                    caller.name,
-                    "--limit",
-                    str(limit),
-                    "--json",
-                    "databaseId,event,status,conclusion,createdAt,updatedAt,url",
-                ],
-                cwd=root,
-                check=False,
-            )
-            if proc.returncode != 0:
-                continue
             batch = json.loads(proc.stdout)
-        except (CommandError, OSError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             continue
         runs.extend(batch)
         if len(batch) == limit:
@@ -157,26 +165,26 @@ def _fetch_prs(root: Path, limit: int) -> tuple[list[dict[str, Any]], bool]:
     The second element is True when the result came back with exactly
     `limit` rows — a sign the fetch was truncated, same as `_fetch_ci_runs`.
     """
+    proc = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,headRefName,state,createdAt,closedAt,mergedAt,url",
+        ],
+        cwd=root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [], False
     try:
-        proc = run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--state",
-                "all",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,headRefName,state,createdAt,closedAt,mergedAt,url",
-            ],
-            cwd=root,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return [], False
         prs = json.loads(proc.stdout)
-    except (CommandError, OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return [], False
     return prs, len(prs) == limit
 
@@ -190,26 +198,26 @@ def _fetch_escalations(root: Path, limit: int = _ISSUE_LIMIT) -> tuple[list[dict
     Because `gh issue list` returns newest-*created* first, a truncated fetch
     can drop a recent escalation comment on an old issue entirely.
     """
+    proc = run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,url,comments",
+        ],
+        cwd=root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [], False
     try:
-        proc = run(
-            [
-                "gh",
-                "issue",
-                "list",
-                "--state",
-                "all",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,url,comments",
-            ],
-            cwd=root,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return [], False
         issues = json.loads(proc.stdout)
-    except (CommandError, OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return [], False
     return issues, len(issues) == limit
 
@@ -471,3 +479,270 @@ def gather(
             f"same as a lane with zero recent runs"
         )
     return rows, notes
+
+
+# --- the pass itself (#152): diagnose, no-op, or draft PR --------------------
+
+_FAILURE_MODES = {"drift", "vagueness", "wrong focus", "fuzzy gate"}
+_CITATION_RE = re.compile(r"(https?://\S+|#\d+)")
+_LINE_SEP = re.compile(r"\s+[—-]+\s+")
+_NOOP_RE = re.compile(r"^none\s*[—-]+\s*(.+)$", re.IGNORECASE)
+
+# `gh label create --force` before use — same reasoning as scout's
+# backlog/proposed-by-agent labels: the agent's own PR carries this label, so
+# it must exist before the run that creates the PR.
+_HUMAN_MERGE_ONLY_LABEL = github.Label(
+    "b60205", "Opened as a draft by an automated pass — a human must review and merge"
+)
+
+
+@dataclass(frozen=True)
+class EvolveChange:
+    mode: str
+    summary: str
+    citations: str
+
+
+@dataclass(frozen=True)
+class NoopVerdict:
+    reason: str
+
+
+def _split_verdict_line(line: str) -> tuple[str, str, str] | None:
+    """Split a `mode — summary — citations` line, tolerating a dash inside `summary`.
+
+    A plain `split(maxsplit=2)` truncates the moment `summary` itself contains
+    an internal spaced dash (e.g. "retries were added - even though the prompt
+    didn't ask - see #123"): it stops after the first two separators and
+    spills the rest of the summary into `citations`. Splitting mode off the
+    *first* separator and citations off the *last* one instead lets `summary`
+    contain as many internal dashes as it likes.
+    """
+    parts = _LINE_SEP.split(line, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    mode, rest = parts
+    matches = list(_LINE_SEP.finditer(rest))
+    if not matches:
+        return None
+    last = matches[-1]
+    return mode, rest[: last.start()], rest[last.end() :]
+
+
+def parse_evolve(text: str) -> list[EvolveChange] | NoopVerdict | None:
+    """Parse the EVOLVE VERDICT block.
+
+    `None` means no block at all (or one with nothing after the marker) —
+    the caller raises on this, same as a malformed block: neither can be
+    told apart from "the agent tried and produced garbage", and both must
+    stay clearly separate from an explicit no-op. Only `none — <reason>`
+    returns a `NoopVerdict`; everything else is one `EvolveChange` per line,
+    or a `ValueError` the moment a line doesn't fit — an unknown failure
+    mode, a change citing no run URL or issue/PR number, or a line that
+    doesn't split into mode/summary/citations at all.
+    """
+    _, marker, tail = text.rpartition("EVOLVE VERDICT:")
+    if not marker:
+        return None
+    lines = [line.strip() for line in tail.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    first = lines[0]
+    if first.lower() == "none":
+        raise ValueError("EVOLVE VERDICT: none with no reason cited")
+    noop = _NOOP_RE.match(first)
+    if noop:
+        return NoopVerdict(noop.group(1).strip())
+
+    changes = []
+    for line in lines:
+        split = _split_verdict_line(line)
+        if split is None:
+            raise ValueError(f"unparseable EVOLVE VERDICT line: {line!r}")
+        mode, summary, citations = (p.strip() for p in split)
+        if mode.lower() not in _FAILURE_MODES:
+            raise ValueError(
+                f"{mode!r} is not a named failure mode "
+                f"(expected one of {sorted(_FAILURE_MODES)}): {line!r}"
+            )
+        if not _CITATION_RE.search(citations):
+            raise ValueError(f"change cites no run URL or #N: {line!r}")
+        changes.append(EvolveChange(mode.lower(), summary, citations))
+    return changes
+
+
+def _pr_body(changes: list[EvolveChange], *, baseline_block: str, notes: list[str]) -> str:
+    lines = [f"- **{c.mode}** — {c.summary} ({c.citations})" for c in changes]
+    parts = ["### Changes", "", *lines, "", "### Evidence baseline", "", baseline_block]
+    if notes:
+        parts += ["", *(f"- note: {n}" for n in notes)]
+    return "\n".join(parts)
+
+
+def run_evolve(
+    project_root: Path,
+    lane: str,
+    *,
+    window_days: int = 30,
+    min_runs: int = 5,
+    log: Callable[[str], None] = print,
+) -> list[EvolveChange]:
+    """Diagnose `lane`'s evidence and either open a draft PR or state a no-op.
+
+    A no-op is the common outcome and the cheap path: below `min_runs`, or
+    with an evolve PR for `lane` already open, this returns `[]` before
+    spawning an agent at all — the latter also stops a second evolve PR
+    stacking on an unreviewed first. The `human-merge-only` label must sync
+    before anything else runs: it is the one thing standing between a draft
+    PR and a mergeable one, so a failure to create or update it aborts before
+    the worktree even exists, rather than after a push has already happened.
+
+    Otherwise a planner agent reads the survey and either states `none` or
+    proposes a change, and three guards stand between a change verdict and a
+    push: `worktree.changed_paths` (staged, unstaged, AND untracked — not
+    `git diff`, which is blind to a staged edit) must show nothing but
+    `prompts/tasks/<lane>.md` — `prompts/orchestrator.md` and
+    `prompts/agents/**` are outside both this allowlist and the agent's write
+    grant; a change verdict paired with no changed paths is rejected as a
+    contradiction, and so is a no-op verdict paired with a stray edit; and an
+    unparseable verdict raises rather than being read as a no-op. The commit
+    itself is then made with an explicit pathspec, so even a wrong allowlist
+    check could not carry a second file into it. The PR lands as a draft
+    (which `gh pr merge` refuses outright) carrying `human-merge-only`, which
+    `workflows.merge.evaluate_merge` treats as a blocking violation
+    independent of draft state — so marking the PR ready for review does not
+    on its own make it agent-mergeable. One PR per lane per invocation.
+    """
+    allowed = f"prompts/tasks/{lane}.md"
+    if not (project_root / allowed).is_file():
+        raise RuntimeError(f"no {allowed} — {lane!r} cannot be evolved")
+
+    config = load_project_config(project_root)
+    now = datetime.now(UTC)
+    rows, notes = gather(project_root, lane, now=now, window_days=window_days)
+    b = baseline(rows, lane=lane, window_days=window_days)
+    if b.runs < min_runs:
+        log(
+            f"only {b.runs} run(s) for {lane!r} in the last {window_days}d "
+            f"(need {min_runs}) — no-op"
+        )
+        return []
+
+    branch_prefix = f"evolve/{lane}-"
+    try:
+        stale_prs = [
+            pr
+            for pr in github.open_prs(project_root)
+            if pr["headRefName"].startswith(branch_prefix)
+        ]
+    except CommandError as exc:
+        # Fails closed, not open: swallowing this and proceeding would still
+        # spend a worktree, a full planner agent run, a commit, and a push
+        # before dying at `create_pr` on the same underlying `gh` failure —
+        # same reasoning distill.run_distill applies to its own stale-PR
+        # check (agent-ops#175). A missing/non-executable `gh` binary raises
+        # this same `CommandError` (utils.run converts it under `check=True`,
+        # agent-ops#154).
+        raise RuntimeError(f"could not check for a stale evolve PR via `gh`: {exc}") from exc
+    if stale_prs:
+        pr = stale_prs[0]
+        log(
+            f"an open evolve PR already exists for {lane!r}: #{pr['number']} ({pr['url']}) — "
+            "review or merge it before running evolve again"
+        )
+        return []
+
+    try:
+        sync = github.sync_labels(
+            project_root,
+            {"human-merge-only": _HUMAN_MERGE_ONLY_LABEL},
+            repo=github.remote_slug(project_root),
+        )
+    except CommandError as exc:
+        raise RuntimeError(f"could not sync the human-merge-only label: {exc}") from exc
+    if sync.failed:
+        reasons = "; ".join(f"{name}: {reason}" for name, reason in sync.failed)
+        raise RuntimeError(f"could not sync the human-merge-only label: {reasons}")
+
+    run(
+        ["git", "fetch", "origin", config.base_branch],
+        cwd=project_root,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
+    base_sha = run(
+        ["git", "rev-parse", "--short", f"origin/{config.base_branch}"], cwd=project_root
+    ).stdout.strip()
+    branch = f"{branch_prefix}{base_sha}"
+    task_id = f"evolve-{lane}-tmp"
+    wt = worktree.create_detached(
+        project_root, config.worktree_dir, task_id, f"origin/{config.base_branch}"
+    )
+    try:
+        prompt = render_task(
+            "evolve",
+            lane=lane,
+            survey=render_survey(rows),
+            baseline=render_baseline(b),
+            notes="\n".join(f"- {n}" for n in notes) if notes else "(none)",
+        )
+        runtime, request = role_request(
+            config,
+            "planner",
+            prompt,
+            wt,
+            # may edit ONLY prompts/tasks/<lane>.md (enforced below, not by
+            # this grant — see `worktree.changed_paths`); reads CI/PR
+            # history for citations
+            extra_allowed_tools=(
+                "Edit",
+                "Bash(gh run view:*)",
+                "Bash(gh run list:*)",
+                "Bash(gh pr view:*)",
+                "Bash(gh pr list:*)",
+            ),
+        )
+        result = run_with_fallback(runtime, request, on_event=log)
+        if not result.ok:
+            raise RuntimeError(f"Evolve run failed: {result.text}")
+
+        try:
+            verdict = parse_evolve(result.text)
+        except ValueError as exc:
+            raise RuntimeError(f"Evolve produced an unparseable verdict: {exc}") from exc
+        if verdict is None:
+            raise RuntimeError(f"Evolve produced no parseable verdict:\n{result.text[-500:]}")
+
+        changed = worktree.changed_paths(wt)
+        if changed and changed != [allowed]:
+            raise RuntimeError(f"evolve touched disallowed path(s): {changed}")
+
+        if isinstance(verdict, NoopVerdict):
+            if changed:
+                raise RuntimeError(f"no-op verdict but {allowed} was changed anyway")
+            log(f"no-op for {lane!r}: {verdict.reason}")
+            return []
+
+        if not changed:
+            raise RuntimeError(f"evolve proposed change(s) but {allowed} is unchanged")
+
+        run(["git", "checkout", "-b", branch], cwd=wt)
+        run(["git", "add", allowed], cwd=wt)
+        run(["git", "commit", "-m", f"prompts: evolve {lane}", "--", allowed], cwd=wt)
+        run(["git", "push", "-u", "origin", branch], cwd=wt, timeout=SLOW_GIT_TIMEOUT_S)
+
+        body = _pr_body(verdict, baseline_block=render_baseline(b), notes=notes)
+        url = github.create_pr(
+            wt,
+            base=config.base_branch,
+            title=f"prompts: evolve {lane}",
+            body=body,
+            draft=True,
+            labels=("human-merge-only",),
+        )
+        log(f"opened draft PR: {url}")
+        for c in verdict:
+            log(f"{c.mode}: {c.summary}")
+        return verdict
+    finally:
+        worktree.remove(project_root, config.worktree_dir, task_id, force=True, delete_branch=True)

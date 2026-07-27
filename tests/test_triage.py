@@ -189,9 +189,10 @@ def test_run_triage_survives_a_label_sync_failure(
 def test_run_triage_survives_gh_not_being_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`utils.run` raises FileNotFoundError, not CommandError, when `gh` isn't on
-    PATH — a missing `gh` here must not abort a triage run after the agent has
-    already produced results."""
+    """A missing `gh` binary surfaces from `sync_labels` as `CommandError` —
+    `utils.run` converts the underlying `FileNotFoundError` under `check=True`
+    (agent-ops#154) — a missing `gh` here must not abort a triage run after
+    the agent has already produced results."""
     _stub_triage_run(
         monkeypatch,
         tmp_path,
@@ -202,7 +203,7 @@ def test_run_triage_survives_gh_not_being_installed(
     def missing_gh(
         project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
     ) -> github.LabelSync:
-        raise FileNotFoundError("gh")
+        raise CommandError("could not list labels: `gh` could not be started")
 
     monkeypatch.setattr(github, "sync_labels", missing_gh)
     logged: list[str] = []

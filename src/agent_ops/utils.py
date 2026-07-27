@@ -32,6 +32,12 @@ DEFAULT_TIMEOUT_S = 120.0
 # minutes, so they opt out of DEFAULT_TIMEOUT_S rather than raising it for all.
 SLOW_GIT_TIMEOUT_S = 600.0
 
+# Synthetic returncodes for the two failure modes that never reach
+# `subprocess.run`'s normal exit path — shell convention, so a `check=False`
+# caller that only branches on returncode still gets a sensible signal.
+TIMEOUT_RETURNCODE = 124
+SPAWN_FAILURE_RETURNCODE = 127
+
 
 def run(
     cmd: list[str],
@@ -43,13 +49,19 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     """Run `cmd` and capture its output.
 
-    `timeout` bounds the wall-clock wait and raises `CommandError` when it
-    expires, regardless of `check`: a timeout leaves no exit code and no
-    output to inspect, so there is no "failed but usable" result to hand back.
-    It defaults to `DEFAULT_TIMEOUT_S` so a wedged child can never strand a run
-    — callers that legitimately take longer (project-configured gate commands,
-    slow git, an agent CLI) pass their own bound, and `timeout=None` opts out
-    entirely.
+    `check` governs all three ways a subprocess can fail: a non-zero exit, a
+    timeout, and a spawn failure (missing or non-executable binary). With
+    `check=True` (the default), each raises `CommandError`. With
+    `check=False`, none of them raise — a timeout or spawn failure is reported
+    as a synthetic `CompletedProcess` with empty stdout, the error message in
+    stderr, and returncode `TIMEOUT_RETURNCODE` (124) or
+    `SPAWN_FAILURE_RETURNCODE` (127) respectively, so a caller that only reads
+    `returncode` handles all three failure modes the same way.
+
+    `timeout` bounds the wall-clock wait. It defaults to `DEFAULT_TIMEOUT_S`
+    so a wedged child can never strand a run — callers that legitimately take
+    longer (project-configured gate commands, slow git, an agent CLI) pass
+    their own bound, and `timeout=None` opts out entirely.
     """
     try:
         proc = subprocess.run(
@@ -61,7 +73,15 @@ def run(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise CommandError(f"`{' '.join(cmd)}` did not finish within {timeout:g}s") from exc
+        message = f"`{' '.join(cmd)}` did not finish within {timeout:g}s"
+        if check:
+            raise CommandError(message) from exc
+        return subprocess.CompletedProcess(cmd, TIMEOUT_RETURNCODE, stdout="", stderr=message)
+    except OSError as exc:
+        message = f"`{' '.join(cmd)}` could not be started: {exc}"
+        if check:
+            raise CommandError(message) from exc
+        return subprocess.CompletedProcess(cmd, SPAWN_FAILURE_RETURNCODE, stdout="", stderr=message)
     if check and proc.returncode != 0:
         raise CommandError(
             f"`{' '.join(cmd)}` failed with exit code {proc.returncode}:\n"

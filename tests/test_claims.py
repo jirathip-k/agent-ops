@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from agent_ops import claims, cli, github, runs, surfaces, worktree
 from agent_ops.loop import LoopOutcome
-from agent_ops.utils import CommandError
+from agent_ops.utils import SPAWN_FAILURE_RETURNCODE, CommandError
 from agent_ops.utils import run as utils_run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import SelfReview, run_implement, run_resume
@@ -101,8 +101,12 @@ def test_claim_never_raises_when_gh_fails(repo: Path, monkeypatch: pytest.Monkey
 
 
 def test_claim_never_raises_when_gh_is_missing(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `check=False` never raises (agent-ops#154) — a missing binary comes back
+    # as a synthetic non-zero `CompletedProcess`, same as any other `gh` failure.
     def no_gh(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise FileNotFoundError("gh")
+        return subprocess.CompletedProcess(
+            args=["gh"], returncode=SPAWN_FAILURE_RETURNCODE, stdout="", stderr="gh: not found"
+        )
 
     monkeypatch.setattr(claims, "run", no_gh)
 

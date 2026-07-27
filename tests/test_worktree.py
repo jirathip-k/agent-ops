@@ -239,3 +239,21 @@ def test_delete_branch_without_force_deletes_merged_branch(repo: Path) -> None:
     assert not path.exists()
     branches = run(["git", "branch", "--list", "fix/issue-7"], cwd=repo).stdout
     assert "fix/issue-7" not in branches
+
+
+def test_changed_paths_sees_untracked_and_staged_files(repo: Path) -> None:
+    """`git diff --name-only` compares working tree to index — it misses a
+    staged edit, since index and working tree already agree. A `git commit`
+    then commits the whole index regardless, so an allowlist check built on
+    `git diff` alone would let a staged edit outside it slip through
+    undetected. `changed_paths` uses `git status --porcelain` instead, which
+    sees a staged change and an untracked file alike.
+    """
+    (repo / "untracked.md").write_text("new file\n")
+    (repo / "README.md").write_text("staged edit\n")
+    run(["git", "add", "README.md"], cwd=repo)
+
+    diff_only = run(["git", "diff", "--name-only"], cwd=repo).stdout.splitlines()
+    assert "README.md" not in diff_only
+
+    assert set(worktree.changed_paths(repo)) == {"README.md", "untracked.md"}

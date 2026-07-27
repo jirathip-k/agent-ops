@@ -274,6 +274,7 @@ def _stub_distill_run(
         return _FakeRuntime(report_text, edit=edit), RunRequest(prompt=prompt, cwd=cwd)
 
     monkeypatch.setattr(distill_module, "run", fake_run)
+    monkeypatch.setattr(worktree, "run", fake_run)
     monkeypatch.setattr(distill_module, "role_request", fake_role_request)
     monkeypatch.setattr(distill_module.github, "open_prs", lambda *a, **k: existing_prs or [])
     monkeypatch.setattr(worktree, "create", lambda *a, **k: wt_path)
@@ -608,12 +609,12 @@ def test_agents_md_missing_from_the_worktree_raises_a_clear_error(
 def test_a_missing_gh_binary_during_the_stale_pr_check_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`github.open_prs` shells out to `gh`, and `utils.run` lets a missing
-    binary's FileNotFoundError through regardless of `check` (agent-ops#154,
-    not fixed here). `github.create_pr` shells out to the same binary, so a
-    `gh`-less box cannot possibly finish a run — it must fail here, before a
-    worktree, an agent run, a commit, and a push are all spent on a run that
-    would otherwise die at `create_pr` and orphan the pushed branch.
+    """`github.open_prs` shells out to `gh` via `utils.run`, which converts a
+    missing binary's `FileNotFoundError` into `CommandError` (agent-ops#154).
+    `github.create_pr` shells out to the same binary, so a `gh`-less box
+    cannot possibly finish a run — it must fail here, before a worktree, an
+    agent run, a commit, and a push are all spent on a run that would
+    otherwise die at `create_pr` and orphan the pushed branch.
     """
     root, wt_path = _project(tmp_path)
     (wt_path / "AGENTS.md").write_text(
@@ -627,7 +628,7 @@ def test_a_missing_gh_binary_during_the_stale_pr_check_fails_closed(
     )
 
     def _raise_missing_gh(*_a: object, **_k: object) -> list[dict]:
-        raise FileNotFoundError("gh")
+        raise CommandError("`gh pr list` could not be started: [Errno 2] No such file or directory")
 
     monkeypatch.setattr(distill_module.github, "open_prs", _raise_missing_gh)
     monkeypatch.setattr(distill_module.github, "create_pr", _raise_missing_gh)

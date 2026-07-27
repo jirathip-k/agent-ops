@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,10 +26,7 @@ def remote_slug(cwd: Path) -> str | None:
     one caller is `normalise_pr_url`, which can be reached from a session-end
     hook running in a finishing agent's critical path.
     """
-    try:
-        proc = run(["git", "remote", "get-url", "origin"], cwd=cwd, check=False)
-    except (CommandError, OSError):
-        return None
+    proc = run(["git", "remote", "get-url", "origin"], cwd=cwd, check=False)
     if proc.returncode != 0:
         return None
     match = _REMOTE_RE.match(proc.stdout.strip())
@@ -71,11 +68,21 @@ def get_issue(number: int, cwd: Path) -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
-def create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
-    proc = run(
-        ["gh", "pr", "create", "--base", base, "--title", title, "--body", body],
-        cwd=cwd,
-    )
+def create_pr(
+    cwd: Path,
+    *,
+    base: str,
+    title: str,
+    body: str,
+    draft: bool = False,
+    labels: Sequence[str] = (),
+) -> str:
+    cmd = ["gh", "pr", "create", "--base", base, "--title", title, "--body", body]
+    if draft:
+        cmd.append("--draft")
+    for label in labels:
+        cmd += ["--label", label]
+    proc = run(cmd, cwd=cwd)
     return proc.stdout.strip()
 
 
@@ -249,29 +256,22 @@ def sync_labels(
         if existing == wanted:
             unchanged.append(name)
             continue
-        try:
-            create = run(
-                [
-                    "gh",
-                    "label",
-                    "create",
-                    name,
-                    "--color",
-                    label.color,
-                    "--description",
-                    label.description,
-                    "--force",
-                    *repo_args,
-                ],
-                cwd=project_root,
-                check=False,
-            )
-        except CommandError as exc:
-            # `run` raises on a timeout regardless of `check=False` — the
-            # per-label try/except is what keeps a wedged label 3 of 14 from
-            # taking the other thirteen down with it.
-            failed.append((name, str(exc)))
-            continue
+        create = run(
+            [
+                "gh",
+                "label",
+                "create",
+                name,
+                "--color",
+                label.color,
+                "--description",
+                label.description,
+                "--force",
+                *repo_args,
+            ],
+            cwd=project_root,
+            check=False,
+        )
         if create.returncode != 0:
             failed.append((name, why(create.stderr, create.stdout)))
             continue

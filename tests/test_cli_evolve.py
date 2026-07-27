@@ -46,18 +46,51 @@ def test_evolve_promote_lane_passes_validation(
     assert "unknown lane" not in result.stderr
 
 
-def test_evolve_without_dry_run_exits_1_and_mentions_152(
+def test_evolve_without_dry_run_calls_run_evolve_and_reports_no_op(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def unreachable(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("evolve without --dry-run must never gather evidence or run an agent")
+    seen: dict[str, Any] = {}
 
-    monkeypatch.setattr(evolve, "gather", unreachable)
+    def fake_run_evolve(root: Path, lane: str, **kwargs: Any) -> list[evolve.EvolveChange]:
+        seen["root"] = root
+        seen["lane"] = lane
+        seen["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(evolve, "run_evolve", fake_run_evolve)
+
+    result = runner.invoke(app, ["evolve", "spec", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "no-op" in result.output
+    assert seen["lane"] == "spec"
+    assert seen["kwargs"] == {"window_days": 30, "min_runs": 5}
+
+
+def test_evolve_without_dry_run_reports_opened_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changes = [evolve.EvolveChange("drift", "tightened an instruction", "https://x/runs/1")]
+    monkeypatch.setattr(evolve, "run_evolve", lambda *a, **k: changes)
+
+    result = runner.invoke(app, ["evolve", "spec", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "1 change(s)" in result.output
+
+
+def test_evolve_without_dry_run_failure_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_run_evolve(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("evolve touched disallowed path(s): ['prompts/orchestrator.md']")
+
+    monkeypatch.setattr(evolve, "run_evolve", failing_run_evolve)
 
     result = runner.invoke(app, ["evolve", "spec", "--project", str(tmp_path)])
 
     assert result.exit_code == 1
-    assert "#152" in result.stderr
+    assert "disallowed path" in result.stderr
 
 
 def test_evolve_dry_run_below_min_runs_still_prints_the_survey(

@@ -162,9 +162,9 @@ on manual approval. Install the App on this owner and grant it this repo.`
 2. Labels: `agent init` syncs the full set once the repo has an `origin`
    remote (`agent init --print-labels` prints the same set as `gh` commands,
    for `setup.sh` and anyone applying them by hand). The spec/plan lanes
-   select on `spec-requested` / `plan-requested` and the pipelines sync them
-   too, but a human still has to apply one to request work — and
-   `approved-for-agent` is human-only.
+   select on `spec-requested` / `plan-requested`; `agent groom` (including
+   its daily CI run) can apply either label itself, and a human can too —
+   `approved-for-agent` is the only gate label that stays human-only.
 3. `.mcp.json`: dev writable, prod read-only, committed.
 4. Frontend CD wired to the platform integration.
 5. Edge functions present? Add the deploy-all-on-merge workflow.
