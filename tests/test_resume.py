@@ -721,6 +721,151 @@ def test_empty_diff_is_caught_even_with_self_review_disabled(
     assert sends[0]["state"] == "failed"
 
 
+def test_empty_diff_clears_a_stale_feedback_file_from_an_earlier_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #209: an empty-diff decline must not leave an *older* cycle's
+    feedback file sitting on disk for a later bare `agent resume` to replay.
+
+    `test_empty_diff_halts_without_recording_findings_or_commenting` only
+    proves this exit writes nothing new; it says nothing about a file that
+    was already there from a previous halt.
+    """
+    stale = implement_module._feedback_path(tmp_path, 41)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: implement_module.SelfReview(
+            False, "(empty diff — nothing to review)", reviewed=False
+        ),
+    )
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        tmp_path,
+        41,
+        tmp_path / "wt",
+        "",
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    assert not stale.exists()
+
+
+def test_empty_diff_feedback_clear_is_best_effort_when_unlink_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors `test_record_halt_clears_the_outcome_record_even_when_the_unlink_fails`:
+    a stale feedback file that refuses to delete must not turn a decline into a crash."""
+    stale = implement_module._feedback_path(tmp_path, 43)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: implement_module.SelfReview(
+            False, "(empty diff — nothing to review)", reviewed=False
+        ),
+    )
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    logged: list[str] = []
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        tmp_path,
+        43,
+        tmp_path / "wt",
+        "",
+        card=card,
+        runtime_name=None,
+        log=logged.append,
+    )
+
+    assert proceed is False
+    assert any("could not clear stale feedback file" in line for line in logged)
+
+
+def test_gate_failure_exit_leaves_an_existing_feedback_file_intact(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a decline invalidates an earlier cycle's findings — a crashed or
+    gate-failed resume is retried with the same findings, so this exit must
+    not touch the feedback file (issue #209 plan: no over-clearing)."""
+    stale = implement_module._feedback_path(repo, 44)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 3, RunResult(ok=False, text="nope"), []),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 44, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False
+    assert stale.read_text() == "cycle 1's findings"
+
+
+def test_bare_resume_after_a_declined_empty_diff_does_not_replay_a_stale_halt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #209 acceptance scenario, end to end across three cycles.
+
+    Cycle 1 halts with feedback (seeded here as `_record_halt` would have left
+    it). Cycle 2 is a resume whose self-review finds an empty diff and
+    declines. Cycle 3 is a bare `agent resume` — it must not see cycle 1's
+    feedback, because cycle 2 already looked and had nothing to add.
+    """
+    worktree.create(repo, ".worktrees", "issue-45", "fix/issue-45", "main")
+    halt = implement_module._feedback_path(repo, 45)
+    halt.parent.mkdir(parents=True, exist_ok=True)
+    halt.write_text("cycle 1's review findings")  # cycle 1
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+    )
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: SelfReview(False, "(empty diff — nothing to review)", reviewed=False),
+    )
+
+    # cycle 2: bare resume reads cycle 1's feedback, self-review declines
+    ok = run_resume(repo, 45, log=lambda _: None)
+
+    assert ok is False
+    assert not halt.exists()
+
+    # cycle 3: bare resume must now fail clearly — no feedback left to replay
+    with pytest.raises(FileNotFoundError, match="no feedback for issue #45"):
+        run_resume(repo, 45, log=lambda _: None)
+
+
 def test_ad_hoc_message_does_not_overwrite_the_halt_findings(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
