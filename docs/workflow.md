@@ -346,6 +346,24 @@ summaries and `needs-human` labels once a day; that's your ops inbox. It
 skips issues that already have an open PR, the symmetric half of the local
 lane's guard above, so the two lanes never fix the same issue twice.
 
+The CI-lane implementer has two escalation channels, and they are not
+interchangeable. `ESCALATE:` halts the run: the plan proved unworkable or a
+gate couldn't be verified, and it lands as a `needs-human` label in the ops
+inbox above. A PR-body `@`-mention is notify-don't-halt: the implementer
+proceeded through an AGENTS.md/CLAUDE.md danger zone under authorization
+already on record as an issue comment, and mentions the *author of that
+comment* — never a repo owner or a guessed handle, since this pipeline runs
+against every managed repo and `config/repos.yml` keeps no ownership
+registry to guess from. The mention always sits next to a link to the
+comment it came from; it surfaces the deviation, it does not block on it.
+Without recorded authorization, the implementer escalates instead of
+mentioning and proceeding. The local lane composes its PR body in code
+(`src/agent_ops/workflows/implement.py`) and never emits free-text mentions,
+so this convention applies to the CI lane's PR body only — it does not reach
+issue comments posted by triage, groom, or review, which carry no such rule
+yet. Like any prose convention with no gate behind it, it holds only as long
+as review keeps reading for it.
+
 ## Preview-environment standard (deployed frontends)
 
 Every managed repo that deploys a frontend should meet four rules:
