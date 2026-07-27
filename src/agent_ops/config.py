@@ -105,7 +105,13 @@ class ResolvedRole(BaseModel):
 
 
 class MergeConfig(BaseModel):
-    """Rules for agent merges into the working branch (never the stable one)."""
+    """Rules for agent merges into the working branch.
+
+    Only humans merge into the stable branch when it is a separate branch
+    from base_branch (the two-branch/promotion model). When base_branch and
+    stable_branch are the same (the single-branch model, e.g. both `main`),
+    agents merge straight into it — see workflows.merge.evaluate_merge.
+    """
 
     stable_branch: str = "main"  # promotion target; only humans merge into it
     max_changed_lines: int = 400
