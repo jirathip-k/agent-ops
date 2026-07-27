@@ -58,7 +58,7 @@ def _post_escalation(
     )
     try:
         github.comment_on_issue(issue_number, body, cwd=project_root)
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         log(f"could not post escalation on issue #{issue_number}: {exc}")
         return
     log(f"posted escalation on issue #{issue_number}")

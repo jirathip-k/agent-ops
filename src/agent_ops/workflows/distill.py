@@ -212,8 +212,8 @@ def run_distill(project_root: Path, *, log: Callable[[str], None] = print) -> li
             for pr in github.open_prs(project_root)
             if pr["headRefName"].startswith(_BRANCH_PREFIX)
         ]
-    except (CommandError, OSError) as exc:
-        # CommandError used to fail open here (stale_prs = []), the same way
+    except CommandError as exc:
+        # Used to fail open here (stale_prs = []), the same way
         # github.open_prs_for_issue's dedupe guard still does for the same
         # `gh pr list` call. That tolerance is deliberately removed: unlike
         # open_prs_for_issue, swallowing this error here doesn't skip a nice-
@@ -221,9 +221,8 @@ def run_distill(project_root: Path, *, log: Callable[[str], None] = print) -> li
         # a commit, and a push, only to die at `create_pr` on the same
         # underlying `gh` failure — so fail closed here instead, before any
         # of that is spent, rather than after with the branch already
-        # orphaned. OSError folds into the same fail-closed path for the same
-        # reason: `utils.run` lets a missing (or non-executable) `gh` binary
-        # through regardless of `check` (agent-ops#154, not fixed here), and
+        # orphaned. A missing or non-executable `gh` binary raises this same
+        # `CommandError` (utils.run converts it under `check=True`), and
         # `create_pr` would hit that same binary either way.
         raise RuntimeError(f"distill could not check for a stale PR via `gh`: {exc}") from exc
     if stale_prs:

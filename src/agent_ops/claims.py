@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops import github, runs, worktree
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import run
 
 CLAIM_LABEL = "agent:claimed"
 CLAIM_LABEL_COLOR = "006b75"
@@ -98,33 +98,26 @@ def claim(project_root: Path, issue: int, *, log: Callable[[str], None] = _quiet
     if github.remote_slug(project_root) is None:
         log(f"no `origin` remote — #{issue} was not claimed (nothing else can see this repo)")
         return False
-    try:
-        run(
-            [
-                "gh",
-                "label",
-                "create",
-                CLAIM_LABEL,
-                "--color",
-                CLAIM_LABEL_COLOR,
-                "--description",
-                CLAIM_LABEL_DESCRIPTION,
-                "--force",
-            ],
-            cwd=project_root,
-            check=False,
-        )
-        proc = run(
-            ["gh", "issue", "edit", str(issue), "--add-label", CLAIM_LABEL],
-            cwd=project_root,
-            check=False,
-        )
-    except (CommandError, OSError) as exc:
-        # OSError as well as CommandError: `utils.run` raises FileNotFoundError
-        # when `gh` is not on PATH, and a missing CLI must not crash a run any
-        # more than a failed API call does.
-        log(f"could not claim #{issue}: {exc}")
-        return False
+    run(
+        [
+            "gh",
+            "label",
+            "create",
+            CLAIM_LABEL,
+            "--color",
+            CLAIM_LABEL_COLOR,
+            "--description",
+            CLAIM_LABEL_DESCRIPTION,
+            "--force",
+        ],
+        cwd=project_root,
+        check=False,
+    )
+    proc = run(
+        ["gh", "issue", "edit", str(issue), "--add-label", CLAIM_LABEL],
+        cwd=project_root,
+        check=False,
+    )
     if proc.returncode != 0:
         log(f"could not claim #{issue}: {github.why(proc.stderr, proc.stdout)}")
         return False
@@ -140,15 +133,11 @@ def release(project_root: Path, issue: int, *, log: Callable[[str], None] = _qui
     """
     if github.remote_slug(project_root) is None:
         return False
-    try:
-        proc = run(
-            ["gh", "issue", "edit", str(issue), "--remove-label", CLAIM_LABEL],
-            cwd=project_root,
-            check=False,
-        )
-    except (CommandError, OSError) as exc:
-        log(f"could not clear the claim on #{issue}: {exc}")
-        return False
+    proc = run(
+        ["gh", "issue", "edit", str(issue), "--remove-label", CLAIM_LABEL],
+        cwd=project_root,
+        check=False,
+    )
     if proc.returncode != 0:
         log(
             f"could not clear the claim on #{issue} (it may never have been claimed): "
@@ -291,21 +280,18 @@ def claimed_at(project_root: Path, issue: int) -> float | None:
     Events come back oldest-first, so the last matching line is the current
     claim: a re-claim after a release re-dates it, which is correct.
     """
-    try:
-        proc = run(
-            [
-                "gh",
-                "api",
-                f"repos/{{owner}}/{{repo}}/issues/{issue}/events",
-                "--paginate",
-                "--jq",
-                _LABELED_EVENT_JQ,
-            ],
-            cwd=project_root,
-            check=False,
-        )
-    except (CommandError, OSError):
-        return None
+    proc = run(
+        [
+            "gh",
+            "api",
+            f"repos/{{owner}}/{{repo}}/issues/{issue}/events",
+            "--paginate",
+            "--jq",
+            _LABELED_EVENT_JQ,
+        ],
+        cwd=project_root,
+        check=False,
+    )
     if proc.returncode != 0:
         return None
     stamps = [line.strip() for line in proc.stdout.splitlines() if line.strip()]

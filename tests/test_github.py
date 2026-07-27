@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_ops import github
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import TIMEOUT_RETURNCODE, CommandError, run
 
 
 def test_get_issue_requests_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,17 +382,21 @@ def test_sync_labels_one_failure_does_not_abort_the_rest(
     assert result.failed == [("blocked", "HTTP 403: Resource not accessible by integration")]
 
 
-def test_sync_labels_survives_a_command_error_on_one_label(
+def test_sync_labels_survives_a_wedged_label_on_one_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`run` raises `CommandError` on a timeout regardless of `check=False` — a
-    hang on one label must not propagate out of the loop and cost the rest."""
+    """`check=False` never raises (agent-ops#154) — a hang on one label comes
+    back as a synthetic non-zero `CompletedProcess`, which must not propagate
+    out of the loop and cost the rest."""
+    timeout_message = "`gh label create blocked` did not finish within 120s"
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if cmd[:3] == ["gh", "label", "list"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([]), stderr="")
         if cmd[:3] == ["gh", "label", "create"] and cmd[3] == "blocked":
-            raise CommandError("`gh label create blocked` did not finish within 120s")
+            return subprocess.CompletedProcess(
+                cmd, TIMEOUT_RETURNCODE, stdout="", stderr=timeout_message
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(github, "run", fake_run)
@@ -404,7 +408,7 @@ def test_sync_labels_survives_a_command_error_on_one_label(
     result = github.sync_labels(tmp_path, labels)
 
     assert result.created == ["agent-ready"]
-    assert result.failed == [("blocked", "`gh label create blocked` did not finish within 120s")]
+    assert result.failed == [("blocked", timeout_message)]
 
 
 def test_sync_labels_pins_the_repo_when_given(

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_ops.config import ProjectConfig
-from agent_ops.utils import CommandError, run, tail
+from agent_ops.utils import run, tail
 
 
 @dataclass(frozen=True)
@@ -32,16 +32,12 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
         command = getattr(config.commands, name, None)
         if not command:
             continue
-        try:
-            proc = run(
-                ["sh", "-c", command],
-                cwd=cwd,
-                check=False,
-                timeout=config.loop.gate_timeout_seconds,
-            )
-        except CommandError as exc:
-            results.append(GateResult(name, command, False, str(exc)))
-            continue
+        proc = run(
+            ["sh", "-c", command],
+            cwd=cwd,
+            check=False,
+            timeout=config.loop.gate_timeout_seconds,
+        )
         output = tail(proc.stdout + "\n" + proc.stderr)
         results.append(GateResult(name, command, proc.returncode == 0, output))
     return results
