@@ -627,6 +627,9 @@ def _run_resume(
         project_root, issue_number, message=message, message_file=message_file
     )
     wt_path = _existing_worktree(project_root, config, issue_number, log=log)
+    card = _CardReporter(project_root, wt_path, log)
+    if not _refuse_if_stale_base(config, project_root, issue_number, wt_path, card=card, log=log):
+        return False
 
     issue = github.get_issue(issue_number, cwd=project_root)
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
@@ -652,7 +655,6 @@ def _run_resume(
     # so there is nothing to claim either.
     runs.clear_outcome(project_root, issue_number, log=log)
     claim.take()
-    card = _CardReporter(project_root, wt_path, log)
     card.note(f"#{issue_number}: resuming")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
     if not outcome.ok:
@@ -927,6 +929,52 @@ def _self_review(
     return SelfReview(verdict_ok, result.text)
 
 
+def _drift_message(drift: worktree.BaseDrift, wt_path: Path, issue_number: int) -> str:
+    fetch_note = "" if drift.fetched else ", fetch failed — counted against last-known remote"
+    return (
+        f"base is {drift.behind} commit(s) behind {drift.base_ref} "
+        f"(tip: {drift.tip}{fetch_note}); rebase in {wt_path} "
+        f"(uncommitted work preserved), then agent resume {issue_number}"
+    )
+
+
+def _refuse_if_stale_base(
+    config: ProjectConfig,
+    project_root: Path,
+    issue_number: int,
+    wt_path: Path,
+    *,
+    card: _CardReporter,
+    log: Callable[[str], None],
+) -> bool:
+    """Refuse to proceed (self-review or PR) against a base that has moved on.
+
+    A stale tree reads missing merged work as a missing feature, or already-
+    merged work as new — both produce a confident, wrong review (issue #184).
+    `checked=False` (no remote base ref, or the worktree can't be inspected)
+    is not "current" — it is "unknown", so it is allowed through rather than
+    blocked; the run's own gates are the fallback. Never rebases or resets:
+    that decision, and any conflict it produces, is left to a human.
+    """
+    drift = worktree.base_drift(wt_path, config.base_branch)
+    if not drift.checked:
+        log(f"base drift check skipped: no {drift.base_ref} to compare against")
+        return True
+    if drift.behind == 0:
+        return True
+    message = _drift_message(drift, wt_path, issue_number)
+    log(f"refusing: {message}")
+    card.note(f"#{issue_number}: {message}")
+    messages.send_outcome(
+        project_root,
+        issue_number,
+        state="failed",
+        reason=message,
+        log=log,
+    )
+    return False
+
+
 def _review_and_maybe_halt(
     config: ProjectConfig,
     project_root: Path,
@@ -944,6 +992,8 @@ def _review_and_maybe_halt(
     fallback is sticky, and the worktree card may not be the one with the
     terminal on it (#68).
     """
+    if not _refuse_if_stale_base(config, project_root, issue_number, wt_path, card=card, log=log):
+        return False
     if not config.loop.self_review:
         return True
     review = _self_review(config, wt_path, log=log, runtime_override=runtime_name)

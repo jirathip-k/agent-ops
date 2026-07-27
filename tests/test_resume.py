@@ -1134,6 +1134,128 @@ def test_review_with_nothing_to_review_reports_rather_than_vanishing(
     assert "nothing to review" in (sends[0]["reason"] or "")
 
 
+# --- stale-base refusal (issue #184) --------------------------------------
+
+
+def _stale_drift(behind: int = 6, *, fetched: bool = True) -> worktree.BaseDrift:
+    return worktree.BaseDrift(
+        checked=True,
+        fetched=fetched,
+        behind=behind,
+        base_ref="origin/main",
+        tip="abc1234 later work merged upstream",
+    )
+
+
+def test_drift_message_names_the_gap_and_the_remediation() -> None:
+    message = implement_module._drift_message(_stale_drift(6), Path("/wt/issue-41"), 41)
+
+    assert "6 commit(s) behind origin/main" in message
+    assert "abc1234 later work merged upstream" in message
+    assert "/wt/issue-41" in message
+    assert "agent resume 41" in message
+
+
+def test_drift_message_notes_a_failed_fetch() -> None:
+    message = implement_module._drift_message(_stale_drift(2, fetched=False), Path("/wt"), 41)
+
+    assert "fetch failed" in message
+
+
+def test_review_and_maybe_halt_refuses_a_stale_base_before_self_review(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strongest option from #184: a stale tree must never reach self-review."""
+    monkeypatch.setattr(worktree, "base_drift", lambda wt_path, base: _stale_drift(6))
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review must not run against a stale base")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(), repo, 41, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == "failed"
+    reason = sends[0]["reason"] or ""
+    assert "6 commit(s) behind origin/main" in reason
+
+
+def test_review_and_maybe_halt_refuses_a_stale_base_even_with_self_review_disabled(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR path covered too: the guard sits before the self-review early-return."""
+    monkeypatch.setattr(worktree, "base_drift", lambda wt_path, base: _stale_drift(1))
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    sends = _sent(monkeypatch)
+    config = ProjectConfig.model_validate({"loop": {"self_review": False}})
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        config, repo, 42, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == "failed"
+
+
+def test_review_and_maybe_halt_proceeds_when_base_drift_is_unchecked(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No remote base ref to compare against (test/scratch repo) — unknown, not stale."""
+    monkeypatch.setattr(
+        worktree,
+        "base_drift",
+        lambda wt_path, base: worktree.BaseDrift(
+            checked=False, fetched=False, behind=0, base_ref="origin/main", tip=""
+        ),
+    )
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: implement_module.SelfReview(True, "VERDICT: APPROVE"),
+    )
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(), repo, 43, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+    )
+
+    assert proceed is True
+
+
+def test_run_resume_refuses_before_the_implementer_loop_when_the_base_is_stale(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cheaper than burning a full implementer run first, then refusing at review."""
+    worktree.create(repo, ".worktrees", "issue-20", "fix/issue-20", "main")
+    monkeypatch.setattr(worktree, "base_drift", lambda wt_path, base: _stale_drift(3))
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def fail_get_issue(number: int, cwd: Path) -> dict:
+        raise AssertionError("must refuse before fetching the issue")
+
+    monkeypatch.setattr(github, "get_issue", fail_get_issue)
+
+    def fail_loop(*a: object, **k: object) -> None:
+        raise AssertionError("the implementer loop must not run against a stale base")
+
+    monkeypatch.setattr(implement_module, "run_task_loop", fail_loop)
+    sends = _sent(monkeypatch)
+
+    ok = run_resume(repo, 20, message="anything")
+
+    assert ok is False
+    assert sends[0]["state"] == "failed"
+    assert "3 commit(s) behind origin/main" in (sends[0]["reason"] or "")
+
+
 def test_dispatch_resume_records_the_new_terminal_as_the_mailbox(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
