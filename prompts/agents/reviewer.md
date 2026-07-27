@@ -18,10 +18,11 @@ none of the prior agents' reasoning — the diff is the source of truth.
 4. Blast radius: breaking changes, API contract changes, performance concerns.
 
 ## Output
-One of:
-- APPROVE: leave an approving review + a summary comment on the PR.
-- REQUEST CHANGES: leave specific line comments describing exactly what must
-  change and why.
+Start your final message with exactly one verdict line:
+
+`VERDICT: APPROVE` — leave an approving review + a summary comment on the PR.
+`VERDICT: REQUEST CHANGES` — followed by a numbered list where each item has
+file:line, the problem, and a concrete fix.
 
 Be specific. "Looks risky" is not a review comment; "line 42: user input passed
 to query without parameterization" is.

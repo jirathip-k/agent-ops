@@ -46,7 +46,7 @@ from agent_ops.workflows import (
 )
 from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_merge_check, run_promote
-from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
+from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES, ReviewOutcome
 from agent_ops.workflows.spawn import REPORT_STATES
 from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
 
@@ -687,6 +687,10 @@ def review(
             help="Where to run: inline (print here) | auto | orca | background",
         ),
     ] = "inline",
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Exit non-zero unless every PR's verdict is APPROVE"),
+    ] = False,
 ) -> None:
     """Run a read-only review agent over one or more PR diffs."""
     root = project.resolve()
@@ -696,6 +700,9 @@ def review(
         raise typer.Exit(1)
     if not all_open and not prs:
         _err("specify at least one PR number, or --all")
+        raise typer.Exit(1)
+    if check and surface != "inline":
+        _err("--check is only supported with --surface inline")
         raise typer.Exit(1)
 
     if all_open:
@@ -727,14 +734,19 @@ def review(
         return
 
     if len(pr_numbers) == 1:
-        # Single-PR inline path is unchanged: no summary, just the review text.
+        # Single-PR inline path is unchanged without --check: no summary, just
+        # the review text.
         try:
             text = run_review(root, pr_numbers[0], runtime_name=runtime, post_comment=post)
         except (CommandError, RuntimeError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
         typer.echo(text)
-        return
+        if not check:
+            return
+        outcome = ReviewOutcome(pr_numbers[0], prompts.verdict_of(text), text=text)
+        typer.echo(format_summary([outcome]))
+        raise typer.Exit(0 if outcome.status == "approve" else 1)
 
     outcomes = run_reviews(
         root, pr_numbers, jobs=jobs, post_comment=post, runtime_name=runtime, log=typer.echo
@@ -743,6 +755,8 @@ def review(
         if outcome.text:
             typer.echo(f"\n=== PR #{outcome.pr} ===\n{outcome.text}")
     typer.echo("\n" + format_summary(outcomes))
+    if check:
+        raise typer.Exit(0 if all(o.status == "approve" for o in outcomes) else 1)
     if any(o.status in FAILED_STATUSES for o in outcomes):
         raise typer.Exit(1)
 

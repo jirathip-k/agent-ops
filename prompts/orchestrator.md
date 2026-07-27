@@ -80,12 +80,24 @@ Everywhere below, `BASE_BRANCH` and `STABLE_BRANCH` mean these resolved names.
 ---
 
 ## Step 2A — Normal lane: 4-agent pipeline (P1/P2)
-For each selected issue, run four subagents IN SEQUENCE, each with fresh context:
+For each selected issue, run three subagents IN SEQUENCE, each with fresh
+context, then the review gate:
 1. PLANNER (prompts/agents/planner.md) → PLAN.md, or ESCALATE
 2. IMPLEMENTER (prompts/agents/implementer.md) → PR to `BASE_BRANCH`,
    implementation notes in the PR body (never committed as a file)
 3. TESTER (prompts/agents/tester.md) → TEST_REPORT.md (PASS/FAIL)
-4. REVIEWER (prompts/agents/reviewer.md) → APPROVE / REQUEST CHANGES
+4. REVIEW GATE — the verdict is judged by `agent review`, not a subagent, so
+   the CI lane and the local `agent review` command agree on what a verdict
+   means (issue #171, same pattern as the merge cap convergence, #150). Run:
+
+       uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check
+
+   Its exit code and printed `VERDICT:` line are the review verdict — honour
+   them verbatim and quote the printed line in the PR comment / run summary
+   rather than re-deriving it. If the command itself fails to run (network,
+   `uv` resolution, etc.), treat that as a blocking non-approval: label
+   `needs-human`, leave the PR open, and say why in the run summary — the
+   same rule Step 3 applies to a failed `agent merge --check` run.
 
 Pass forward only the artifacts listed in each role file — never a previous
 agent's full transcript.
@@ -93,8 +105,12 @@ agent's full transcript.
 Failure handling:
 - Tester FAIL → send TEST_REPORT.md to a FRESH Implementer for ONE revision
   round. Second FAIL → label `needs-human`, leave PR open, stop.
-- Reviewer REQUEST CHANGES → ONE revision round via fresh Implementer + re-test;
-  then `needs-human` and stop.
+- Review gate prints `VERDICT: REQUEST CHANGES` → ONE revision round via a
+  fresh Implementer + re-test, then re-run the review gate; a second
+  non-approve verdict → `needs-human` and stop. A run that fails to run, or
+  exits non-zero with no recognizable `VERDICT:` line, goes straight to
+  `needs-human` — it is not a revision-round trigger, since there is no
+  reviewer feedback for the Implementer to act on.
 - Any agent outputs ESCALATE → label `needs-human` with the agent's reasoning,
   move on to the next issue.
 
@@ -105,7 +121,8 @@ Faster, not looser — all four agents run, gates are stricter:
 1. Branch `hotfix/issue-<NUMBER>` cut from `STABLE_BRANCH` — in the two-branch
    model that is deliberately NOT `BASE_BRANCH`; in the single-branch model the
    two are the same branch and the distinction collapses.
-2. Run the same four agents with these overrides:
+2. Run PLANNER, IMPLEMENTER, TESTER, and
+   REVIEWER (prompts/agents/reviewer.md) with these overrides:
    - Planner additionally outputs a rollback note (how to revert cleanly).
    - Implementer: absolute minimal diff. Symptom-level mitigation is acceptable
      if the root-cause fix is large — file a follow-up P1 issue for the real fix.
@@ -144,7 +161,8 @@ If AUTO_MERGE is false, run in REPORT-ONLY mode: perform every check below,
 but never merge — label qualifying PRs `ready-to-merge` and state in the run
 summary that they passed all gates. Otherwise, merge ONLY if ALL of the
 following hold:
-- Tester verdict PASS and Reviewer verdict APPROVE
+- Tester verdict PASS and the Step 2A `agent review --check` run exited 0
+  (i.e. its printed verdict was `VERDICT: APPROVE`)
 - All CI checks green (never merge on pending or failing checks)
 - `agent merge --check` reports no violations
 - No changes to CI/CD, auth, migrations, dependency manifests, or infra files

@@ -331,3 +331,163 @@ def test_review_multi_pr_all_request_changes_exits_zero(
     result = runner.invoke(app, ["review", "1", "2", "--project", str(tmp_path)])
 
     assert result.exit_code == 0
+
+
+# --- --check gate --------------------------------------------------------
+
+
+def _record_inline_with_text(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> list[tuple[Path, int, str | None, bool]]:
+    """Like `_record_inline`, but the stubbed review returns `text` verbatim."""
+    calls: list[tuple[Path, int, str | None, bool]] = []
+
+    def fake_run_review(
+        project_root: Path,
+        pr_number: int,
+        *,
+        runtime_name: str | None = None,
+        post_comment: bool = False,
+    ) -> str:
+        calls.append((project_root, pr_number, runtime_name, post_comment))
+        return text
+
+    monkeypatch.setattr(cli, "run_review", fake_run_review)
+    return calls
+
+
+def test_review_check_single_pr_approve_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_inline_with_text(monkeypatch, "VERDICT: APPROVE\n\nlooks fine")
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 0
+    assert "PR #45: APPROVE" in result.output
+
+
+def test_review_check_single_pr_request_changes_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_inline_with_text(monkeypatch, "VERDICT: REQUEST CHANGES\n\n1. file.py:1 fix it")
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 1
+    assert "PR #45: REQUEST CHANGES" in result.output
+
+
+def test_review_check_single_pr_no_verdict_line_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_inline_with_text(monkeypatch, "This change looks reasonable overall.")
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 1
+    assert "PR #45: unknown verdict" in result.output
+
+
+def test_review_check_approve_word_mid_sentence_is_not_a_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #157 shape: "approve" appears in prose but not as an anchored
+    VERDICT line, so it must not read as approval."""
+    _record_inline_with_text(monkeypatch, "I can't approve this until the migration is gated.")
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 1
+    assert "PR #45: unknown verdict" in result.output
+
+
+def test_review_check_single_pr_run_failure_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_review(
+        project_root: Path,
+        pr_number: int,
+        *,
+        runtime_name: str | None = None,
+        post_comment: bool = False,
+    ) -> str:
+        raise CommandError("review run failed")
+
+    monkeypatch.setattr(cli, "run_review", fake_run_review)
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 1
+    assert "review run failed" in result.stderr
+
+
+def test_review_without_check_flag_still_exits_zero_on_request_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_inline_with_text(monkeypatch, "VERDICT: REQUEST CHANGES\n\n1. file.py:1 fix it")
+
+    result = runner.invoke(app, ["review", "45", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+
+
+def test_review_check_multi_pr_all_approve_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_reviews(
+        project_root: Path,
+        pr_numbers: list[int],
+        *,
+        jobs: int = 3,
+        post_comment: bool = False,
+        runtime_name: str | None = None,
+        log: object = None,
+    ) -> list[ReviewOutcome]:
+        return [
+            ReviewOutcome(1, "approve", text="VERDICT: APPROVE"),
+            ReviewOutcome(2, "approve", text="VERDICT: APPROVE"),
+        ]
+
+    monkeypatch.setattr(cli, "run_reviews", fake_run_reviews)
+
+    result = runner.invoke(app, ["review", "1", "2", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 0
+
+
+def test_review_check_multi_pr_one_request_changes_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_reviews(
+        project_root: Path,
+        pr_numbers: list[int],
+        *,
+        jobs: int = 3,
+        post_comment: bool = False,
+        runtime_name: str | None = None,
+        log: object = None,
+    ) -> list[ReviewOutcome]:
+        return [
+            ReviewOutcome(1, "approve", text="VERDICT: APPROVE"),
+            ReviewOutcome(2, "request_changes", text="VERDICT: REQUEST CHANGES"),
+        ]
+
+    monkeypatch.setattr(cli, "run_reviews", fake_run_reviews)
+
+    result = runner.invoke(app, ["review", "1", "2", "--project", str(tmp_path), "--check"])
+
+    assert result.exit_code == 1
+
+
+def test_review_check_rejects_non_inline_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record_inline(monkeypatch)
+
+    result = runner.invoke(
+        app, ["review", "45", "--project", str(tmp_path), "--surface", "orca", "--check"]
+    )
+
+    assert result.exit_code == 1
+    assert "--check" in result.stderr
