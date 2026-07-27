@@ -102,4 +102,9 @@ merge:
   # blocked_paths defaults live in code (config.MergeConfig); override here
   # per project if needed
 
+# `agent distill` prunes AGENTS.md once it grows past min_lines, leaving
+# protected_sections untouched. Both default in code (config.DistillConfig):
+# min_lines: 200, protected_sections: the six templates/project/AGENTS.md
+# headings. Override protected_sections here if a project renamed them.
+
 skills: [coding, testing]  # platform skills injected into implement prompts

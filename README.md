@@ -47,6 +47,7 @@ only makes sure the labels themselves exist to apply.
 
 ```sh
 agent scout                    # mine TODOs/deferred threads/gaps → file backlog issues (≤3)
+agent distill                  # prune a grown AGENTS.md: cut spent narration, keep durable notes
 agent spec 123                 # backlog idea → checklist acceptance criteria, posted on the issue
 agent queue                    # open issues labeled agent-ready, oldest first
 agent plan 123 --post          # planner only (smart model, read-only) → issue comment

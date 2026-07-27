@@ -43,6 +43,16 @@ funnel as yours. In CI it runs daily via the scout lane (01:00 Asia/Bangkok,
 feeding the same morning's triage and groom runs); run it locally whenever
 the queue runs dry.
 
+A managed repo's `AGENTS.md` only ever grows — agents append, nothing
+prunes. `agent distill --project <app>` is the pass that acts on it: once
+the file passes `distill.min_lines`, a planner agent cuts spent narration
+(run-by-run play-by-play, resolved incidents, superseded plans) from every
+section except the six human-authored ones (`distill.protected_sections`),
+folds durable findings into the right heading, and opens a PR listing what
+it cut and why. A lean file, or one where every section is protected, is a
+no-op that says so and runs no agent. It never auto-merges (see ADR 0003) —
+a docs PR that deletes content needs a human review.
+
 ## 2. Groom — decide what an agent may do
 
 An issue is agent-ready when it has acceptance criteria, is small enough to

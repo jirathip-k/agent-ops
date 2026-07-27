@@ -26,6 +26,29 @@ def test_defaults_load_without_project_config(tmp_path: Path) -> None:
     assert config.commands.test is None
 
 
+def test_distill_config_defaults(tmp_path: Path) -> None:
+    config = load_project_config(tmp_path)
+    assert config.distill.min_lines == 200
+    assert config.distill.protected_sections == [
+        "What this project is",
+        "Architecture",
+        "Conventions",
+        "Commands",
+        "Danger zones",
+        "Maintaining this file",
+    ]
+
+
+def test_distill_config_project_override_wins(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "distill:\n  min_lines: 50\n  protected_sections: [Overview]\n",
+    )
+    config = load_project_config(tmp_path)
+    assert config.distill.min_lines == 50
+    assert config.distill.protected_sections == ["Overview"]
+
+
 def test_project_config_overrides_defaults(tmp_path: Path) -> None:
     agent_dir = tmp_path / ".agent"
     agent_dir.mkdir()
