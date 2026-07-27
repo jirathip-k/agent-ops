@@ -1004,6 +1004,29 @@ def _truncated_first_line(text: str, limit: int = 200) -> str:
     return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
 
 
+def _clear_stale_feedback(
+    project_root: Path, issue_number: int, *, log: Callable[[str], None]
+) -> None:
+    """Drop any earlier cycle's findings when this run declined to act.
+
+    A decline supersedes what came before it: this run looked at the
+    situation and had nothing to add, so a later bare `agent resume` must not
+    replay context from before the decline (issue #209). Matters most on the
+    escalation path, which deliberately writes no feedback of its own — a
+    file left over from an earlier halt would otherwise be resumed as if it
+    were this run's verdict.
+
+    Best-effort, matching the module's convention (`_record_halt`,
+    `runs.clear_outcome`): a file that refuses to delete must not turn a
+    decline into a crash.
+    """
+    feedback_path = _feedback_path(project_root, issue_number)
+    try:
+        feedback_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"could not clear stale feedback file at {feedback_path}: {exc}")
+
+
 def _handle_empty_diff(
     project_root: Path,
     issue_number: int,
@@ -1065,6 +1088,7 @@ def _handle_empty_diff(
         )
         # Durable record first, then the best-effort push — mirrors
         # `spawn.report`'s ordering.
+        _clear_stale_feedback(project_root, issue_number, log=log)
         runs.write_outcome(project_root, issue_number, state="halted", reason=reason, log=log)
         messages.send_outcome(project_root, issue_number, state="halted", reason=reason, log=log)
         return True
@@ -1081,6 +1105,7 @@ def _handle_empty_diff(
         "implementer finished with an empty diff and no ESCALATE — final message: "
         f"{_truncated_first_line(implementer_text)} — worktree kept at {wt_path}"
     )
+    _clear_stale_feedback(project_root, issue_number, log=log)
     runs.write_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
     messages.send_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
     return True
@@ -1128,6 +1153,7 @@ def _review_and_maybe_halt(
             return False
         log(f"self-review had nothing to review; worktree kept at {wt_path}")
         card.note(f"#{issue_number}: self-review had nothing to review")
+        _clear_stale_feedback(project_root, issue_number, log=log)
         reason = f"self-review had nothing to review; worktree kept at {wt_path}"
         runs.write_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
         messages.send_outcome(project_root, issue_number, state="failed", reason=reason, log=log)
