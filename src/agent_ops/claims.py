@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from agent_ops import github, runs, worktree
 from agent_ops.utils import CommandError, run
@@ -46,6 +47,16 @@ from agent_ops.utils import CommandError, run
 CLAIM_LABEL = "agent:claimed"
 CLAIM_LABEL_COLOR = "006b75"
 CLAIM_LABEL_DESCRIPTION = "An agent is working on this right now; other lanes skip it"
+
+# Checked in, unlike the runtimes' own `.claude/settings.local.json`: this is
+# what lets a worktree checked out for `fix/issue-N` carry the hook before any
+# agent-ops command has ever run there — the hand-started case issue #178
+# exists for. `agent claim --auto` is what makes that safe to run unattended:
+# no matching branch, no `gh`, no network all silently no-op, so a declined or
+# missing hook is never worse than the manual-only path was.
+CLAIM_SETTINGS_REL = Path(".claude") / "settings.json"
+CLAIM_HOOK_COMMAND = "command -v agent >/dev/null 2>&1 && agent claim --auto || true"
+CLAIM_HOOK_TIMEOUT_S = 30
 
 # How long a claim is believed before it is treated as the residue of a run that
 # died. The enforcing read is the CI lane's (prompts/orchestrator.md), because a
@@ -145,6 +156,72 @@ def release(project_root: Path, issue: int, *, log: Callable[[str], None] = _qui
         )
         return False
     return True
+
+
+def seed_claim_hook(project_root: Path, *, log: Callable[[str], None] = _quiet) -> Path | None:
+    """Wire a `SessionStart` hook that runs `agent claim --auto`. Best-effort.
+
+    Written by `agent init` into `.claude/settings.json` — the checked-in
+    settings file, so it ships with the branch and is already in place by the
+    time a hand-started worktree's session boots, the one case nothing else
+    claims on behalf of.
+
+    Merges into an existing file rather than replacing it, and never adds the
+    same hook twice, the same way the runtimes' own stop-hook seeding does.
+    Returns the file written, or None when it could not be (unreadable JSON,
+    a non-object `hooks` or `hooks.SessionStart` key, an unwritable path).
+    """
+    path = project_root / CLAIM_SETTINGS_REL
+    settings: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"warning: could not read {path}, leaving it alone: {exc}")
+            return None
+        if not isinstance(loaded, dict):
+            log(f"warning: {path} is not a JSON object, leaving it alone")
+            return None
+        settings = loaded
+
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        log(f"warning: {path} has a non-object `hooks` key, leaving it alone")
+        return None
+    matchers = hooks.setdefault("SessionStart", [])
+    if not isinstance(matchers, list):
+        log(f"warning: {path} has a non-list `hooks.SessionStart` key, leaving it alone")
+        return None
+
+    already = any(
+        isinstance(matcher, dict)
+        and isinstance(matcher.get("hooks"), list)
+        and any(
+            isinstance(entry, dict) and entry.get("command") == CLAIM_HOOK_COMMAND
+            for entry in matcher["hooks"]
+        )
+        for matcher in matchers
+    )
+    if not already:
+        matchers.append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": CLAIM_HOOK_COMMAND,
+                        "timeout": CLAIM_HOOK_TIMEOUT_S,
+                    }
+                ]
+            }
+        )
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2) + "\n")
+    except OSError as exc:
+        log(f"warning: could not seed the claim hook at {path}: {exc}")
+        return None
+    return path
 
 
 @dataclass

@@ -167,10 +167,15 @@ agent claim 123             # an agent you started by hand is working on this
 agent claim 123 --release   # ...and is done
 ```
 
-- **An agent started by hand claims nothing.** No agent-ops command runs in that
-  path, so nothing can claim for it — run `agent claim` from the worktree. `agent
-  doctor` reports any `fix/issue-N` worktree on this machine whose issue is
-  unclaimed, so forgetting is visible rather than silent.
+- **A Claude Code session started by hand now claims itself.** `agent init`
+  seeds a checked-in `SessionStart` hook that runs `agent claim --auto`,
+  deriving the issue from the `fix/issue-N` branch — so the claim happens as a
+  side effect of the session starting, not a separate command to remember
+  (ADR 0006). It falls back to today's manual path — `agent claim` from the
+  worktree — wherever the hook can't run: a declined approval, a non-Claude
+  runtime, or a repo that hasn't picked up the seeded file yet. `agent doctor`
+  still reports any `fix/issue-N` worktree on this machine whose issue is
+  unclaimed, so a gap in either path is visible rather than silent.
 - **A claim expires.** A run killed outright leaves the label behind; the CI lane
   clears any claim older than 8 hours and says so, and `agent doctor` reports
   stale claims (and failed releases) well before that. See
