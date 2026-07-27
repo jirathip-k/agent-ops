@@ -17,10 +17,17 @@ from agent_ops.utils import PLATFORM_ROOT
 
 LANES = (PLATFORM_ROOT / "docs" / "reference" / "lanes.md").read_text()
 ORCHESTRATOR_LINES = (PLATFORM_ROOT / "prompts" / "orchestrator.md").read_text().splitlines()
+EVOLVE_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "evolve-pipeline.yml").read_text().splitlines()
+)
 
 
 def _line(n: int) -> str:
     return ORCHESTRATOR_LINES[n - 1]
+
+
+def _evolve_pipeline_line(n: int) -> str:
+    return EVOLVE_PIPELINE_LINES[n - 1]
 
 
 def test_merge_shell_out_citation_matches_orchestrator() -> None:
@@ -52,3 +59,8 @@ def test_review_gate_range_citation_matches_orchestrator() -> None:
 def test_step2b_reviewer_repair_citation_matches_orchestrator() -> None:
     assert "prompts/orchestrator.md:124-125" in LANES
     assert "REVIEWER (prompts/agents/reviewer.md)" in _line(125)
+
+
+def test_evolve_pipeline_citation_matches_workflow() -> None:
+    assert ".github/workflows/evolve-pipeline.yml:160" in LANES
+    assert 'uv run agent evolve "$LANE"' in _evolve_pipeline_line(160)

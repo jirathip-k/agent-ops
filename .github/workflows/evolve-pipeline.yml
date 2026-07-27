@@ -135,6 +135,15 @@ jobs:
         if: steps.precheck.outputs.count == '0'
         run: npm install -g @anthropic-ai/claude-code
 
+      # run_evolve commits and pushes the proposed prompt edit; GitHub-hosted
+      # runners set neither user.name nor user.email, so that commit fails
+      # with "unable to auto-detect email address" unless we set one here.
+      - name: Configure git identity
+        if: steps.precheck.outputs.count == '0'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Run evolve
         if: steps.precheck.outputs.count == '0'
         env:
