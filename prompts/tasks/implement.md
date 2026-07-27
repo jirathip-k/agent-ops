@@ -21,7 +21,7 @@ Labels: {issue_labels}
    follow its conventions.
 2. Reproduce or confirm the problem before changing code. If you cannot
    confirm it and the fix would be a guess, stop and explain why instead of
-   guessing.
+   guessing — see "Escalating" below.
 3. Smallest correct change: no drive-by refactors, no unrelated formatting,
    no new dependencies unless the issue requires them.
 4. Add or update tests that fail without your change and pass with it.
@@ -36,9 +36,21 @@ Labels: {issue_labels}
 
 {skills}
 
+## Escalating
+
+If no change is needed, or you cannot safely proceed, do not just stop —
+say so. The FIRST line of your final message must start with `ESCALATE:` —
+nothing before it — followed by your reasoning. That word is a sentinel the
+platform matches on, so never open ordinary output with it: if you considered
+escalating and decided against it, just make the change and say nothing about
+escalating.
+
+Finishing with an empty diff and no `ESCALATE:` is itself an error the
+platform reports — it is not a quiet pass.
+
 ## Done means
 
-- The issue's problem is fixed with test coverage.
+- The issue's problem is fixed with test coverage, or you escalated instead.
 - The project's test/lint/typecheck commands pass (they will be run after you
   finish — run them yourself first).
 - End with a short summary: root cause, what you changed, and why.

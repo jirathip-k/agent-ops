@@ -140,6 +140,31 @@ def test_resume_rejects_message_and_message_file_together(
     assert fake.calls == []
 
 
+def _fake_loop_that_changes_a_file(outcome: LoopOutcome):
+    """Stand-in for `run_task_loop` that leaves a real, non-empty diff behind.
+
+    A plain `lambda *a, **k: LoopOutcome(...)` reports success without ever
+    touching the worktree, so its real `git diff` stays empty.
+    `_handle_empty_diff` (#199) now reads that as "the implementer did
+    nothing" before self-review even runs — which is right for a genuinely
+    empty diff, but wrong for these tests, which want to simulate self-review
+    finding something to request changes on. Writing an actual file keeps the
+    scenario real.
+    """
+
+    def fake_run_task_loop(
+        runtime: object,
+        request: RunRequest,
+        config: ProjectConfig,
+        cwd: Path,
+        on_event: object = None,
+    ) -> LoopOutcome:
+        (Path(cwd) / "change.txt").write_text("actual change")
+        return outcome
+
+    return fake_run_task_loop
+
+
 def _fake_role_request(captured: dict[str, Any]):
     def fake_role_request(
         config: ProjectConfig,
@@ -423,7 +448,7 @@ def test_run_implement_halt_writes_feedback_file_and_comments_on_the_issue(
     monkeypatch.setattr(
         implement_module,
         "run_task_loop",
-        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        _fake_loop_that_changes_a_file(LoopOutcome(True, 1, RunResult(ok=True, text="done"), [])),
     )
     monkeypatch.setattr(
         implement_module,
@@ -459,7 +484,7 @@ def test_run_implement_halt_survives_a_failed_issue_comment(
     monkeypatch.setattr(
         implement_module,
         "run_task_loop",
-        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        _fake_loop_that_changes_a_file(LoopOutcome(True, 1, RunResult(ok=True, text="done"), [])),
     )
     monkeypatch.setattr(
         implement_module,
@@ -481,22 +506,269 @@ def test_run_implement_halt_survives_a_failed_issue_comment(
     assert feedback_path.read_text() == "review found issues"
 
 
-def test_empty_diff_halts_without_recording_findings_or_commenting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A truly empty diff is "nothing to review", not a rejection.
+def _empty_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `_handle_empty_diff`'s git-diff recipe read as an empty, clean diff."""
+    monkeypatch.setattr(
+        implement_module,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""),
+    )
 
-    (Create-only runs are reviewed — see test_self_review_sees_untracked_files.)
-    Recording this would post "changes requested — (empty diff — nothing to
-    review)" on the issue and hand that string to the next run as feedback to
-    address.
-    """
+
+def _no_diff_check_needed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No remote base ref to compare against — the common shape in these tests' fake repos."""
+    monkeypatch.setattr(
+        worktree,
+        "base_drift",
+        lambda wt_path, base: worktree.BaseDrift(
+            checked=False, fetched=False, behind=0, base_ref="origin/main", tip=""
+        ),
+    )
+
+
+def test_empty_diff_with_escalation_records_halted_and_comments_without_a_feedback_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #199: a deliberate refusal must be distinguishable from an unproductive
+    attempt. The reasoning goes on the issue and into the durable outcome record;
+    the feedback file is deliberately left alone — a bare `agent resume` must not
+    replay a refusal as actionable feedback."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review must not run when the diff is empty")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
+    commented: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        implement_module.github,
+        "comment_on_issue",
+        lambda number, body, cwd: commented.append((number, body)),
+    )
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    message = "ESCALATE: the fix requires a schema migration, which is out of scope for this lane."
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        40,
+        repo / "wt",
+        message,
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    assert len(commented) == 1
+    assert commented[0] == (40, f"## Agent implement — escalated\n\n{message}")
+    assert sends[0]["state"] == "halted"
+    assert "schema migration" in (sends[0]["reason"] or "")
+    assert not implement_module._feedback_path(repo, 40).exists()
+    recorded = runs.read_outcome(repo, 40)
+    assert recorded is not None
+    assert recorded.state == "halted"
+    assert "schema migration" in (recorded.reason or "")
+
+
+def test_empty_diff_without_escalation_records_failed_with_the_final_message(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of #199: an empty diff with no escalation is an error the
+    platform reports, quoting the implementer's own final message as the reason —
+    not folded into "gates passed" and not silently `stopped — inspect`."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review must not run when the diff is empty")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
     commented: list[int] = []
     monkeypatch.setattr(
         implement_module.github,
         "comment_on_issue",
         lambda number, body, cwd: commented.append(number),
     )
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    message = "I looked at the code and everything already matches the issue's request."
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        41,
+        repo / "wt",
+        message,
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    assert commented == []  # no escalation reasoning to post — nothing was refused
+    assert sends[0]["state"] == "failed"
+    reason = sends[0]["reason"] or ""
+    assert "no ESCALATE" in reason
+    assert "everything already matches" in reason
+    assert not implement_module._feedback_path(repo, 41).exists()
+    recorded = runs.read_outcome(repo, 41)
+    assert recorded is not None
+    assert recorded.state == "failed"
+    assert "everything already matches" in (recorded.reason or "")
+
+
+@pytest.mark.parametrize(
+    ("message", "expect_halted"),
+    [
+        ("**ESCALATE:** needs a human call on the migration.", True),
+        ("ESCALATE\nno reason given, just the bare sentinel.", True),
+        ("ESCALATE is not needed — this is a pure refactor with no behaviour change.", False),
+    ],
+)
+def test_empty_diff_escalation_boundary_spellings(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, message: str, expect_halted: bool
+) -> None:
+    """`_handle_empty_diff` must classify exactly the spellings `escalated()` does —
+    a boundary after the word counts, a near-miss that only opens with the word
+    does not (#129)."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        42,
+        repo / "wt",
+        message,
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == ("halted" if expect_halted else "failed")
+
+
+def test_empty_diff_escalation_comment_failure_does_not_crash_the_exit(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort like `_record_halt`: a `gh` failure must not turn a halt into a
+    crash, and the durable outcome record must still land."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def failing_comment(number: int, body: str, cwd: Path) -> None:
+        raise CommandError("no gh remote")
+
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", failing_comment)
+    sends = _sent(monkeypatch)
+    logged: list[str] = []
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        43,
+        repo / "wt",
+        "ESCALATE: needs a human call.",
+        card=card,
+        runtime_name=None,
+        log=logged.append,
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == "halted"
+    assert any("could not post" in line for line in logged)
+    recorded = runs.read_outcome(repo, 43)
+    assert recorded is not None
+    assert recorded.state == "halted"
+
+
+def test_empty_diff_is_caught_even_with_self_review_disabled(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root cause 4 in #199: with self-review off, the old check never ran at all,
+    and `_finish_run` would `git commit` on a clean tree and raise. The empty-diff
+    check must not live only inside self-review."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review is disabled and must not run")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
+    sends = _sent(monkeypatch)
+    config = ProjectConfig.model_validate({"loop": {"self_review": False}})
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        config, repo, 44, repo / "wt", "", card=card, runtime_name=None, log=lambda _: None
+    )
+
+    assert proceed is False
+    assert sends[0]["state"] == "failed"
+
+
+def test_empty_diff_clears_a_stale_feedback_file_from_an_earlier_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #209: an empty-diff decline must not leave an *older* cycle's
+    feedback file sitting on disk for a later bare `agent resume` to replay.
+
+    `test_empty_diff_halts_without_recording_findings_or_commenting` only
+    proves this exit writes nothing new; it says nothing about a file that
+    was already there from a previous halt.
+    """
+    stale = implement_module._feedback_path(tmp_path, 41)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: implement_module.SelfReview(
+            False, "(empty diff — nothing to review)", reviewed=False
+        ),
+    )
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        tmp_path,
+        41,
+        tmp_path / "wt",
+        "",
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    assert not stale.exists()
+
+
+def test_empty_diff_feedback_clear_is_best_effort_when_unlink_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors `test_record_halt_clears_the_outcome_record_even_when_the_unlink_fails`:
+    a stale feedback file that refuses to delete must not turn a decline into a crash."""
+    stale = implement_module._feedback_path(tmp_path, 43)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
     monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
     monkeypatch.setattr(
         implement_module,
@@ -506,16 +778,92 @@ def test_empty_diff_halts_without_recording_findings_or_commenting(
         ),
     )
 
-    config = ProjectConfig()
-    assert config.loop.self_review  # the halt path only runs when it's enabled
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    logged: list[str] = []
     card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
     proceed = implement_module._review_and_maybe_halt(
-        config, tmp_path, 40, tmp_path / "wt", card=card, runtime_name=None, log=lambda _: None
+        ProjectConfig(),
+        tmp_path,
+        43,
+        tmp_path / "wt",
+        "",
+        card=card,
+        runtime_name=None,
+        log=logged.append,
     )
 
     assert proceed is False
-    assert commented == []
-    assert not implement_module._feedback_path(tmp_path, 40).exists()
+    assert any("could not clear stale feedback file" in line for line in logged)
+
+
+def test_gate_failure_exit_leaves_an_existing_feedback_file_intact(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a decline invalidates an earlier cycle's findings — a crashed or
+    gate-failed resume is retried with the same findings, so this exit must
+    not touch the feedback file (issue #209 plan: no over-clearing)."""
+    stale = implement_module._feedback_path(repo, 44)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("cycle 1's findings")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 3, RunResult(ok=False, text="nope"), []),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 44, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False
+    assert stale.read_text() == "cycle 1's findings"
+
+
+def test_bare_resume_after_a_declined_empty_diff_does_not_replay_a_stale_halt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #209 acceptance scenario, end to end across three cycles.
+
+    Cycle 1 halts with feedback (seeded here as `_record_halt` would have left
+    it). Cycle 2 is a resume whose self-review finds an empty diff and
+    declines. Cycle 3 is a bare `agent resume` — it must not see cycle 1's
+    feedback, because cycle 2 already looked and had nothing to add.
+    """
+    worktree.create(repo, ".worktrees", "issue-45", "fix/issue-45", "main")
+    halt = implement_module._feedback_path(repo, 45)
+    halt.parent.mkdir(parents=True, exist_ok=True)
+    halt.write_text("cycle 1's review findings")  # cycle 1
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+    )
+    monkeypatch.setattr(
+        implement_module,
+        "_self_review",
+        lambda *a, **k: SelfReview(False, "(empty diff — nothing to review)", reviewed=False),
+    )
+
+    # cycle 2: bare resume reads cycle 1's feedback, self-review declines
+    ok = run_resume(repo, 45, log=lambda _: None)
+
+    assert ok is False
+    assert not halt.exists()
+
+    # cycle 3: bare resume must now fail clearly — no feedback left to replay
+    with pytest.raises(FileNotFoundError, match="no feedback for issue #45"):
+        run_resume(repo, 45, log=lambda _: None)
 
 
 def test_ad_hoc_message_does_not_overwrite_the_halt_findings(
@@ -750,7 +1098,7 @@ def test_a_new_cycles_halt_supersedes_the_previous_cycles_outcome_record(
     monkeypatch.setattr(
         implement_module,
         "run_task_loop",
-        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        _fake_loop_that_changes_a_file(LoopOutcome(True, 1, RunResult(ok=True, text="done"), [])),
     )
     monkeypatch.setattr(
         implement_module,
@@ -1114,6 +1462,13 @@ def test_record_halt_survives_a_message_bus_that_has_gone_away(
 def test_review_with_nothing_to_review_reports_rather_than_vanishing(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Defensive-delegate coverage (#199): `_handle_empty_diff` reads its own git
+    diff, which here can't be determined at all (`repo / "wt"` doesn't exist), so
+    it declines to act and this exercises the `not review.reviewed` fallback in
+    `_review_and_maybe_halt` directly. That fallback must still write a durable
+    outcome record — not just push a best-effort message — so `agent runs` never
+    falls back to the old silent `stopped — inspect` shape here either.
+    """
     monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
     monkeypatch.setattr(
         implement_module,
@@ -1126,12 +1481,16 @@ def test_review_with_nothing_to_review_reports_rather_than_vanishing(
 
     card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
     proceed = implement_module._review_and_maybe_halt(
-        ProjectConfig(), repo, 40, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+        ProjectConfig(), repo, 40, repo / "wt", "", card=card, runtime_name=None, log=lambda _: None
     )
 
     assert proceed is False
     assert sends[0]["state"] == "failed"
     assert "nothing to review" in (sends[0]["reason"] or "")
+    recorded = runs.read_outcome(repo, 40)
+    assert recorded is not None
+    assert recorded.state == "failed"
+    assert "nothing to review" in (recorded.reason or "")
 
 
 # --- stale-base refusal (issue #184) --------------------------------------
@@ -1177,7 +1536,14 @@ def test_review_and_maybe_halt_refuses_a_stale_base_before_self_review(
 
     card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
     proceed = implement_module._review_and_maybe_halt(
-        ProjectConfig(), repo, 41, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+        ProjectConfig(),
+        repo,
+        41,
+        repo / "wt",
+        "",
+        card=card,
+        runtime_name=None,
+        log=lambda _: None,
     )
 
     assert proceed is False
@@ -1197,7 +1563,7 @@ def test_review_and_maybe_halt_refuses_a_stale_base_even_with_self_review_disabl
 
     card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
     proceed = implement_module._review_and_maybe_halt(
-        config, repo, 42, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+        config, repo, 42, repo / "wt", "", card=card, runtime_name=None, log=lambda _: None
     )
 
     assert proceed is False
@@ -1224,7 +1590,7 @@ def test_review_and_maybe_halt_proceeds_when_base_drift_is_unchecked(
 
     card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
     proceed = implement_module._review_and_maybe_halt(
-        ProjectConfig(), repo, 43, repo / "wt", card=card, runtime_name=None, log=lambda _: None
+        ProjectConfig(), repo, 43, repo / "wt", "", card=card, runtime_name=None, log=lambda _: None
     )
 
     assert proceed is True

@@ -307,6 +307,14 @@ def dispatch(
         _err(str(exc))
         raise typer.Exit(1) from exc
 
+    if not wt_path.is_dir():
+        # `worktree.create` already enforces this postcondition and would have
+        # raised `CommandError` above — this only catches something removing
+        # the directory in the window between that check and here, so the
+        # common case fails before a terminal is even created (issue #201).
+        _err(f"worktree {wt_path} vanished before dispatch could spawn a run for #{issue}")
+        raise typer.Exit(1)
+
     try:
         spawned = chosen.spawn(f"agent-issue-{issue}", command, root, attach_path=wt_path)
     except CommandError as exc:
@@ -323,7 +331,9 @@ def dispatch(
         )
         raise typer.Exit(1) from exc
     # How to reach the run once it is going, so `agent runs --wait` can be woken
-    # by it instead of inferring its state from the outside (issue #98).
+    # by it instead of inferring its state from the outside (issue #98). Written
+    # before the postcondition check below: it is the only address an orphaned
+    # terminal has if that check fails (issue #201).
     messages.record_spawn(
         root,
         issue,
@@ -338,6 +348,21 @@ def dispatch(
         spawner=messages.current_handle(),
         log=_err,
     )
+
+    if not wt_path.is_dir():
+        # Dispatch must never claim success over a run with nowhere to work
+        # (issue #201): the surface reported a spawn, but the worktree it was
+        # supposed to attach to isn't on disk — e.g. it was removed
+        # concurrently between the pre-check above and the spawn returning.
+        _err(
+            f"{spawned.where} was created, but the worktree {wt_path} it should be running in "
+            "does not exist — dispatch did NOT produce a worktree. Close or end that terminal "
+            f"or process by hand; `agent runs` will show #{issue} as a dead dispatch until then."
+        )
+        raise typer.Exit(1)
+
+    if spawned.warning:
+        _err(f"warning: {spawned.warning}")
     typer.echo(f"dispatched issue #{issue} → {spawned.where}")
 
 
@@ -398,6 +423,8 @@ def spawn(
         _err(str(exc))
         raise typer.Exit(1) from exc
 
+    if delegated.spawned.warning:
+        _err(f"warning: {delegated.spawned.warning}")
     typer.echo(f"spawned an agent for issue #{issue} → {delegated.spawned.where}")
     typer.echo(f"  worktree: {delegated.worktree}")
     typer.echo(
