@@ -85,7 +85,7 @@ jobs:
           # never reached. Also keeps --remove-label from tripping on a missing
           # label. Costs one API call per run.
           gh label create plan-requested --repo "$TARGET_REPO" --color 1d76db \
-            --description "Human asked the agent to post an implementation plan" --force
+            --description "Requests the plan lane: post an implementation plan on this issue" --force
           DEFERRED=""
           if [ "$ISSUE" != "0" ]; then
             ISSUES="$ISSUE"

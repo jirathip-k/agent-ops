@@ -35,6 +35,13 @@ def test_gate_label_descriptions_match_what_the_workflow_yamls_create() -> None:
     )
 
 
+def test_gate_label_descriptions_do_not_attribute_the_request_to_a_human() -> None:
+    """groom can emit these labels itself (#97); the description must not claim
+    a human always applied them."""
+    for name, label in GATE_LABELS.items():
+        assert "human" not in label.description.lower(), name
+
+
 def test_parses_result_block() -> None:
     text = """I explored the code. Here are my conclusions.
 

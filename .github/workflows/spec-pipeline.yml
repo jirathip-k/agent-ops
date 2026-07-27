@@ -86,7 +86,7 @@ jobs:
           # never reached. Also keeps --remove-label from tripping on a missing
           # label. Costs one API call per run.
           gh label create spec-requested --repo "$TARGET_REPO" --color 5319e7 \
-            --description "Human asked the agent to write a spec" --force
+            --description "Requests the spec lane: turn this issue into acceptance criteria" --force
           DEFERRED=""
           if [ "$ISSUE" != "0" ]; then
             ISSUES="$ISSUE"
