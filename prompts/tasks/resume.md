@@ -29,6 +29,7 @@ Labels: {issue_labels}
    follow its conventions.
 2. The work already in the tree is yours to fix — read it before changing
    anything. Do not discard it and start over unless the feedback says to.
+   If you cannot address the feedback safely, stop — see "Escalating" below.
 3. Smallest correct change: no drive-by refactors, no unrelated formatting,
    no new dependencies unless the issue requires them.
 4. Add or update tests that fail without your change and pass with it.
@@ -43,9 +44,22 @@ Labels: {issue_labels}
 
 {skills}
 
+## Escalating
+
+If you cannot safely address the feedback, do not just stop — say so. The
+FIRST line of your final message must start with `ESCALATE:` — nothing
+before it — followed by your reasoning. That word is a sentinel the platform
+matches on, so never open ordinary output with it: if you considered
+escalating and decided against it, just make the change and say nothing about
+escalating.
+
+Finishing with an empty diff and no `ESCALATE:` is itself an error the
+platform reports — it is not a quiet pass.
+
 ## Done means
 
-- The feedback above is addressed with test coverage.
+- The feedback above is addressed with test coverage, or you escalated
+  instead.
 - The project's test/lint/typecheck commands pass (they will be run after you
   finish — run them yourself first).
 - End with a short summary: what you changed and why.
