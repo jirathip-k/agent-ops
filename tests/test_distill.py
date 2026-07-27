@@ -5,6 +5,7 @@ import pytest
 from agent_ops import worktree
 from agent_ops.config import DistillConfig
 from agent_ops.runtimes.base import RunRequest
+from agent_ops.utils import CommandError
 from agent_ops.workflows import distill as distill_module
 from agent_ops.workflows.distill import (
     changed_files_ok,
@@ -596,6 +597,80 @@ def test_agents_md_missing_from_the_worktree_raises_a_clear_error(
     )
 
     with pytest.raises(RuntimeError, match="AGENTS.md is not on"):
+        run_distill(root, log=lambda _msg: None)
+
+    assert not any(cmd[:2] == ["git", "push"] for cmd in calls)
+
+
+# ---------- a missing `gh` binary must fail closed, not push an orphan branch ----------
+
+
+def test_a_missing_gh_binary_during_the_stale_pr_check_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`github.open_prs` shells out to `gh`, and `utils.run` lets a missing
+    binary's FileNotFoundError through regardless of `check` (agent-ops#154,
+    not fixed here). `github.create_pr` shells out to the same binary, so a
+    `gh`-less box cannot possibly finish a run — it must fail here, before a
+    worktree, an agent run, a commit, and a push are all spent on a run that
+    would otherwise die at `create_pr` and orphan the pushed branch.
+    """
+    root, wt_path = _project(tmp_path)
+    (wt_path / "AGENTS.md").write_text(
+        "## Danger zones\n\nNever touch auth.\n\n## Run log\n\nnew notes\n"
+    )
+    calls = _stub_distill_run(
+        monkeypatch,
+        wt_path,
+        report_text="DISTILL REPORT:\nRun log — trimmed old notes — stale\n",
+        diff_names=["AGENTS.md"],
+    )
+
+    def _raise_missing_gh(*_a: object, **_k: object) -> list[dict]:
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(distill_module.github, "open_prs", _raise_missing_gh)
+    monkeypatch.setattr(distill_module.github, "create_pr", _raise_missing_gh)
+
+    with pytest.raises(RuntimeError, match="gh"):
+        run_distill(root, log=lambda _msg: None)
+
+    assert not any(cmd[:2] == ["git", "push"] for cmd in calls)
+
+
+def test_a_failing_gh_command_during_the_stale_pr_check_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CommandError means `gh` ran and exited non-zero (rate limit, expired
+    auth, a network blip) — distinct from the missing-binary OSError case
+    above, and exactly the case this used to swallow (`stale_prs = []`)
+    before fail-closed was pinned. A regression back to that fail-open
+    handling would let the run reach `create_pr`, so that path is wired to
+    raise loudly instead of letting the test pass on a silent success.
+    """
+    root, wt_path = _project(tmp_path)
+    (wt_path / "AGENTS.md").write_text(
+        "## Danger zones\n\nNever touch auth.\n\n## Run log\n\nnew notes\n"
+    )
+    calls = _stub_distill_run(
+        monkeypatch,
+        wt_path,
+        report_text="DISTILL REPORT:\nRun log — trimmed old notes — stale\n",
+        diff_names=["AGENTS.md"],
+    )
+
+    def _raise_command_error(*_a: object, **_k: object) -> list[dict]:
+        raise CommandError("gh: rate limit exceeded")
+
+    def _must_not_reach_create_pr(*_a: object, **_k: object) -> str:
+        raise AssertionError(
+            "must not reach create_pr: the stale-PR check should fail closed first"
+        )
+
+    monkeypatch.setattr(distill_module.github, "open_prs", _raise_command_error)
+    monkeypatch.setattr(distill_module.github, "create_pr", _must_not_reach_create_pr)
+
+    with pytest.raises(RuntimeError, match="gh"):
         run_distill(root, log=lambda _msg: None)
 
     assert not any(cmd[:2] == ["git", "push"] for cmd in calls)

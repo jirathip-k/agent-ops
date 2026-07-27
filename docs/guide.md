@@ -59,8 +59,15 @@ you'd see it under the repo's **Actions** tab.
   work worth doing — TODO comments, review threads that said "later", error
   handling gaps — and files a few `backlog` issues, each citing its evidence.
 - **Distill** (`agent distill`, run it once AGENTS.md grows long) cuts spent
-  run-by-run narration from AGENTS.md while leaving the human-authored
-  sections untouched, and opens a PR listing what it pruned.
+  run-by-run narration from AGENTS.md and folds anything durable into the
+  right section. What it leaves alone is a configured list
+  (`distill.protected_sections` in `.agent/config.yaml`), defaulting to the
+  six `templates/project/AGENTS.md` headings plus the file's opening
+  instructions — **if your `AGENTS.md` has grown its own hand-written
+  headings beyond those six, add them to that list, or distill will treat
+  them as fair game to prune.** It opens a PR listing what it pruned and why;
+  like any PR, close it to keep everything as-is, or comment if it cut
+  something you wanted kept.
 - **Spec** (`agent spec <N>`) takes a parked idea, explores the code, and
   writes checklist acceptance criteria — one box per affected screen — as an
   issue comment. You read it and flip the label to `agent-ready`.
