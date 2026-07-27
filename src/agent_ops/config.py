@@ -162,6 +162,12 @@ class MergeConfig(BaseModel):
             "*.tf",
         ]
     )
+    # A PR carrying one of these labels is a violation `evaluate_merge` raises
+    # regardless of size/path — the actual enforcement behind labels like
+    # `human-merge-only` (evolve.py), which `gh pr merge` does not itself
+    # understand. Code-side default, same precedent as `blocked_paths`: a
+    # project overrides it in `config/defaults.yaml`, not here.
+    blocked_labels: list[str] = Field(default_factory=lambda: ["human-merge-only"])
 
 
 class ReviewConfig(BaseModel):

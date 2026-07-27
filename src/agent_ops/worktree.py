@@ -141,6 +141,30 @@ def create_detached(project_root: Path, worktree_dir: str, name: str, ref: str) 
     return path
 
 
+def changed_paths(cwd: Path) -> list[str]:
+    """Every path git currently reports as changed: staged, unstaged, and untracked.
+
+    `-z` NUL-delimits entries so a path containing a space parses correctly,
+    and porcelain (not `git diff --name-only`) is what sees untracked files
+    AND a staged-but-uncommitted edit — a diff-only check compares working
+    tree to index and is blind to the latter, which is exactly the gap that
+    let a staged edit slip past a diff-based allowlist check undetected.
+    """
+    proc = run(["git", "status", "--porcelain", "-z"], cwd=cwd)
+    entries = [e for e in proc.stdout.split("\0") if e]
+    paths = []
+    skip_next = False
+    for entry in entries:
+        if skip_next:
+            skip_next = False  # a rename/copy's old path trails as its own entry
+            continue
+        status, path = entry[:2], entry[3:]
+        paths.append(path)
+        if status[0] in "RC":
+            skip_next = True
+    return paths
+
+
 def list_worktrees(project_root: Path) -> list[Worktree]:
     proc = run(["git", "worktree", "list", "--porcelain"], cwd=project_root)
     trees: list[Worktree] = []
