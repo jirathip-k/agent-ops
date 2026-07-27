@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,45 @@ class FailingSurface:
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
     ) -> surfaces.Spawned:
         raise CommandError("spawn exploded")
+
+
+class WorktreeEatingSurface:
+    """Reports success while leaving nothing behind for dispatch to attach to —
+    e.g. a terminal whose worktree was removed concurrently, or a fake Orca
+    card pointed at a path that never existed (issue #201)."""
+
+    name = "orca"
+
+    def available(self) -> bool:
+        return True
+
+    def spawn(
+        self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+    ) -> surfaces.Spawned:
+        if attach_path is not None:
+            shutil.rmtree(attach_path, ignore_errors=True)
+        return surfaces.Spawned(
+            where=f"orca terminal {label!r} (handle term_ghost)",
+            surface=self.name,
+            handle="term_ghost",
+        )
+
+
+class WarningSurface:
+    name = "orca"
+
+    def available(self) -> bool:
+        return True
+
+    def spawn(
+        self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+    ) -> surfaces.Spawned:
+        return surfaces.Spawned(
+            where=f"orca terminal {label!r} (handle term_abc)",
+            surface=self.name,
+            handle="term_abc",
+            warning="fell back to project root card — shell starts at the project root",
+        )
 
 
 def test_dispatch_precreates_worktree_and_attaches_surface_to_it(
@@ -294,3 +334,39 @@ def test_dispatch_records_nothing_when_the_spawn_failed(
 
     assert result.exit_code == 1
     assert messages.load_spawn(repo.resolve(), 6) is None
+
+
+def test_dispatch_fails_when_the_surface_reports_success_over_a_dead_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #201: dispatch must verify its own postcondition rather than
+    trusting the surface's report — a surface can say "spawned" while the
+    worktree it should be running in is gone (e.g. removed concurrently)."""
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": WorktreeEatingSurface())
+
+    result = runner.invoke(app, ["dispatch", "10", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    stderr = result.stderr.lower()
+    assert "term_ghost" in stderr  # names what was created, so it can be closed by hand
+    assert "did not produce a worktree" in stderr
+    assert "dispatched issue" not in result.output  # no false success line
+    # the spawn record is still written — it is the only address the
+    # orphaned terminal has once the worktree itself is gone
+    record = messages.load_spawn(repo.resolve(), 10)
+    assert record is not None
+    assert record.handle == "term_ghost"
+
+
+def test_dispatch_prints_a_warning_and_still_succeeds(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded-but-successful spawn (e.g. Orca's project-root fallback)
+    must still report success, but the degradation must not be silent."""
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": WarningSurface())
+
+    result = runner.invoke(app, ["dispatch", "11", "--project", str(repo)])
+
+    assert result.exit_code == 0
+    assert "dispatched issue #11" in result.output
+    assert "fell back to project root card" in result.stderr

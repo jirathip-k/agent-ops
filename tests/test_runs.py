@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,32 @@ def test_classify_stopped_when_worktree_kept_with_no_signal() -> None:
 
 def test_classify_none_when_nothing_but_a_stale_log() -> None:
     assert runs.classify(1, worktree_path=None, live=None, has_feedback=False, pr=None) is None
+
+
+def test_classify_spawn_record_alone_reports_stopped_with_no_worktree_detail() -> None:
+    """Issue #201: a dispatch that reported success but never produced a
+    worktree on disk otherwise leaves zero signal — the spawn record is the
+    only evidence, and it must surface as an actionable `stopped` row."""
+    run = runs.classify(
+        201, worktree_path=None, live=None, has_feedback=False, pr=None, has_spawn_record=True
+    )
+    assert run is not None
+    assert run.state == "stopped"
+    assert "no worktree" in run.detail
+
+
+def test_classify_spawn_record_does_not_override_a_live_worktree() -> None:
+    """A spawn record next to a worktree that *is* there changes nothing —
+    the existing "worktree kept" row must win."""
+    run = runs.classify(
+        201,
+        worktree_path=Path(".worktrees/issue-201"),
+        live=None,
+        has_feedback=False,
+        pr=None,
+        has_spawn_record=True,
+    )
+    assert run == runs.Run(201, "stopped", STOPPED_DETAIL)
 
 
 def test_classify_live_outranks_feedback_file() -> None:
@@ -440,6 +467,92 @@ def test_discover_runs_outcome_only_reports_done_after_worktree_is_gone(
     # An outcome record is a local file read, not a `gh`/`git` call — finding
     # one never degrades the poll.
     assert trustworthy is True
+
+
+# --- spawn-record-only runs (issue #201) ------------------------------------
+
+
+def _no_other_signals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runs.worktree, "list_worktrees", lambda root: [])
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+
+def test_discover_runs_reports_a_dead_dispatch_from_its_spawn_record_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #201: `agent dispatch` can report success and yet never produce a
+    worktree on disk. With no worktree, no log, no feedback and no outcome,
+    the spawn record `messages.record_spawn` wrote is the only evidence such a
+    run ever started, and it must not be invisible to `agent runs`."""
+    _no_other_signals(tmp_path, monkeypatch)
+    messages.record_spawn(
+        tmp_path, 201, surface="orca", handle="term_abc", kind=messages.DISPATCH_KIND
+    )
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert [(r.issue, r.state) for r in result] == [(201, "stopped")]
+    assert "no worktree" in result[0].detail
+    assert trustworthy is True
+
+
+def test_discover_runs_ignores_a_spawn_record_past_the_artifact_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale spawn record from a long-finished cycle must not resurrect a
+    phantom row forever — the same TTL gate `_load_outcomes` and `prune_logs`
+    already apply to everything else in `.agent-runs/`."""
+    _no_other_signals(tmp_path, monkeypatch)
+    messages.record_spawn(
+        tmp_path, 202, surface="orca", handle="term_abc", kind=messages.DISPATCH_KIND
+    )
+    path = messages.spawn_path(tmp_path, 202)
+    stale = json.loads(path.read_text())
+    stale["spawned_at"] = time.time() - runs.ARTIFACT_TTL_S - 1
+    path.write_text(json.dumps(stale))
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert result == []
+    assert trustworthy is True
+
+
+def test_discover_runs_outcome_outranks_a_spawn_record_with_no_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unchanged precedence: a durable outcome record still wins even when the
+    only other signal is a spawn record for an issue with no worktree."""
+    _no_other_signals(tmp_path, monkeypatch)
+    messages.record_spawn(
+        tmp_path, 203, surface="orca", handle="term_abc", kind=messages.DISPATCH_KIND
+    )
+    _write_outcome_file(tmp_path, 203, state="done", pr_url="https://x/pull/50")
+
+    result, trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(203, "done", "PR #50 — https://x/pull/50")]
+
+
+def test_discover_runs_spawn_record_does_not_change_a_row_with_a_live_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unchanged existing row shape: a spawn record alongside a worktree that
+    actually exists must not steal the "worktree kept" row's detail."""
+    monkeypatch.setattr(
+        runs.worktree,
+        "list_worktrees",
+        lambda root: [worktree.Worktree(tmp_path / ".worktrees" / "issue-204", "fix/issue-204")],
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(
+        tmp_path, 204, surface="orca", handle="term_abc", kind=messages.DISPATCH_KIND
+    )
+
+    result, trustworthy = runs.discover_runs(tmp_path)
+
+    assert result == [runs.Run(204, "stopped", STOPPED_DETAIL)]
 
 
 def test_discover_runs_outcome_record_beats_stale_feedback_file(

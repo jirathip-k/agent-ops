@@ -30,6 +30,15 @@ _FEEDBACK_RE = re.compile(r"^issue-(\d+)-feedback\.md$")
 # here, and widening that is a behaviour change, not a rename.
 _LOG_RE = re.compile(r"^agent-issue-(\d+)(?:-\d{8}-\d{6}[a-z]?)?\.log$")
 _OUTCOME_RE = re.compile(r"^issue-(\d+)-outcome\.json$")
+# `messages.spawn_path`'s filename. A spawn record is normally not a run
+# signal (it is an address book, not evidence — see `messages`'s module
+# docstring), but it is the *only* signal left when `agent dispatch` reports
+# success and the worktree it should have produced never lands on disk, or is
+# gone before dispatch can verify it (issue #201): no worktree, no log
+# (nothing ran to write one), no feedback, no outcome. Matched here, not
+# unioned blindly — see `_recent_spawn_record_issues` for the age gate that
+# keeps a week-old record from resurrecting a long-dead issue's row.
+_SPAWN_RECORD_RE = re.compile(r"^issue-(\d+)-spawn\.json$")
 _ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$")
 
 # `failed` never comes from the derivation below — a run whose gates failed
@@ -356,6 +365,7 @@ def classify(
     pr: dict[str, Any] | None,
     outcome: Outcome | None = None,
     spawn: SpawnState | None = None,
+    has_spawn_record: bool = False,
 ) -> Run | None:
     """One issue's state from its signals, in the precedence the issue lays out.
 
@@ -381,6 +391,14 @@ def classify(
 
     `running` is not in `TERMINAL_STATES`, which is the other half of #116: the
     state a live spawn reports has to be one `--wait` keeps waiting on.
+
+    `has_spawn_record` ranks below all of the above and above the final
+    "nothing at all" `None` — a dispatch that reported success (issue #201) but
+    whose worktree never existed, or died before this poll, has weaker
+    evidence than every other positive signal and must defer to any of them.
+    It only ever fires alongside `worktree_path is None`: a spawn record next
+    to a worktree that *is* there changes nothing, and the arm just below
+    already covers that case (`stopped`, worktree kept).
     """
     prefix = f"worktree {worktree_path}, " if worktree_path is not None else ""
     if live is not None:
@@ -400,6 +418,13 @@ def classify(
         return Run(issue, "done", f"PR #{pr['number']}")
     if spawn is not None and spawn.alive:
         return Run(issue, "running", f"{prefix}spawned agent — {spawn.where}")
+    if worktree_path is None and has_spawn_record:
+        return Run(
+            issue,
+            "stopped",
+            "dispatched but no worktree on disk — the run died before or while creating "
+            "it; re-dispatch",
+        )
     if worktree_path is not None:
         # Deliberately not "re-dispatch": worktree.create(reuse=True) accepts a
         # pristine checkout, so acting on that advice spawns a second agent into
@@ -414,6 +439,40 @@ def _matches(pattern: re.Pattern[str], paths: list[Path]) -> set[int]:
         match = pattern.match(path.name)
         if match is not None:
             issues.add(int(match.group(1)))
+    return issues
+
+
+def _recent_spawn_record_issues(
+    project_root: Path, run_files: list[Path], now: float, log: Callable[[str], None]
+) -> set[int]:
+    """Issues with a spawn record younger than `ARTIFACT_TTL_S`.
+
+    Gated on age, unlike the other candidate sources: a spawn record is *not*
+    history (it is never pruned — see `messages`'s module docstring, "how to
+    reach the current run"), so without this gate a record from a long-since-
+    completed cycle would keep resurrecting that issue's row forever. Prefers
+    `spawned_at` (the moment `agent dispatch` actually wrote it) and falls
+    back to the file's own mtime for a record written before that field
+    existed, mirroring `_load_outcomes`'s fallback for the same reason.
+    """
+    issues: set[int] = set()
+    for path in run_files:
+        match = _SPAWN_RECORD_RE.match(path.name)
+        if match is None:
+            continue
+        issue = int(match.group(1))
+        record = messages.load_spawn(project_root, issue, log=log)
+        if record is None:
+            continue
+        age_basis = record.spawned_at
+        if not age_basis:
+            try:
+                age_basis = path.stat().st_mtime
+            except OSError as exc:
+                log(f"warning: could not stat spawn record {path}: {exc}")
+                continue
+        if now - age_basis <= ARTIFACT_TTL_S:
+            issues.add(issue)
     return issues
 
 
@@ -659,8 +718,11 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
     feedback_issues = _matches(_FEEDBACK_RE, run_files)
     log_issues = _matches(_LOG_RE, run_files)
     outcomes = _load_outcomes(run_files, time.time(), log)
+    spawn_record_issues = _recent_spawn_record_issues(project_root, run_files, time.time(), log)
 
-    candidates = set(worktree_by_issue) | feedback_issues | log_issues | set(outcomes)
+    candidates = (
+        set(worktree_by_issue) | feedback_issues | log_issues | set(outcomes) | spawn_record_issues
+    )
     if not candidates:
         return [], trustworthy
 
@@ -715,6 +777,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
             pr=pr_by_issue.get(issue),
             outcome=outcomes.get(issue),
             spawn=spawn_by_issue.get(issue),
+            has_spawn_record=issue in spawn_record_issues,
         )
         if found is not None:
             runs.append(found)

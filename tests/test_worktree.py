@@ -185,6 +185,85 @@ def test_create_reuse_rejects_wrong_branch(repo: Path) -> None:
         worktree.create(repo, ".worktrees", "issue-12", "fix/issue-12", "main", reuse=True)
 
 
+def test_create_adopts_a_concurrent_winners_pristine_checkout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #201: a non-contention `git worktree add` failure used to trigger
+    an unconditional `worktree remove --force` + `branch -D`, which would
+    destroy a *concurrent* dispatch's just-finished checkout if that one won
+    the race in the window between the failure and the cleanup. `create` must
+    notice the pristine winner and adopt it instead of deleting it."""
+    real_run = worktree.run
+    add_attempts: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["git", "worktree", "add"]:
+            add_attempts.append(cmd)
+            # The real `add` actually succeeds here — standing in for a
+            # concurrent dispatch that won the race and finished its checkout
+            # at this exact path/branch — but is reported back as a failure,
+            # as our own attempt would see if it lost that race.
+            real_run(cmd, **kwargs)  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: unrelated")
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree, "run", fake_run)
+
+    result = worktree.create(repo, ".worktrees", "issue-20", "fix/issue-20", "main")
+
+    assert result == repo / ".worktrees" / "issue-20"
+    assert result.is_dir()
+    assert len(add_attempts) == 1  # adopted on the first failure — no retry needed
+    branches = [wt.branch for wt in worktree.list_worktrees(repo)]
+    assert branches.count("fix/issue-20") == 1  # never duplicated or destroyed
+
+
+def test_create_non_contention_failure_with_non_pristine_leftover_cleans_up_and_raises(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine (non-winner) non-contention failure must still attempt to
+    clean up its own half-made debris, and must not retry — a non-lock error
+    won't be fixed by trying again, on any attempt."""
+    real_run = worktree.run
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["git", "worktree", "add"]:
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: nope")
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree, "run", fake_run)
+    monkeypatch.setattr(worktree.time, "sleep", lambda s: None)
+
+    with pytest.raises(CommandError, match="git worktree add failed"):
+        worktree.create(repo, ".worktrees", "issue-21", "fix/issue-21", "main")
+
+    add_calls = [c for c in calls if c[:3] == ["git", "worktree", "add"]]
+    remove_calls = [c for c in calls if c[:3] == ["git", "worktree", "remove"]]
+    assert len(add_calls) == 1  # non-contention error — no retry, on any attempt
+    assert remove_calls  # cleanup still runs even though nothing is adopted
+    assert not (repo / ".worktrees" / "issue-21").exists()
+
+
+def test_create_raises_if_add_reports_success_but_directory_is_absent(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Postcondition (issue #201): `create` must never hand back a path that
+    isn't actually there, however git's own exit code reads."""
+    real_run = worktree.run
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["git", "worktree", "add"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree, "run", fake_run)
+
+    with pytest.raises(CommandError, match="does not exist"):
+        worktree.create(repo, ".worktrees", "issue-22", "fix/issue-22", "main")
+
+
 def test_remove_dirty_requires_force(repo: Path) -> None:
     path = worktree.create(repo, ".worktrees", "issue-3", "fix/issue-3", "main")
     (path / "dirty.txt").write_text("uncommitted\n")
