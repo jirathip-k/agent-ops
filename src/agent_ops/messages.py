@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops import orca
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import run
 
 # The message types a dispatched run sends and a supervisor listens for.
 # `worker_done` means the run is over; `escalation` means it stopped early and
@@ -311,17 +311,7 @@ def send_outcome(
         json.dumps(payload),
         "--json",
     ]
-    try:
-        proc = run(cmd, check=False, timeout=_CHECK_TIMEOUT_S)
-    except (CommandError, OSError) as exc:
-        # OSError: `utils.run` lets `FileNotFoundError` through when the
-        # executable has gone since `available()` said otherwise — the same
-        # hole `_record_halt` documents for a missing `gh`. CommandError: the
-        # timeout bound fired on a wedged CLI. This function promises not to
-        # crash a finished run, so both are caught here rather than at every
-        # call site.
-        log(f"could not push the {state!r} outcome for #{issue} to {address.to}: {exc}")
-        return False
+    proc = run(cmd, check=False, timeout=_CHECK_TIMEOUT_S)
     if proc.returncode != 0:
         log(
             f"could not push the {state!r} outcome for #{issue} to {address.to}: "
@@ -386,14 +376,7 @@ def _check(
     ]
     if wait_ms is not None:
         cmd += ["--wait", "--timeout-ms", str(wait_ms)]
-    try:
-        proc = run(cmd, check=False, timeout=timeout_s)
-    except (CommandError, OSError) as exc:
-        # CommandError: the `timeout_s` bound fired (a wedged CLI). OSError:
-        # the executable vanished since `available()` was asked. Neither is
-        # worth failing a poll loop over — both read as "no news".
-        log(f"warning: could not check messages for {handle}: {exc}")
-        return None
+    proc = run(cmd, check=False, timeout=timeout_s)
     if proc.returncode != 0:
         log(
             f"warning: could not check messages for {handle}: "

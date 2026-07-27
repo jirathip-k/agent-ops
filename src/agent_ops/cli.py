@@ -472,10 +472,7 @@ def report(
 def _current_branch_issue(root: Path) -> int | None:
     """The issue number for `root`'s current branch, or None off an attached
     HEAD that isn't a `fix/issue-N` branch, a detached HEAD, or missing `git`."""
-    try:
-        head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
-    except (CommandError, OSError):
-        return None
+    head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
     if head.returncode != 0:
         return None
     return issue_from_branch(head.stdout.strip())
@@ -999,16 +996,7 @@ def init(
     # checkout, would otherwise resolve `remote_slug` to the ENCLOSING repo's
     # `origin` and sync every label there — an unrequested write to a repo
     # nobody named, by the same route `--repo` pinning exists to close off.
-    try:
-        toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
-    except (CommandError, OSError) as exc:
-        # Same fallback shape as the sync_labels guard below: a hung or
-        # missing `git` here must not traceback after scaffolding above has
-        # already written files to disk.
-        _err(f"\ncould not check for an enclosing git repo: {exc}")
-        typer.echo("labels were not synced — run these once you can:")
-        _print_label_commands()
-        return
+    toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
     if toplevel.returncode == 0 and Path(toplevel.stdout.strip()) != root.resolve():
         typer.echo(
             f"\n{root} is not a git repository root — it is inside "
@@ -1030,14 +1018,14 @@ def init(
 
     try:
         sync = github.sync_labels(root, ONBOARDING_LABELS, repo=slug)
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         # The files on disk above are correct either way — that's the whole
         # argument for not failing `init` here too. `gh` not being logged in,
         # a network blip, a non-GitHub origin, or `gh` not being installed at
-        # all (`utils.run` raises FileNotFoundError, an OSError, for that one)
-        # all land here; fall back to the same paste-able commands as
-        # --print-labels rather than leaving the operator with nothing but an
-        # error.
+        # all (this same `CommandError`, converted by `utils.run` under
+        # `check=True`) all land here; fall back to the same paste-able
+        # commands as --print-labels rather than leaving the operator with
+        # nothing but an error.
         _err(f"\ncould not sync labels: {exc}")
         typer.echo("labels were not synced — run these once you can:")
         _print_label_commands()

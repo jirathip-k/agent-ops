@@ -200,13 +200,22 @@ def test_run_wall_clock_timeout_is_a_normal_failed_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No stream to watch for silence here, so an expired `run()` timeout must
-    surface as an ordinary failed RunResult, not an escaped exception."""
-    from agent_ops.utils import CommandError
+    surface as an ordinary failed RunResult, not an escaped exception.
+
+    `check=False` never raises (agent-ops#154) — a timeout comes back as a
+    synthetic `CompletedProcess` with `TIMEOUT_RETURNCODE` instead.
+    """
+    from agent_ops.utils import TIMEOUT_RETURNCODE
 
     def fake_run(
         cmd: list[str], *, cwd: Path | None = None, check: bool = True, timeout: float | None = 0.0
     ) -> subprocess.CompletedProcess[str]:
-        raise CommandError(f"`{' '.join(cmd)}` did not finish within {timeout:g}s")
+        return subprocess.CompletedProcess(
+            cmd,
+            TIMEOUT_RETURNCODE,
+            stdout="",
+            stderr=f"`{' '.join(cmd)}` did not finish within {timeout:g}s",
+        )
 
     monkeypatch.setattr(codex_mod, "run", fake_run)
     request = RunRequest(prompt="p", cwd=Path("."), run_timeout_seconds=42.0)

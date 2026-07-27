@@ -90,7 +90,7 @@ def run_scout(
             {name: LABEL_COLORS[name] for name in ("backlog", "proposed-by-agent")},
             repo=github.remote_slug(project_root),
         )
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         log(f"could not sync labels: {exc}")
     else:
         for name, reason in sync.failed:

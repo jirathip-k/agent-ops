@@ -9,7 +9,7 @@ import pytest
 from agent_ops import github, prompts, worktree
 from agent_ops.runs import Outcome
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
-from agent_ops.utils import CommandError
+from agent_ops.utils import SPAWN_FAILURE_RETURNCODE, TIMEOUT_RETURNCODE, CommandError
 from agent_ops.workflows import evolve
 from agent_ops.workflows.evolve import EvolveChange, NoopVerdict, SurveyRow, baseline, build_survey
 
@@ -394,15 +394,15 @@ def test_fetch_ci_runs_flags_truncation_when_a_caller_hits_the_limit(
     assert truncated
 
 
-def test_fetch_ci_runs_fails_open_on_command_error(
+def test_fetch_ci_runs_fails_open_on_command_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # `check=False` never raises (agent-ops#154) — a timeout comes back as a
+    # synthetic non-zero `CompletedProcess`, same as any other `gh` failure.
     monkeypatch.setattr(evolve.stubs, "caller_workflows", lambda root, lane: [Path("triage.yml")])
-
-    def boom(cmd: list[str], **kwargs: Any) -> Any:
-        raise CommandError("`gh run list` did not finish within 120s")
-
-    monkeypatch.setattr(evolve, "run", boom)
+    monkeypatch.setattr(
+        evolve, "run", lambda cmd, **kwargs: _Proc("", returncode=TIMEOUT_RETURNCODE)
+    )
 
     assert evolve._fetch_ci_runs(tmp_path, "triage", 10) == ([], False)
 
@@ -411,11 +411,9 @@ def test_fetch_ci_runs_fails_open_on_missing_gh_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(evolve.stubs, "caller_workflows", lambda root, lane: [Path("triage.yml")])
-
-    def boom(cmd: list[str], **kwargs: Any) -> Any:
-        raise FileNotFoundError("gh")
-
-    monkeypatch.setattr(evolve, "run", boom)
+    monkeypatch.setattr(
+        evolve, "run", lambda cmd, **kwargs: _Proc("", returncode=SPAWN_FAILURE_RETURNCODE)
+    )
 
     assert evolve._fetch_ci_runs(tmp_path, "triage", 10) == ([], False)
 
@@ -432,13 +430,12 @@ def test_fetch_ci_runs_fails_open_on_bad_json(
 # --- _fetch_prs / _fetch_escalations fail open --------------------------------
 
 
-def test_fetch_prs_fails_open_on_command_error(
+def test_fetch_prs_fails_open_on_command_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def boom(cmd: list[str], **kwargs: Any) -> Any:
-        raise CommandError("`gh pr list` did not finish within 120s")
-
-    monkeypatch.setattr(evolve, "run", boom)
+    monkeypatch.setattr(
+        evolve, "run", lambda cmd, **kwargs: _Proc("", returncode=TIMEOUT_RETURNCODE)
+    )
 
     assert evolve._fetch_prs(tmp_path, 10) == ([], False)
 
@@ -460,13 +457,12 @@ def test_fetch_prs_flags_truncation_when_the_result_hits_the_limit(
     assert truncated
 
 
-def test_fetch_escalations_fails_open_on_command_error(
+def test_fetch_escalations_fails_open_on_command_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def boom(cmd: list[str], **kwargs: Any) -> Any:
-        raise CommandError("`gh issue list` did not finish within 120s")
-
-    monkeypatch.setattr(evolve, "run", boom)
+    monkeypatch.setattr(
+        evolve, "run", lambda cmd, **kwargs: _Proc("", returncode=TIMEOUT_RETURNCODE)
+    )
 
     assert evolve._fetch_escalations(tmp_path) == ([], False)
 
@@ -474,10 +470,9 @@ def test_fetch_escalations_fails_open_on_command_error(
 def test_fetch_escalations_fails_open_on_missing_gh_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def boom(cmd: list[str], **kwargs: Any) -> Any:
-        raise FileNotFoundError("gh")
-
-    monkeypatch.setattr(evolve, "run", boom)
+    monkeypatch.setattr(
+        evolve, "run", lambda cmd, **kwargs: _Proc("", returncode=SPAWN_FAILURE_RETURNCODE)
+    )
 
     assert evolve._fetch_escalations(tmp_path) == ([], False)
 
