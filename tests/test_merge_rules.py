@@ -1,10 +1,11 @@
+import os
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from agent_ops.config import ProjectConfig
-from agent_ops.workflows.merge import closable_issue_refs, evaluate_merge
+from agent_ops.workflows.merge import _is_test_file, closable_issue_refs, evaluate_merge
 
 
 def _config() -> ProjectConfig:
@@ -165,6 +166,23 @@ def test_lookalike_production_paths_are_not_exempted_as_tests() -> None:
         pr = _pr([{"path": path, "additions": 1000, "deletions": 0}])
         violations = evaluate_merge(pr, _config())
         assert any("changed lines" in v for v in violations), path
+
+
+def test_is_test_file_stays_case_sensitive_under_windows_style_normcase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # fnmatch resolves os.path.normcase at call time, so patching it here
+    # simulates the case-folding fnmatch.fnmatch would apply on Windows.
+    monkeypatch.setattr(os.path, "normcase", str.lower)
+    assert _is_test_file("src/contests/model.py", ["*Tests/*"]) is False
+    assert _is_test_file("src/Contests.swift", ["*Tests.swift"]) is False
+    assert _is_test_file("AppTests/FooTests.swift", ["*Tests/*"]) is True
+
+
+def test_blocked_paths_case_insensitivity_unaffected_by_test_file_fix() -> None:
+    pr = _pr([{"path": "src/useAuth.ts", "additions": 1, "deletions": 0}])
+    violations = evaluate_merge(pr, _config())
+    assert any("blocked path" in v for v in violations)
 
 
 def test_closable_refs_trailing_issue_numbers_only() -> None:
