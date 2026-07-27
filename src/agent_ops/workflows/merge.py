@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from fnmatch import fnmatch
+from fnmatch import fnmatch, fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -14,14 +14,17 @@ from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 def _is_test_file(path: str, patterns: list[str]) -> bool:
     """Whether `path` matches one of the test-file patterns.
 
-    Case-sensitive, deliberately unlike `blocked_paths` below. Lowercasing
-    here would fail OPEN: it turns the CamelCase Swift pattern `*Tests/*`
-    into `*tests/*`, which then substring-matches production directories like
-    `src/contests/model.py` or `app/protests/view.py` (fnmatch's `*` spans
-    `/`, so there is no word boundary) and wrongly exempts them from the size
-    caps. `blocked_paths` lowercases too, but over-matching there only blocks
-    *more* paths (fails safe); over-matching here would exempt more paths
-    from the caps (fails open), so the two must not share the same rule.
+    Matched with `fnmatchcase`, not `fnmatch`, so case-sensitivity is
+    enforced on every platform. Plain `fnmatch` runs both operands through
+    `os.path.normcase` first — a no-op on POSIX but `str.lower()` on
+    Windows — which would silently fail OPEN there: it turns the CamelCase
+    Swift pattern `*Tests/*` into `*tests/*`, which then substring-matches
+    production directories like `src/contests/model.py` or
+    `app/protests/view.py` (fnmatch's `*` spans `/`, so there is no word
+    boundary) and wrongly exempts them from the size caps. `blocked_paths`
+    lowercases too, but over-matching there only blocks *more* paths (fails
+    safe); over-matching here would exempt more paths from the caps (fails
+    open), so the two must not share the same rule.
 
     Patterns containing `[!/]` (the `test_*.py` family) are matched against
     the basename, not the full path. `[!/]` only protects the ONE character
@@ -34,7 +37,7 @@ def _is_test_file(path: str, patterns: list[str]) -> bool:
     changes nothing for any other pattern in the default list.
     """
     name = path.rsplit("/", 1)[-1]
-    return any(fnmatch(name if "[!/]" in pattern else path, pattern) for pattern in patterns)
+    return any(fnmatchcase(name if "[!/]" in pattern else path, pattern) for pattern in patterns)
 
 
 def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:

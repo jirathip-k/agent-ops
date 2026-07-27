@@ -31,8 +31,12 @@ LABEL_COLORS: dict[str, Label] = {
 # but groom may now emit them (#97), so they live here rather than in the CLI:
 # a lane that applies a label has to be able to create it first.
 GATE_LABELS: dict[str, Label] = {
-    "spec-requested": Label("5319e7", "Human asked the agent to write a spec"),
-    "plan-requested": Label("1d76db", "Human asked the agent to post an implementation plan"),
+    "spec-requested": Label(
+        "5319e7", "Requests the spec lane: turn this issue into acceptance criteria"
+    ),
+    "plan-requested": Label(
+        "1d76db", "Requests the plan lane: post an implementation plan on this issue"
+    ),
 }
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")
