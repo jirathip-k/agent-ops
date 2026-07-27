@@ -3,11 +3,12 @@
 Eight lanes — groom, scout, spec, plan, triage, implement, review, merge —
 each run in two surfaces: the local `agent` CLI and the CI pipelines in
 `.github/workflows/`. "Local" and "CI" are two places the same code can run,
-not two designs; for four lanes below they are, in fact, the exact same code
-path. The other four still run as prompt prose in `prompts/orchestrator.md`
-on the CI side — that split is history (`orchestrator.md` predates the CLI
-having those commands), not intent, and it is the exception being retired by
-the convergence work tracked in #171.
+not two designs; for five lanes below they are, in fact, the exact same code
+path (review joined that list in #171). The other three still run at least
+partly as prompt prose in `prompts/orchestrator.md` on the CI side — that
+split is history (`orchestrator.md` predates the CLI having those commands),
+not intent, and it is the exception being retired by the convergence work
+tracked in #171.
 
 This page is a reference, not a tutorial: every cell cites the file and line
 it was checked against. If a citation has drifted, that is this page falling
@@ -22,11 +23,11 @@ out of date — fix the page, don't route around it.
 | spec | `agent spec` — `src/agent_ops/cli.py:652` (`spec`) → `workflows/spec.py` | `uv run agent spec` — `.github/workflows/spec-pipeline.yml:155` | yes |
 | plan | `agent plan --post` — `src/agent_ops/cli.py:607` (`plan`) | `uv run agent plan --post` — `.github/workflows/plan-pipeline.yml:154` | yes |
 | triage | `src/agent_ops/cli.py:751` (`triage`) → `workflows/triage.py:65` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-80) | **no** |
-| implement | `src/agent_ops/cli.py:227` (`implement`) → `workflows/implement.py:228` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 85, role file `prompts/agents/implementer.md` | **no** |
-| review | `src/agent_ops/cli.py:672` (`review`) → `workflows/review.py:84` (`run_review`), fan-out at `workflows/review.py:161` (`run_reviews`) | Reviewer subagent, `prompts/orchestrator.md` Step 2A item 4, line 88, role file `prompts/agents/reviewer.md` | **no** |
-| merge | `agent merge --check` — `src/agent_ops/cli.py:889` (`merge`) → `workflows/merge.py:171` (`run_merge`) / `workflows/merge.py:43` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 131, shells out to `workflows/merge.py:142` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
+| implement | `src/agent_ops/cli.py:227` (`implement`) → `workflows/implement.py:228` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 86, role file `prompts/agents/implementer.md` | **no** |
+| review | `src/agent_ops/cli.py:672` (`review`) → `workflows/review.py:84` (`run_review`), fan-out at `workflows/review.py:161` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 89 | **yes** (#171) |
+| merge | `agent merge --check` — `src/agent_ops/cli.py:889` (`merge`) → `workflows/merge.py:171` (`run_merge`) / `workflows/merge.py:43` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 148, shells out to `workflows/merge.py:142` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
 
-## The four diverged lanes
+## The three diverged lanes
 
 **triage.** Local `run_triage` (`src/agent_ops/workflows/triage.py:65`) renders
 `prompts/tasks/triage.md`, parses a `TRIAGE RESULTS:` block out of the model's
@@ -50,20 +51,10 @@ retries up to `loop.max_attempts` (default 3, `src/agent_ops/config.py:46`)
 times with a fresh context on failure, plus a coded self-review pass and
 claim/release bookkeeping (#131) so two runs can't collide on the same issue.
 CI implement is a single subagent inside the Actions workspace
-(`prompts/orchestrator.md` Step 2A item 2, line 85, role file
+(`prompts/orchestrator.md` Step 2A item 2, line 86, role file
 `prompts/agents/implementer.md`): no worktree, no coded gate loop — the only
 retry is the orchestrator's one prose-driven revision round after a Tester
-FAIL (Step 2A, "Failure handling", lines 93-97).
-
-**review.** Local `run_review` (`src/agent_ops/workflows/review.py:84`) is a
-read-only reviewer over a budgeted PR diff, capped by `review.max_diff_lines`
-(default 5000, `src/agent_ops/config.py:176`), with an optional `--post` and a
-concurrent fan-out for multiple PRs via `run_reviews`
-(`src/agent_ops/workflows/review.py:161`). CI review is the Reviewer subagent
-in Step 2A item 4 (`prompts/orchestrator.md:88`, role file
-`prompts/agents/reviewer.md`) emitting APPROVE / REQUEST CHANGES that feeds
-the orchestrator's Step 3 merge gate directly — a different prompt, different
-inputs, and no diff-line budgeting.
+FAIL (Step 2A, "Failure handling", lines 105-113).
 
 **merge — partially converged.** This row differs from the issue that
 prompted this page: #150 ("CI lane and `agent merge` now disagree on what a
@@ -73,16 +64,57 @@ converged the *cap evaluation* itself. Diff-size and blocked-path caps are now
 judged by one function, `evaluate_merge` (`src/agent_ops/workflows/merge.py:43`),
 on both sides: local `agent merge` calls it via `run_merge`
 (`src/agent_ops/workflows/merge.py:171`), and CI Step 3
-(`prompts/orchestrator.md:131`) shells out to
+(`prompts/orchestrator.md:148`) shells out to
 `uv run --project agent-ops agent merge <PR> --project target --check`, which
 is `run_merge_check` (`src/agent_ops/workflows/merge.py:142`) wrapping the same
 `evaluate_merge`. What is still diverged is the merge *decision and action*:
-on CI that remains orchestrator prose (`prompts/orchestrator.md:143-154`) —
-the Tester PASS + Reviewer APPROVE gate, the open-ended "no infra files the
-check doesn't cover" rule, the `AUTO_MERGE` report-only toggle, and the squash
-itself are all judged and performed by the orchestrator model, not by code.
-Local `run_merge` performs the CI-green check and the squash in code. Hence
-"partially" rather than "yes."
+on CI that remains orchestrator prose (`prompts/orchestrator.md:160-171`) —
+the Tester PASS + `agent review --check` gate, the open-ended "no infra files
+the check doesn't cover" rule, the `AUTO_MERGE` report-only toggle, and the
+squash itself are all judged and performed by the orchestrator model, not by
+code. Local `run_merge` performs the CI-green check and the squash in code.
+Hence "partially" rather than "yes."
+
+## `review` — converged (#171)
+
+Before this pass, CI review was a Reviewer subagent in Step 2A item 4
+(formerly `prompts/orchestrator.md:88`; that line now holds the review gate
+described below, role file `prompts/agents/reviewer.md`; see the note below on
+what this change did to Step 2B's reference to the same role file)
+emitting free-text APPROVE / REQUEST CHANGES that the orchestrator model then
+interpreted — the same fail-open shape #159 had already fixed for the local
+lane's `prompts/tasks/review.md` (a rejection phrased loosely, or containing
+the word "approve" mid-sentence, could read as approval). It also received
+different inputs than `run_review` (issue text and the Tester's PASS/FAIL
+verdict) and had no diff-line budgeting.
+
+Step 2A item 4 now shells out to `agent review --check`
+(`src/agent_ops/cli.py:672`), which runs the exact same `run_review` /
+`verdict_of` code path as the local lane, honours its exit code and printed
+`VERDICT:` line, and feeds that into both the Step 2A revision-round rule and
+the Step 3 merge gate (`prompts/orchestrator.md:89-100,108-113,164-165`).
+`prompts/agents/reviewer.md` was also anchored to require the same `VERDICT:`
+line, since it is still the role file Step 2B's hotfix lane spawns as a
+subagent — that lane is unconverged and out of scope for #171 (see below for
+what converting Step 2A's item 4 did to Step 2B's reference to that file).
+
+Converting Step 2A's item 4 from a subagent to a shelled-out check removed the
+orchestrator's only other reference to `prompts/agents/reviewer.md`, so Step
+2B's "run the same four agents" (which named no agents) stopped resolving to
+anything — the hotfix lane's review step had gone undefined. Step 2B item 2
+(`prompts/orchestrator.md:124-125`) now names all four agents explicitly,
+including `REVIEWER (prompts/agents/reviewer.md)`, restoring what the
+reference used to resolve to. This is a repair of the reference broken by the
+review-lane convergence, not a change to Step 2B's behavior: its overrides,
+revision rounds, and merge rule are untouched and it still runs the Reviewer
+as a subagent rather than the CLI gate.
+
+Two accepted, documented differences remain rather than silent drops: CI no
+longer passes issue text or the Tester's verdict into the review (a
+deliberate scope decision, not a widened `run_review` signature), and
+`--post` leaves a PR comment rather than a formal GitHub "review" resource —
+if a target repo's branch protection requires the latter, this alone will
+not satisfy it.
 
 ## `auto_merge` and `config/repos.yml`
 
@@ -128,8 +160,8 @@ convergence work. Tracked as a follow-up rather than folded into this file.
 ## What happens next
 
 - [#171](https://github.com/jirathip-k/agent-ops/issues/171) — converge
-  triage, review, and implement onto one implementation instead of two. This
-  is the work that will flip the three remaining "no" rows above.
+  triage, review, and implement onto one implementation instead of two. The
+  review row above is the first to flip; triage and implement remain "no."
 - [#150](https://github.com/jirathip-k/agent-ops/issues/150) — closed; the
   merge-cap convergence documented in the merge row above.
 - [#139](https://github.com/jirathip-k/agent-ops/issues/139) — open, not yet
