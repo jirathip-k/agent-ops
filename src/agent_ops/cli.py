@@ -60,9 +60,9 @@ GITIGNORE_MARKERS = (".worktrees/", ".agent-runs/")
 # Every label the lanes read or write, with the colors/descriptions the
 # pipelines use. The triage/groom/scout lanes sync their own verdict labels at
 # run time too (LABEL_COLORS, merged in below, plus the gate labels groom may
-# now emit), but a gate label is mostly applied by a human — it has to exist
-# before anyone can request work, so `init` syncs the whole set at onboarding
-# rather than leaving it to the first failed run.
+# now emit), but a gate label may be applied by a human or by groom — it has
+# to exist before anyone can request work, so `init` syncs the whole set at
+# onboarding rather than leaving it to the first failed run.
 ONBOARDING_LABELS: dict[str, Label] = {
     **GATE_LABELS,
     "approved-for-agent": Label(
