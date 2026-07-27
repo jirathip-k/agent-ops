@@ -43,6 +43,15 @@ def _is_test_file(path: str, patterns: list[str]) -> bool:
 def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
     """Return the list of rule violations blocking an agent merge (empty = mergeable).
 
+    Two supported shapes, distinguished by whether `merge.stable_branch` is a
+    separate branch from `base_branch`:
+    - Two-branch (promotion) model: agents merge into `base_branch` (e.g.
+      `staging`); `merge.stable_branch` (e.g. `main`) is always human-only —
+      `agent promote` opens that verification PR, never an agent merge.
+    - Single-branch model: `base_branch == merge.stable_branch` (both `main`,
+      the common default), so agents merge straight into it; there is no
+      separate stable branch to carve out.
+
     `pr["labels"]` carrying one of `config.merge.blocked_labels` (e.g.
     `human-merge-only`) is a violation like any other here — `--override` can
     bypass it the same way it bypasses a size cap or a blocked path, since
@@ -50,14 +59,19 @@ def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
     label in the first place.
     """
     violations: list[str] = []
+    single_branch = config.base_branch == config.merge.stable_branch
 
     if pr["baseRefName"] != config.base_branch:
+        human_only_note = (
+            ""
+            if single_branch
+            else f" (stable branch {config.merge.stable_branch!r} is human-only)"
+        )
         violations.append(
             f"base is {pr['baseRefName']!r}, agents may only merge into "
-            f"{config.base_branch!r} (stable branch {config.merge.stable_branch!r} "
-            f"is human-only)"
+            f"{config.base_branch!r}{human_only_note}"
         )
-    if pr["baseRefName"] == config.merge.stable_branch:
+    if not single_branch and pr["baseRefName"] == config.merge.stable_branch:
         violations.append(f"target {config.merge.stable_branch!r} is the stable branch — never")
 
     files = pr.get("files", [])
@@ -245,6 +259,9 @@ def run_promote(project_root: Path, *, log: Callable[[str], None] = print) -> st
     config = load_project_config(project_root)
     working, stable = config.base_branch, config.merge.stable_branch
     if working == stable:
+        # Single-branch model (see evaluate_merge): there is no separate
+        # stable branch to promote into, so there is nothing for this
+        # command to do — agents already merge straight into `working`.
         raise CommandError(
             f"base_branch and merge.stable_branch are both {stable!r} — "
             "configure base_branch: staging to use the promotion flow"
