@@ -7,17 +7,10 @@
 defaults:
   max_issues_per_run: 3
   max_revision_rounds: 1
-  auto_merge:
-    max_changed_lines: 200
-    max_changed_files: 5
-    blocked_paths:         # changes here always block auto-merge
-      - ".github/**"
-      - "**/auth/**"
-      - "**/migrations/**"
-      - "package.json"
-      - "package-lock.json"
-      - "requirements*.txt"
-      - "Dockerfile"
-      - "*.tf"
+  # Merge caps and blocked paths are NOT configured here — they live in each
+  # managed repo's `.agent/config.yaml` (`merge:` section) and are enforced
+  # by `evaluate_merge`/`agent merge --check` (issue #150), the same code
+  # path the CI lane's Step 3 now calls. Platform-wide defaults for those
+  # keys live in config/defaults.yaml.
   soak_hours: 24
   stale_staging_days: 7

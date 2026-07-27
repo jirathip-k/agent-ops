@@ -125,8 +125,9 @@ Setup:
    if managing multiple repos)
 3. Per managed repo: create `staging`, labels, branch protection, copy the
    stub workflow (setup.sh prints the exact commands)
-4. Register the repo in `config/repos.yml` with `auto_merge.enabled: false`
-   (report-only) for the first week
+4. Leave `auto_merge: false` in the stub workflow (report-only) for the
+   first week; merge caps and blocked paths come from the target repo's
+   `.agent/config.yaml`, not `config/repos.yml`
 
 ### Safety gates (enforced in prompt AND GitHub settings)
 
