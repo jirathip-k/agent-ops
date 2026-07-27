@@ -227,12 +227,16 @@ def sync_labels(
     )
     if proc.returncode != 0:
         raise CommandError(f"could not list labels: {why(proc.stderr, proc.stdout)}")
+    try:
+        entries = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise CommandError(f"could not parse `gh label list` output: {exc}") from exc
     current = {
         entry["name"]: (
             entry["color"].lstrip("#").lower(),
             (entry.get("description") or "").strip(),
         )
-        for entry in json.loads(proc.stdout)
+        for entry in entries
     }
 
     created: list[str] = []
