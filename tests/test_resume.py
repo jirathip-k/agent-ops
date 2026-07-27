@@ -1165,3 +1165,93 @@ def test_dispatch_resume_records_the_new_terminal_as_the_mailbox(
     record = messages.load_spawn(repo, 5)
     assert record is not None
     assert record.handle == "term_resumed"
+
+
+def _dispatch_resume_fixture(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, issue: int, resumed_handle: str
+) -> None:
+    halt = implement_module._feedback_path(repo, issue)
+    halt.parent.mkdir(parents=True, exist_ok=True)
+    halt.write_text("findings")
+    monkeypatch.setattr(
+        implement_module, "_existing_worktree", lambda root, config, number, **kwargs: repo / "wt"
+    )
+
+    class RecordingSurface:
+        name = "orca"
+
+        def available(self) -> bool:
+            return True
+
+        def spawn(
+            self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
+        ) -> surfaces.Spawned:
+            return surfaces.Spawned(where="w", surface="orca", handle=resumed_handle)
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": RecordingSurface())
+
+
+def test_dispatch_resume_prefers_the_current_handle_as_spawner(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume run from a supervising terminal records that terminal as the
+    spawner, so round 2's halt reaches the same place round 1's did (#192)."""
+    messages.record_spawn(repo, 6, surface="orca", handle="term_original", spawner="term_stale")
+    _dispatch_resume_fixture(repo, monkeypatch, 6, "term_resumed")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_supervisor")
+
+    implement_module.dispatch_resume(repo, 6, log=lambda _: None)
+
+    record = messages.load_spawn(repo, 6)
+    assert record is not None
+    assert record.handle == "term_resumed"
+    assert record.spawner == "term_supervisor"
+
+
+def test_dispatch_resume_preserves_the_prior_spawner_with_no_current_handle(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume issued from a plain shell has no `current_handle()`, so the
+    original dispatcher recorded on the prior cycle must not be dropped."""
+    messages.record_spawn(
+        repo, 7, surface="orca", handle="term_original", spawner="term_coordinator"
+    )
+    _dispatch_resume_fixture(repo, monkeypatch, 7, "term_resumed")
+    monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
+
+    implement_module.dispatch_resume(repo, 7, log=lambda _: None)
+
+    record = messages.load_spawn(repo, 7)
+    assert record is not None
+    assert record.spawner == "term_coordinator"
+
+
+def test_dispatch_resume_with_no_handle_and_no_prior_spawner_degrades_quietly(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No current handle and no prior spawner on record must not fail —
+    it degrades to today's pollable per-run mailbox."""
+    _dispatch_resume_fixture(repo, monkeypatch, 8, "term_resumed")
+    monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
+
+    spawned = implement_module.dispatch_resume(repo, 8, log=lambda _: None)
+
+    assert spawned.handle == "term_resumed"
+    record = messages.load_spawn(repo, 8)
+    assert record is not None
+    assert record.spawner is None
+
+
+def test_dispatch_resume_never_records_the_worker_as_its_own_spawner(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume issued from inside the worker's own terminal must not record
+    that terminal as its own spawner, even though it is the current handle."""
+    _dispatch_resume_fixture(repo, monkeypatch, 9, "term_resumed")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_resumed")
+
+    implement_module.dispatch_resume(repo, 9, log=lambda _: None)
+
+    record = messages.load_spawn(repo, 9)
+    assert record is not None
+    assert record.spawner is None
