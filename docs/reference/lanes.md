@@ -136,6 +136,27 @@ toggle, `.github/workflows/triage-pipeline.yml`, consumed at line 222 as
 checked at `src/agent_ops/workflows/implement.py:455` to decide whether a
 freshly opened PR is immediately run through `run_merge`.
 
+## Trust model
+
+Every local-lane prompt reads GitHub content — issue bodies, comments, PR
+descriptions, review threads, CI logs, diffs — that anyone who can open an
+issue or comment on a managed repo can write, and some of it (dependency-bot
+PR bodies, CI output) no human writes at all. `render_task`
+(`src/agent_ops/prompts.py`) prepends the same untrusted-data guard
+(`prompts/untrusted-data.md`) to every `prompts/tasks/*.md` template before
+it reaches a model: the prompt template and the target repo's `AGENTS.md` /
+`CLAUDE.md` are authoritative, everything else is data to reason about, and
+an agent that notices injected instructions says so rather than silently
+following or ignoring them. `scout`'s repo-focus block
+(`focus_block`, `src/agent_ops/workflows/scout.py`, #140) is the trusted end
+of the same spectrum: repo-authored text a maintainer configures, held to the
+same authority as `AGENTS.md`.
+
+`prompts/orchestrator.md` (the CI lane) does not yet carry this guard — it
+renders straight off disk (`.github/workflows/triage-pipeline.yml`), not
+through `render_task`, and is a human-reviewed danger zone held by the #171
+convergence work. Tracked as a follow-up rather than folded into this file.
+
 ## What happens next
 
 - [#171](https://github.com/jirathip-k/agent-ops/issues/171) — converge

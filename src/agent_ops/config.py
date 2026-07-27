@@ -113,7 +113,7 @@ class MergeConfig(BaseModel):
     agents merge straight into it — see workflows.merge.evaluate_merge.
     """
 
-    stable_branch: str = "main"  # promotion target; only humans merge into it
+    stable_branch: str = "main"  # human-only unless it equals base_branch — see class docstring
     max_changed_lines: int = 400
     max_changed_files: int = 12
     # Backstop multiplier applied to the caps above, counting ALL files
