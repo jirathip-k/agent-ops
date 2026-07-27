@@ -10,7 +10,6 @@ import agent_ops.cli as cli_module
 from agent_ops import claims, github
 from agent_ops.cli import app
 from agent_ops.cli import github as cli_github
-from agent_ops.utils import CommandError
 
 runner = CliRunner()
 
@@ -160,14 +159,18 @@ def test_init_falls_back_to_printing_labels_when_gh_fails(
 def test_init_falls_back_to_printing_labels_when_gh_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`utils.run` raises FileNotFoundError (an OSError), not CommandError, when
-    `gh` isn't on PATH — the ordinary case when onboarding a fresh box. `init`
-    must fall back the same way it does for `CommandError`, not crash after
-    scaffolding has already succeeded."""
+    """A missing `gh` binary surfaces from `sync_labels` as `CommandError` —
+    `utils.run` converts the underlying `FileNotFoundError` (an OSError) under
+    `check=True` (agent-ops#154) — the ordinary case when onboarding a fresh
+    box. `init` must fall back the same way it does for any other `gh`
+    failure, not crash after scaffolding has already succeeded."""
     _init_repo_with_remote(tmp_path)
 
     def missing_gh(project_root: Path, labels: dict, *, repo: str | None = None) -> None:
-        raise FileNotFoundError("gh")
+        raise github.CommandError(
+            "could not list labels: `gh label list` could not be started: "
+            "[Errno 2] No such file or directory: 'gh'"
+        )
 
     monkeypatch.setattr(cli_github, "sync_labels", missing_gh)
 
@@ -179,47 +182,47 @@ def test_init_falls_back_to_printing_labels_when_gh_is_missing(
 
 
 @pytest.mark.parametrize(
-    "exc",
-    [CommandError("git rev-parse timed out"), FileNotFoundError("git")],
-    ids=["CommandError", "FileNotFoundError"],
+    "returncode",
+    [124, 127],
+    ids=["timeout", "missing-git"],
 )
-def test_init_falls_back_when_the_enclosing_repo_check_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+def test_init_proceeds_past_a_timed_out_or_missing_git_enclosing_repo_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
 ) -> None:
-    """`utils.run` raises `CommandError` on timeout regardless of `check`, and
-    `FileNotFoundError` (an OSError) when `git` isn't on PATH — `check=False`
-    on the enclosing-repo guard suppresses neither. That guard runs after all
-    scaffolding writes, so a raise here must fall back the same way the
-    sync_labels guard does, not traceback after onboarding already
-    succeeded (#168)."""
+    """`check=False` never raises (agent-ops#154): a timed-out or missing
+    `git` on the enclosing-repo check now comes back as a synthetic non-zero
+    `CompletedProcess`, same as the ordinary "not a git repository" case the
+    guard already treated as "can't tell, don't block" — so `init` proceeds
+    to sync labels rather than crashing or bailing out early (#168)."""
     _init_repo_with_remote(tmp_path)
 
     original_run = cli_module.run
 
     def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
         if cmd[:2] == ["git", "rev-parse"]:
-            raise exc
+            return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="boom")
         return original_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(cli_module, "run", fake_run)
 
-    def fail_sync(project_root: Path, labels: dict, *, repo: str | None = None) -> github.LabelSync:
-        raise AssertionError("sync_labels must not run when the enclosing-repo check raises")
+    synced: list[str | None] = []
 
-    monkeypatch.setattr(cli_github, "sync_labels", fail_sync)
+    def fake_sync(project_root: Path, labels: dict, *, repo: str | None = None) -> github.LabelSync:
+        synced.append(repo)
+        return github.LabelSync(created=[], updated=[], unchanged=list(labels), failed=[])
+
+    monkeypatch.setattr(cli_github, "sync_labels", fake_sync)
 
     result = runner.invoke(app, ["init", "--project", str(tmp_path)])
 
     assert result.exit_code == 0
+    assert synced == ["acme/widgets"]
     assert (tmp_path / ".agent" / "config.yaml").exists()
     assert (tmp_path / "AGENTS.md").exists()
     claude_md = tmp_path / "CLAUDE.md"
     assert claude_md.is_symlink()
     template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
     assert template.exists()
-
-    assert "could not check for an enclosing git repo" in result.output
-    assert "gh label create agent-ready" in result.output
 
 
 def test_init_in_a_subdirectory_of_a_checkout_does_not_sync_the_enclosing_repo(

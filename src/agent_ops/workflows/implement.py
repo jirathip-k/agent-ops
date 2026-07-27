@@ -951,8 +951,8 @@ def _record_halt(
             f"Resume with `agent resume {issue_number}`.",
             cwd=project_root,
         )
-    except (CommandError, OSError) as exc:
-        # OSError too: utils.run -> subprocess.run raises FileNotFoundError when
-        # `gh` isn't on PATH, which CommandError doesn't cover — and this must
-        # never turn a halt into a crash, as the docstring promises.
+    except CommandError as exc:
+        # `gh` missing from PATH raises this same `CommandError` (utils.run
+        # converts it under `check=True`, agent-ops#154), and this must never
+        # turn a halt into a crash, as the docstring promises.
         log(f"could not post halt comment on issue #{issue_number}: {exc}")

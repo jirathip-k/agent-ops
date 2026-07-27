@@ -29,14 +29,14 @@ flowchart LR
 
 | Place | What runs there | When | Is it on today? |
 | --- | --- | --- | --- |
-| **Your Mac** (Orca terminals) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — every run so far happened here |
-| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (the "Hourly Agent Triage" workflow) | Every 4 hours, unattended | ✅ Live on the managed repos (see the private fleet doc for per-repo status) |
+| **Your Mac** (Orca terminals) | The `agent` CLI: triage, implement, review, merge, promote. Each stage is a short-lived Claude call on your subscription. | When you (or a Claude session) type a command | ✅ Yes — the interactive lane, driven by hand |
+| **GitHub Actions** (cloud) | The *scheduled* version of the same loop (`triage.yml`, plus daily groom/scout/promote and label-gated spec/plan) | Triage every 4 hours; groom/scout/promote daily; spec/plan run on `spec-requested`/`plan-requested`, but only on a timer in repos that added a cron (see #165) — otherwise dispatch-only; all unattended | ✅ Live on the managed repos (see the private fleet doc for per-repo status) |
 | **GitHub.com** | Nothing *runs* here — it's the shared memory: issues, labels, PRs | Always | ✅ |
 
-So when you wonder "where is triage running?" — today the answer is always
-**your Mac, because someone typed `agent triage`**. When the Actions loop is
-switched on, the same triage also happens in GitHub's cloud on a timer, and
-you'd see it under the repo's **Actions** tab.
+So when you wonder "where is triage running?" — the answer can be either:
+**your Mac**, if someone typed `agent triage`, or **GitHub's cloud**, on
+`triage.yml`'s 4-hour timer. Either way you'd see the cloud runs under the
+repo's **Actions** tab.
 
 ## Who does what
 
@@ -99,10 +99,10 @@ you'd see it under the repo's **Actions** tab.
 
 ## Running the scheduled loop by hand
 
-Each managed repo's "Hourly Agent Triage" runs on its timer, but you can fire
-it anytime:
+Each managed repo's triage workflow (`triage.yml`, every 4 hours) runs on
+its timer, but you can fire it anytime:
 
-- **Browser**: repo → **Actions** tab → *Hourly Agent Triage* → **Run
+- **Browser**: repo → **Actions** tab → the triage workflow → **Run
   workflow** button.
 - **Terminal**: `gh workflow run triage.yml --repo <owner>/<repo>`
 - **gh dash**: select any PR or issue row and press **`t`** — it triggers

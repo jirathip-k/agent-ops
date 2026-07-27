@@ -132,26 +132,26 @@ def _fetch_ci_runs(root: Path, lane: str, limit: int) -> tuple[list[dict[str, An
     runs: list[dict[str, Any]] = []
     truncated = False
     for caller in callers:
+        proc = run(
+            [
+                "gh",
+                "run",
+                "list",
+                "--workflow",
+                caller.name,
+                "--limit",
+                str(limit),
+                "--json",
+                "databaseId,event,status,conclusion,createdAt,updatedAt,url",
+            ],
+            cwd=root,
+            check=False,
+        )
+        if proc.returncode != 0:
+            continue
         try:
-            proc = run(
-                [
-                    "gh",
-                    "run",
-                    "list",
-                    "--workflow",
-                    caller.name,
-                    "--limit",
-                    str(limit),
-                    "--json",
-                    "databaseId,event,status,conclusion,createdAt,updatedAt,url",
-                ],
-                cwd=root,
-                check=False,
-            )
-            if proc.returncode != 0:
-                continue
             batch = json.loads(proc.stdout)
-        except (CommandError, OSError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             continue
         runs.extend(batch)
         if len(batch) == limit:
@@ -165,26 +165,26 @@ def _fetch_prs(root: Path, limit: int) -> tuple[list[dict[str, Any]], bool]:
     The second element is True when the result came back with exactly
     `limit` rows — a sign the fetch was truncated, same as `_fetch_ci_runs`.
     """
+    proc = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,headRefName,state,createdAt,closedAt,mergedAt,url",
+        ],
+        cwd=root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [], False
     try:
-        proc = run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--state",
-                "all",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,headRefName,state,createdAt,closedAt,mergedAt,url",
-            ],
-            cwd=root,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return [], False
         prs = json.loads(proc.stdout)
-    except (CommandError, OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return [], False
     return prs, len(prs) == limit
 
@@ -198,26 +198,26 @@ def _fetch_escalations(root: Path, limit: int = _ISSUE_LIMIT) -> tuple[list[dict
     Because `gh issue list` returns newest-*created* first, a truncated fetch
     can drop a recent escalation comment on an old issue entirely.
     """
+    proc = run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,url,comments",
+        ],
+        cwd=root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [], False
     try:
-        proc = run(
-            [
-                "gh",
-                "issue",
-                "list",
-                "--state",
-                "all",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,url,comments",
-            ],
-            cwd=root,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return [], False
         issues = json.loads(proc.stdout)
-    except (CommandError, OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return [], False
     return issues, len(issues) == limit
 
@@ -636,14 +636,14 @@ def run_evolve(
             for pr in github.open_prs(project_root)
             if pr["headRefName"].startswith(branch_prefix)
         ]
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         # Fails closed, not open: swallowing this and proceeding would still
         # spend a worktree, a full planner agent run, a commit, and a push
         # before dying at `create_pr` on the same underlying `gh` failure —
         # same reasoning distill.run_distill applies to its own stale-PR
-        # check (agent-ops#175). OSError folds in for the same reason as
-        # there: a missing/non-executable `gh` binary passes `utils.run`
-        # through regardless of `check` (agent-ops#154, not fixed here).
+        # check (agent-ops#175). A missing/non-executable `gh` binary raises
+        # this same `CommandError` (utils.run converts it under `check=True`,
+        # agent-ops#154).
         raise RuntimeError(f"could not check for a stale evolve PR via `gh`: {exc}") from exc
     if stale_prs:
         pr = stale_prs[0]
@@ -659,7 +659,7 @@ def run_evolve(
             {"human-merge-only": _HUMAN_MERGE_ONLY_LABEL},
             repo=github.remote_slug(project_root),
         )
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         raise RuntimeError(f"could not sync the human-merge-only label: {exc}") from exc
     if sync.failed:
         reasons = "; ".join(f"{name}: {reason}" for name, reason in sync.failed)

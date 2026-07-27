@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_ops import messages, orca, runs
-from agent_ops.utils import CommandError
+from agent_ops.utils import TIMEOUT_RETURNCODE
 
 
 def _orca_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,12 +317,18 @@ def test_wait_for_message_returns_false_without_a_channel(
 def test_wait_for_message_returns_false_when_the_cli_wedges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`utils.run`'s bound fires; a wedged helper must not wedge the wait."""
+    """`utils.run`'s bound fires; a wedged helper must not wedge the wait.
+
+    `check=False` never raises (agent-ops#154) — the timeout comes back as a
+    synthetic non-zero `CompletedProcess` instead.
+    """
     _orca_on(monkeypatch)
     messages.record_spawn(tmp_path, 98, surface="orca", handle="term_abc")
 
     def hangs(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise CommandError("`orca` did not finish within 25s")
+        return subprocess.CompletedProcess(
+            cmd, TIMEOUT_RETURNCODE, stdout="", stderr="`orca` did not finish within 25s"
+        )
 
     monkeypatch.setattr(messages, "run", hangs)
     logged: list[str] = []

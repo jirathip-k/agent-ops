@@ -21,7 +21,7 @@ from agent_ops.runtimes.base import (
     terminate_and_reap,
     wall_clock_timeout_result,
 )
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import TIMEOUT_RETURNCODE, run
 
 # Claude Code reports these conditions as prose, not as codes, so matching is
 # on the phrases the CLI actually prints. Keep the fixtures in
@@ -125,15 +125,14 @@ class ClaudeCodeRuntime:
         # underneath) captures everything and returns only at the end — so
         # this path gets a generous wall-clock bound instead of the streaming
         # path's idle timeout.
-        try:
-            proc = run(
-                cmd,
-                cwd=request.cwd,
-                input_text=request.prompt,
-                check=False,
-                timeout=request.run_timeout_seconds,
-            )
-        except CommandError:
+        proc = run(
+            cmd,
+            cwd=request.cwd,
+            input_text=request.prompt,
+            check=False,
+            timeout=request.run_timeout_seconds,
+        )
+        if proc.returncode == TIMEOUT_RETURNCODE:
             return wall_clock_timeout_result(request.run_timeout_seconds)
         return parse_result(proc)
 

@@ -139,7 +139,7 @@ def run_triage(
 
     try:
         sync = github.sync_labels(project_root, LABEL_COLORS, repo=github.remote_slug(project_root))
-    except (CommandError, OSError) as exc:
+    except CommandError as exc:
         log(f"could not sync labels: {exc}")
     else:
         for name, reason in sync.failed:

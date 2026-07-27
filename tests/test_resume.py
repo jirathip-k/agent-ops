@@ -218,9 +218,9 @@ def test_run_implement_halt_writes_feedback_file_and_comments_on_the_issue(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(github, "get_issue", _fake_issue)
-    # Never reach a live `gh pr list`: utils.run raises FileNotFoundError when
-    # gh isn't installed, so an unstubbed call errors instead of testing the
-    # halt path (matches tests/test_implement_workflow.py).
+    # Never reach a live `gh pr list`: whether or not `gh` is installed on the
+    # test machine, a real call is unpredictable network I/O that has nothing
+    # to do with the halt path under test (matches tests/test_implement_workflow.py).
     monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
     monkeypatch.setattr(
         implement_module,
@@ -258,9 +258,9 @@ def test_run_implement_halt_survives_a_failed_issue_comment(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(github, "get_issue", _fake_issue)
-    # Never reach a live `gh pr list`: utils.run raises FileNotFoundError when
-    # gh isn't installed, so an unstubbed call errors instead of testing the
-    # halt path (matches tests/test_implement_workflow.py).
+    # Never reach a live `gh pr list`: whether or not `gh` is installed on the
+    # test machine, a real call is unpredictable network I/O that has nothing
+    # to do with the halt path under test (matches tests/test_implement_workflow.py).
     monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
     monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
     monkeypatch.setattr(
@@ -903,8 +903,10 @@ def test_record_halt_survives_a_message_bus_that_has_gone_away(
     monkeypatch.setattr(orca, "executable", lambda: "orca")
     messages.record_spawn(repo, 13, surface="orca", handle="term_abc")
 
-    def vanished(cmd: list[str], **kwargs: object) -> None:
-        raise FileNotFoundError("orca: no such file")
+    # `check=False` never raises (agent-ops#154) — a vanished binary comes
+    # back as a synthetic non-zero `CompletedProcess` instead.
+    def vanished(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 127, stdout="", stderr="orca: no such file")
 
     monkeypatch.setattr(messages, "run", vanished)
     logged: list[str] = []
