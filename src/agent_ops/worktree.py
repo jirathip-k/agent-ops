@@ -31,6 +31,22 @@ class BranchStatus:
         return self.ahead > 0 and self.behind > 0
 
 
+@dataclass(frozen=True)
+class BaseDrift:
+    """How far a worktree's HEAD is behind `origin/<base>`, as of the last check.
+
+    `checked=False` means "no answer" (no remote base ref to compare
+    against — a test/scratch repo, or a worktree git can't even inspect),
+    never "not behind": callers must treat it as unknown, not current.
+    """
+
+    checked: bool
+    fetched: bool
+    behind: int
+    base_ref: str
+    tip: str
+
+
 def create(
     project_root: Path,
     worktree_dir: str,
@@ -154,6 +170,41 @@ def prune(project_root: Path) -> None:
     dead path instead of recreating the worktree.
     """
     run(["git", "worktree", "prune"], cwd=project_root, check=False, timeout=SLOW_GIT_TIMEOUT_S)
+
+
+def base_drift(wt_path: Path, base: str) -> BaseDrift:
+    """Fetch `origin/<base>` and report how far `HEAD` in `wt_path` trails it.
+
+    Read-only: never rebases, resets, or otherwise touches the tree — the
+    caller decides what to do with the answer. Degrades to `checked=False`
+    rather than raising whenever the question can't be answered at all (no
+    `origin/<base>` ref, or the worktree itself can't be inspected); a failed
+    fetch — whether it exits fast (network down, bad remote) or hangs until
+    `SLOW_GIT_TIMEOUT_S` — still falls back to the last-known local
+    `origin/<base>`, which is a real if possibly-stale answer, not silence.
+    That fallback works because the fetch runs with `check=False`: `run()`
+    reports a timeout as a synthetic non-zero `CompletedProcess` rather than
+    raising, so both failure shapes are just another non-zero `returncode`
+    here, not an exception to catch.
+    """
+    base_ref = f"origin/{base}"
+    fetch = run(
+        ["git", "fetch", "origin", base],
+        cwd=wt_path,
+        check=False,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
+    fetched = fetch.returncode == 0
+    verify = run(["git", "rev-parse", "--verify", base_ref], cwd=wt_path, check=False)
+    if verify.returncode != 0:
+        return BaseDrift(False, fetched, 0, base_ref, "")
+    counted = run(["git", "rev-list", "--count", f"HEAD..{base_ref}"], cwd=wt_path, check=False)
+    if counted.returncode != 0:
+        return BaseDrift(False, fetched, 0, base_ref, "")
+    tipped = run(["git", "log", "-1", "--format=%h %s", base_ref], cwd=wt_path, check=False)
+    if tipped.returncode != 0:
+        return BaseDrift(False, fetched, 0, base_ref, "")
+    return BaseDrift(True, fetched, int(counted.stdout.strip()), base_ref, tipped.stdout.strip())
 
 
 def create_tracking(project_root: Path, worktree_dir: str, name: str, branch: str) -> Path:
