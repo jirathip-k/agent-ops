@@ -13,6 +13,24 @@ class Worktree:
     branch: str
 
 
+@dataclass(frozen=True)
+class BranchStatus:
+    """Where `branch` lives relative to `origin/<branch>`, after a fetch.
+
+    `ahead`/`behind` are only meaningful when both `local` and `remote` are
+    true; they stay 0 otherwise so callers don't have to guard on that too.
+    """
+
+    local: bool
+    remote: bool
+    ahead: int = 0
+    behind: int = 0
+
+    @property
+    def diverged(self) -> bool:
+        return self.ahead > 0 and self.behind > 0
+
+
 def create(
     project_root: Path,
     worktree_dir: str,
@@ -83,6 +101,59 @@ def _pristine_checkout(path: Path, branch: str) -> bool:
         return False
     status = run(["git", "status", "--porcelain"], cwd=path, check=False)
     return status.returncode == 0 and not status.stdout.strip()
+
+
+def remote_branch_status(project_root: Path, branch: str) -> BranchStatus:
+    """Local/remote existence and ahead/behind counts for `branch`.
+
+    Fetches `branch` from origin first so the remote picture is current. A
+    failed fetch — no remote configured, offline — degrades to whatever is
+    known locally rather than raising: recovering a local-only branch must
+    still work with no network at all.
+    """
+    run(
+        ["git", "fetch", "origin", branch],
+        cwd=project_root,
+        check=False,
+        timeout=SLOW_GIT_TIMEOUT_S,
+    )
+    local = (
+        run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+            cwd=project_root,
+            check=False,
+        ).returncode
+        == 0
+    )
+    remote = (
+        run(
+            ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}"],
+            cwd=project_root,
+            check=False,
+        ).returncode
+        == 0
+    )
+    ahead = behind = 0
+    if local and remote:
+        counts = run(
+            ["git", "rev-list", "--left-right", "--count", f"{branch}...origin/{branch}"],
+            cwd=project_root,
+            check=False,
+        )
+        parts = counts.stdout.split()
+        if counts.returncode == 0 and len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+    return BranchStatus(local=local, remote=remote, ahead=ahead, behind=behind)
+
+
+def prune(project_root: Path) -> None:
+    """Drop worktree registrations git kept for directories removed by hand.
+
+    Without this, `create_tracking` can find a branch git still considers
+    "checked out" at a path that no longer exists on disk and hand back that
+    dead path instead of recreating the worktree.
+    """
+    run(["git", "worktree", "prune"], cwd=project_root, check=False, timeout=SLOW_GIT_TIMEOUT_S)
 
 
 def create_tracking(project_root: Path, worktree_dir: str, name: str, branch: str) -> Path:

@@ -47,17 +47,75 @@ def _ad_hoc_message_path(project_root: Path, issue_number: int) -> Path:
     return project_root / ".agent-runs" / f"issue-{issue_number}-resume-message.md"
 
 
-def _existing_worktree(project_root: Path, config: ProjectConfig, issue_number: int) -> Path:
-    """The task worktree a prior `agent dispatch`/`implement` left behind, or a clear error."""
+def _existing_worktree(
+    project_root: Path,
+    config: ProjectConfig,
+    issue_number: int,
+    *,
+    log: Callable[[str], None] = lambda _: None,
+) -> Path:
+    """The task worktree a prior `agent dispatch`/`implement` left behind — recovered from
+    the branch if the worktree itself is gone — or a clear error.
+
+    A halted run's worktree is disposable (cleaned up by hand, wiped disk) but
+    its branch — `fix/issue-N` — is the durable record of the work, locally
+    and/or on the remote. When the worktree is missing this recreates it from
+    that branch instead of telling the operator to `agent dispatch`, which
+    would build a fresh worktree from `base_branch` and, on an issue with an
+    open PR, only offers `--force` — starting a competing duplicate
+    implementation.
+
+    Recovery never resets or discards commits: it only ever creates a new
+    worktree on the existing branch and, when the local branch was strictly
+    behind the remote, fast-forwards it (`merge --ff-only`, never `reset
+    --hard`). A branch with commits on both sides refuses rather than
+    guessing which one to keep — the one case manual git remains the honest
+    answer for.
+    """
     task_id, branch = task_identifiers(issue_number)
     wt_path = project_root / config.worktree_dir / task_id
     branches = {wt.branch for wt in worktree.list_worktrees(project_root)}
-    if not wt_path.is_dir() or branch not in branches:
+    if wt_path.is_dir() and branch in branches:
+        return wt_path  # today's happy path — no fetch, no network call
+
+    status = worktree.remote_branch_status(project_root, branch)
+    if not status.local and not status.remote:
         raise FileNotFoundError(
             f"no worktree for issue #{issue_number} at {wt_path} — "
             f"run `agent dispatch {issue_number}` to start one"
         )
-    return wt_path
+    if status.diverged:
+        raise CommandError(
+            f"branch {branch!r} has diverged from origin/{branch} "
+            f"({status.ahead} commit(s) ahead, {status.behind} behind) — the worktree for "
+            f"issue #{issue_number} is gone and recovery cannot pick a side. Resolve manually "
+            f"(e.g. `git worktree add {wt_path} {branch}` then rebase or merge) and re-run "
+            "`agent resume`."
+        )
+
+    worktree.prune(project_root)
+    recovered = worktree.create_tracking(project_root, config.worktree_dir, task_id, branch)
+    if status.remote and status.behind > 0:
+        run(
+            ["git", "merge", "--ff-only", f"origin/{branch}"],
+            cwd=recovered,
+            timeout=SLOW_GIT_TIMEOUT_S,
+        )
+        log(
+            f"recovered: recreated worktree at {recovered} on existing branch {branch} "
+            f"(from origin/{branch}, fast-forwarded {status.behind} commit(s))"
+        )
+    elif status.remote:
+        log(
+            f"recovered: recreated worktree at {recovered} on existing branch {branch} "
+            f"(from origin/{branch})"
+        )
+    else:
+        log(
+            f"recovered: recreated worktree at {recovered} on existing branch {branch} — "
+            "this branch has not been pushed; push it before this machine is lost"
+        )
+    return recovered
 
 
 def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
@@ -562,10 +620,13 @@ def _run_resume(
     """`run_resume`'s body, minus the claim bookkeeping that wraps it."""
     config = load_project_config(project_root)
     task_id, branch = task_identifiers(issue_number)
-    wt_path = _existing_worktree(project_root, config, issue_number)
+    # Resolved before recovering the worktree: a missing-feedback error must
+    # not perform worktree recovery (fetch, recreate, possible fast-forward)
+    # as a side effect of a call that is about to fail anyway.
     feedback = _resolve_feedback(
         project_root, issue_number, message=message, message_file=message_file
     )
+    wt_path = _existing_worktree(project_root, config, issue_number, log=log)
 
     issue = github.get_issue(issue_number, cwd=project_root)
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
@@ -691,7 +752,7 @@ def dispatch_resume(
     seconds later the way the hand-rolled `orca terminal create` attempts did.
     """
     config = load_project_config(project_root)
-    wt_path = _existing_worktree(project_root, config, issue_number)
+    wt_path = _existing_worktree(project_root, config, issue_number, log=log)
 
     if message is not None and message_file is not None:
         raise ValueError("pass either --message or --message-file, not both")
