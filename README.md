@@ -217,6 +217,8 @@ config/defaults.yaml platform defaults; config/repos.yml CI-lane defaults
 stubs/               workflow stubs to copy into managed repos
 docs/                architecture, ci-cd, workflow, guide, failure-modes,
                       roadmap, adr/, office-ops suggestion
+docs/reference/lanes.md   which of the 8 lanes share one implementation
+                      between local and CI, and which still diverge
 ```
 
 ## Notes on subscription usage
