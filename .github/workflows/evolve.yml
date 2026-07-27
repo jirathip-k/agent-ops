@@ -1,0 +1,65 @@
+# Caller for the reusable evolve pipeline, wired against this control repo
+# itself — the same self-hosting pattern as triage.yml/groom.yml/spec.yml/
+# plan.yml/scout.yml. Managed repos get their own copy from
+# stubs/managed-repo-evolve.yml.
+#
+# Cadence: weekly, Sunday 09:30 Asia/Bangkok (02:30 UTC). Chosen against the
+# rest of the roster: triage ticks every four hours (`0 */4 * * *` — 00:00,
+# 04:00, 08:00, ...), so 02:30 lands after groom's 01:00 tick and the promote
+# stub's 01:30, in the gap before triage's next tick at 04:00. Weekly because
+# `--min-runs` (default 5, agent_ops#151/#152) means most lanes have nothing
+# new to say more often than that — a daily cron would mostly burn a job to
+# rediscover the same no-op.
+#
+# Sweep: every prompt-driven CI lane (triage, groom, spec, plan, scout) gets
+# its own single-lane pipeline call via the matrix below — "a scheduled sweep
+# is a loop over single-lane invocations," not a combined multi-lane run, so
+# one lane's failure or its own draft PR never blocks another's. That means a
+# full weekly run sweeps all five lanes in the matrix, not a subset; `promote`
+# is deliberately excluded from the matrix itself: it is a plain CLI command
+# with no `prompts/tasks/promote.md` to evolve, so `agent evolve promote`
+# fails by design (agent_ops#153) — scheduling it here would just be a
+# guaranteed weekly failure. `--min-runs` then caps the realistic outcome:
+# most weeks most lanes no-op, so the five calls below are the sweep's upper
+# bound, not its steady state.
+#
+# Concurrency: each pipeline call uses its own agent-evolve-<repo>-<lane>
+# group (see evolve-pipeline.yml), not the shared agent-triage-<repo> one and
+# not even a group shared across evolve's own lanes, so this sweep never
+# contends with — or gets cancelled by — triage/groom/spec/plan or another
+# lane in the same sweep.
+
+name: Agent Evolve
+
+on:
+  schedule:
+    - cron: '30 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Single lane to evolve (leave blank to sweep every lane)"
+        required: false
+        type: string
+
+jobs:
+  evolve:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [triage, groom, spec, plan, scout]
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    # Manual dispatch with a `lane` input runs only that lane; the scheduled
+    # trigger (and a manual dispatch with no `lane`) sweeps the full matrix.
+    if: github.event_name != 'workflow_dispatch' || inputs.lane == '' || inputs.lane == matrix.lane
+    uses: jirathip-k/agent-ops/.github/workflows/evolve-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      lane: ${{ matrix.lane }}
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

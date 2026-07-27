@@ -1,0 +1,152 @@
+# Reusable evolve pipeline workflow.
+# Runs the real `agent evolve <lane>` CLI against a managed repo — the same
+# code path as local evolve runs, so verdicts can't drift between lanes.
+# Managed repos call this via workflow_call (see stubs/managed-repo-evolve.yml).
+#
+# One lane per run — the caller's scheduled sweep loops over lanes by calling
+# this pipeline once per lane (see evolve.yml's matrix), rather than this
+# pipeline surveying every lane itself. That keeps a manual `workflow_dispatch`
+# targeting exactly one lane, and keeps one lane's failure from aborting the
+# others' runs.
+#
+# Cadence lives in evolve.yml, the caller. This file only needs to be safe to
+# invoke concurrently across different lanes — see the concurrency group
+# below (keyed by repo and lane) and its comment for why.
+
+name: Reusable · Evolve Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to evolve a lane's prompt in"
+        required: true
+        type: string
+      lane:
+        description: "Lane to survey and evolve, e.g. spec, triage, groom"
+        required: true
+        type: string
+      window_days:
+        description: "How many days of run history to survey"
+        required: false
+        type: number
+        default: 30
+      min_runs:
+        description: "Minimum runs in the window before a baseline is shown"
+        required: false
+        type: number
+        default: 5
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to evolve a lane's prompt in"
+        required: true
+        type: string
+      lane:
+        description: "Lane to survey and evolve, e.g. spec, triage, groom"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  evolve:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    # Its own group, not the shared agent-triage-<repo> group: triage, groom,
+    # scout, spec and plan all mutate the same issues and so must serialize
+    # with each other, but evolve only reads run history and drafts a PR
+    # against a prompt file — it contends with none of that. Sharing the
+    # group would just add collision surface: GitHub allows one running plus
+    # one pending job per group and cancels whatever was queued ahead of it
+    # (observed 2026-07-26, when a manual spec dispatch was cancelled by the
+    # triage cron queueing behind it).
+    #
+    # Keyed by repo AND lane (agent-evolve-<repo>-<lane>), not repo alone: an
+    # earlier draft of this group keyed by repo only, which reproduced the
+    # very eviction it was meant to avoid — a weekly sweep's five matrix legs
+    # all land in one group, so only about two lanes survive and three are
+    # silently dropped. Different lanes touch disjoint prompt files and
+    # disjoint evolve/<lane>-* branches, and both the precheck above and
+    # `run_evolve` (agent_ops#152) already dedupe per lane, so there is
+    # nothing to serialize across lanes — only same-lane runs (e.g. a manual
+    # dispatch racing the weekly sweep for the same lane) need to queue.
+    concurrency:
+      group: agent-evolve-${{ inputs.target_repo }}-${{ inputs.lane }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: write # evolve pushes a branch with the proposed prompt edit
+      issues: write # syncs the human-merge-only label
+      pull-requests: write # opens the draft evolve PR
+    steps:
+      # Idle guard: an evolve PR is already open for this lane → running
+      # again would just no-op after paying for checkout, uv, and the Claude
+      # Code CLI install. `run_evolve` checks this too (agent_ops#152), but
+      # only after all of that has already been spent. Runs in seconds, free.
+      - name: Check for an existing evolve PR
+        id: precheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          TARGET_REPO: ${{ inputs.target_repo }}
+          LANE: ${{ inputs.lane }}
+        run: |
+          COUNT=$(gh pr list --repo "$TARGET_REPO" --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("evolve/" + env.LANE + "-"))] | length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" != "0" ]; then
+            echo "an evolve PR is already open for lane '$LANE' — skipping"
+          fi
+
+      - name: Checkout control repo (CLI + prompts)
+        if: steps.precheck.outputs.count == '0'
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        if: steps.precheck.outputs.count == '0'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Install uv
+        if: steps.precheck.outputs.count == '0'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code CLI
+        if: steps.precheck.outputs.count == '0'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run evolve
+        if: steps.precheck.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          LANE: ${{ inputs.lane }}
+          WINDOW_DAYS: ${{ inputs.window_days }}
+          MIN_RUNS: ${{ inputs.min_runs }}
+        working-directory: agent-ops
+        run: |
+          WINDOW_DAYS="${WINDOW_DAYS:-30}"
+          MIN_RUNS="${MIN_RUNS:-5}"
+          uv run agent evolve "$LANE" -C "$GITHUB_WORKSPACE/target" \
+            --window-days "$WINDOW_DAYS" --min-runs "$MIN_RUNS"
