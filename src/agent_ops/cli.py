@@ -747,6 +747,19 @@ def scout(
 
 
 @app.command()
+def distill(project: ProjectOpt = Path(".")) -> None:
+    """Prune a managed repo's AGENTS.md: cut spent narration, keep durable knowledge."""
+    from agent_ops.workflows.distill import run_distill
+
+    try:
+        cuts = run_distill(project.resolve())
+    except (CommandError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"distilled {len(cuts)} cut(s)" if cuts else "nothing to distill")
+
+
+@app.command()
 def merge(
     pr: Annotated[int, typer.Argument(help="PR number to merge into the working branch")],
     project: ProjectOpt = Path("."),

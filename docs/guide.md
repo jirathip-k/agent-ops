@@ -58,6 +58,9 @@ you'd see it under the repo's **Actions** tab.
 - **Scout** (`agent scout`, run it when the queue is dry) mines the code for
   work worth doing — TODO comments, review threads that said "later", error
   handling gaps — and files a few `backlog` issues, each citing its evidence.
+- **Distill** (`agent distill`, run it once AGENTS.md grows long) cuts spent
+  run-by-run narration from AGENTS.md while leaving the human-authored
+  sections untouched, and opens a PR listing what it pruned.
 - **Spec** (`agent spec <N>`) takes a parked idea, explores the code, and
   writes checklist acceptance criteria — one box per affected screen — as an
   issue comment. You read it and flip the label to `agent-ready`.

@@ -170,6 +170,25 @@ class ReviewConfig(BaseModel):
     max_diff_lines: int = 5000
 
 
+class DistillConfig(BaseModel):
+    """Thresholds for `agent distill`'s AGENTS.md pruning pass."""
+
+    min_lines: int = 200  # below this a run is a no-op — see run_distill
+    # The six template headings (templates/project/AGENTS.md) are
+    # human-authored by construction; anything else was appended by an agent
+    # and is fair game to prune. Override per project if headings were renamed.
+    protected_sections: list[str] = Field(
+        default_factory=lambda: [
+            "What this project is",
+            "Architecture",
+            "Conventions",
+            "Commands",
+            "Danger zones",
+            "Maintaining this file",
+        ]
+    )
+
+
 class ProjectConfig(BaseModel):
     base_branch: str = "main"
     worktree_dir: str = ".worktrees"
@@ -192,6 +211,7 @@ class ProjectConfig(BaseModel):
     model_fallbacks: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
     merge: MergeConfig = Field(default_factory=MergeConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    distill: DistillConfig = Field(default_factory=DistillConfig)
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)

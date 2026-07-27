@@ -20,6 +20,10 @@ the previous stage is boringly reliable.
       `proposed-by-agent` backlog issues (2026-07-24). CI wiring (a scout
       pipeline + stub) is deferred — `.github/workflows/` changes are
       human-reviewed.
+- [x] `agent distill`: prunes a managed repo's AGENTS.md once it grows past
+      `distill.min_lines`, leaving the six human-authored sections untouched,
+      and opens a PR listing what was cut and why (#145). CI wiring is
+      deferred the same way scout's was.
 - [ ] Structured run logs (`.agent-runs/<task-id>.jsonl`): attempts, gate
       results, cost — the audit trail for tuning prompts.
 - [ ] `agent implement --from-plan`: consume an approved plan comment
