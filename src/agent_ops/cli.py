@@ -987,7 +987,16 @@ def init(
     # checkout, would otherwise resolve `remote_slug` to the ENCLOSING repo's
     # `origin` and sync every label there — an unrequested write to a repo
     # nobody named, by the same route `--repo` pinning exists to close off.
-    toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+    try:
+        toplevel = run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=False)
+    except (CommandError, OSError) as exc:
+        # Same fallback shape as the sync_labels guard below: a hung or
+        # missing `git` here must not traceback after scaffolding above has
+        # already written files to disk.
+        _err(f"\ncould not check for an enclosing git repo: {exc}")
+        typer.echo("labels were not synced — run these once you can:")
+        _print_label_commands()
+        return
     if toplevel.returncode == 0 and Path(toplevel.stdout.strip()) != root.resolve():
         typer.echo(
             f"\n{root} is not a git repository root — it is inside "

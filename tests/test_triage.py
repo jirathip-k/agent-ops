@@ -13,26 +13,32 @@ from agent_ops.workflows import triage as triage_module
 from agent_ops.workflows.triage import GATE_LABELS, parse_triage, run_triage
 
 
-def _description_created_in(workflow: str, label: str) -> str:
-    """The `--description` a workflow YAML passes to `gh label create <label>`."""
+def _label_created_in(workflow: str, label: str) -> tuple[str, str]:
+    """The `--color` and `--description` a workflow YAML passes to `gh label
+    create <label>`."""
     text = (PLATFORM_ROOT / ".github" / "workflows" / workflow).read_text()
-    match = re.search(rf'gh label create {label}.*?--description "([^"]+)"', text, re.DOTALL)
-    assert match, f"no `gh label create {label}` with --description found in {workflow}"
-    return match.group(1)
+    match = re.search(
+        rf'gh label create {label}.*?--color (\S+).*?--description "([^"]+)"', text, re.DOTALL
+    )
+    assert match, f"no `gh label create {label}` with --color/--description found in {workflow}"
+    return match.group(1), match.group(2)
 
 
 def test_gate_label_descriptions_match_what_the_workflow_yamls_create() -> None:
     """spec-pipeline.yml / plan-pipeline.yml each create their own gate label
     (so it exists even before `agent init` or groom ever runs), with its own
-    hardcoded `--description --force`. If that text drifts from GATE_LABELS,
-    the two writers fight over the label's description on every run — pinning
-    them here means the next wording tweak can't silently reopen that."""
-    assert GATE_LABELS["spec-requested"].description == _description_created_in(
-        "spec-pipeline.yml", "spec-requested"
-    )
-    assert GATE_LABELS["plan-requested"].description == _description_created_in(
-        "plan-pipeline.yml", "plan-requested"
-    )
+    hardcoded `--color --description --force`. If that text drifts from
+    GATE_LABELS, the two writers fight over the label on every run — pinning
+    both here means the next tweak (wording or color) can't silently reopen
+    that (sync_labels compares color case-insensitively/`#`-stripped, so the
+    color check here mirrors that)."""
+    spec_color, spec_description = _label_created_in("spec-pipeline.yml", "spec-requested")
+    assert GATE_LABELS["spec-requested"].description == spec_description
+    assert GATE_LABELS["spec-requested"].color.lstrip("#").lower() == spec_color.lstrip("#").lower()
+
+    plan_color, plan_description = _label_created_in("plan-pipeline.yml", "plan-requested")
+    assert GATE_LABELS["plan-requested"].description == plan_description
+    assert GATE_LABELS["plan-requested"].color.lstrip("#").lower() == plan_color.lstrip("#").lower()
 
 
 def test_gate_label_descriptions_do_not_attribute_the_request_to_a_human() -> None:

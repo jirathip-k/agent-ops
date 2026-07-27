@@ -1,13 +1,16 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
+import agent_ops.cli as cli_module
 from agent_ops import claims, github
 from agent_ops.cli import app
 from agent_ops.cli import github as cli_github
+from agent_ops.utils import CommandError
 
 runner = CliRunner()
 
@@ -172,6 +175,50 @@ def test_init_falls_back_to_printing_labels_when_gh_is_missing(
 
     assert result.exit_code == 0
     assert "could not sync labels" in result.output
+    assert "gh label create agent-ready" in result.output
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [CommandError("git rev-parse timed out"), FileNotFoundError("git")],
+    ids=["CommandError", "FileNotFoundError"],
+)
+def test_init_falls_back_when_the_enclosing_repo_check_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """`utils.run` raises `CommandError` on timeout regardless of `check`, and
+    `FileNotFoundError` (an OSError) when `git` isn't on PATH — `check=False`
+    on the enclosing-repo guard suppresses neither. That guard runs after all
+    scaffolding writes, so a raise here must fall back the same way the
+    sync_labels guard does, not traceback after onboarding already
+    succeeded (#168)."""
+    _init_repo_with_remote(tmp_path)
+
+    original_run = cli_module.run
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
+        if cmd[:2] == ["git", "rev-parse"]:
+            raise exc
+        return original_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "run", fake_run)
+
+    def fail_sync(project_root: Path, labels: dict, *, repo: str | None = None) -> github.LabelSync:
+        raise AssertionError("sync_labels must not run when the enclosing-repo check raises")
+
+    monkeypatch.setattr(cli_github, "sync_labels", fail_sync)
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".agent" / "config.yaml").exists()
+    assert (tmp_path / "AGENTS.md").exists()
+    claude_md = tmp_path / "CLAUDE.md"
+    assert claude_md.is_symlink()
+    template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    assert template.exists()
+
+    assert "could not check for an enclosing git repo" in result.output
     assert "gh label create agent-ready" in result.output
 
 

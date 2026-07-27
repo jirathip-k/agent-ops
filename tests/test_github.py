@@ -392,3 +392,23 @@ def test_sync_labels_raises_when_label_list_fails(
 
     with pytest.raises(CommandError, match="Bad credentials"):
         github.sync_labels(tmp_path, {"agent-ready": github.Label("1d76db")})
+
+
+def test_sync_labels_raises_command_error_when_label_list_is_not_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gh label list` can exit 0 with non-JSON stdout (e.g. a stale `gh`
+    login/setup notice). `json.JSONDecodeError` is a `ValueError`, which none
+    of sync_labels' four callers catch — so this must surface as the same
+    `CommandError` the returncode-!=-0 branch above raises, not a bare
+    ValueError, or a completed triage/groom/scout run crashes at this step."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "label", "list"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="Welcome to gh!\n", stderr="")
+        raise AssertionError(f"unexpected call: {cmd}")
+
+    monkeypatch.setattr(github, "run", fake_run)
+
+    with pytest.raises(CommandError, match="could not parse"):
+        github.sync_labels(tmp_path, {"agent-ready": github.Label("1d76db")})
