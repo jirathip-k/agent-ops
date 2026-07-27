@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 from agent_ops import stubs
 from agent_ops.stubs import CallerDrift, caller_drift, known_lanes, lane_caller_drift
 
@@ -518,3 +520,28 @@ def test_yaml_stubs_are_discovered_too(tmp_path: Path, monkeypatch) -> None:
 
     assert known_lanes() == ["audit"]
     assert stubs.stub_for("audit").name == "managed-repo-audit.yaml"
+
+
+def _stub_crons(lane: str) -> list[str]:
+    parsed = yaml.safe_load(stubs.stub_for(lane).read_text())
+    # PyYAML (YAML 1.1) reads the bare `on:` key as the boolean True, not the
+    # string "on" — a well-known GitHub Actions/PyYAML gotcha.
+    schedule = parsed[True]["schedule"]
+    return [entry["cron"] for entry in schedule]
+
+
+def test_spec_and_plan_stubs_ship_a_nightly_cron() -> None:
+    """#165: groom applies spec-requested/plan-requested labels on a nightly cron
+
+    (`managed-repo-groom.yml`), but the stock spec/plan stubs were
+    dispatch-only, so a stub-onboarded repo requested specs/plans nightly with
+    nothing to service them. Both lanes now ship a schedule, staggered so plan
+    never overlaps spec (they share the agent-triage-<repo> concurrency
+    group).
+    """
+    spec_crons = _stub_crons("spec")
+    plan_crons = _stub_crons("plan")
+
+    assert spec_crons == ["0 19 * * *"]
+    assert plan_crons == ["20 19 * * *"]
+    assert spec_crons != plan_crons
