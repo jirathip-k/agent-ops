@@ -172,10 +172,15 @@ agent claim 123             # an agent you started by hand is working on this
 agent claim 123 --release   # ...and is done
 ```
 
-- **An agent started by hand claims nothing.** No agent-ops command runs in that
-  path, so nothing can claim for it — run `agent claim` from the worktree. `agent
-  doctor` reports any `fix/issue-N` worktree on this machine whose issue is
-  unclaimed, so forgetting is visible rather than silent.
+- **A Claude Code session started by hand now claims itself.** `agent init`
+  seeds a checked-in `SessionStart` hook that runs `agent claim --auto`,
+  deriving the issue from the `fix/issue-N` branch — so the claim happens as a
+  side effect of the session starting, not a separate command to remember
+  (ADR 0006). It falls back to today's manual path — `agent claim` from the
+  worktree — wherever the hook can't run: a declined approval, a non-Claude
+  runtime, or a repo that hasn't picked up the seeded file yet. `agent doctor`
+  still reports any `fix/issue-N` worktree on this machine whose issue is
+  unclaimed, so a gap in either path is visible rather than silent.
 - **A claim expires.** A run killed outright leaves the label behind; the CI lane
   clears any claim older than 8 hours and says so, and `agent doctor` reports
   stale claims (and failed releases) well before that. See
@@ -345,6 +350,24 @@ audit issues) across repos registered in `config/repos.yml`. Check its run
 summaries and `needs-human` labels once a day; that's your ops inbox. It
 skips issues that already have an open PR, the symmetric half of the local
 lane's guard above, so the two lanes never fix the same issue twice.
+
+The CI-lane implementer has two escalation channels, and they are not
+interchangeable. `ESCALATE:` halts the run: the plan proved unworkable or a
+gate couldn't be verified, and it lands as a `needs-human` label in the ops
+inbox above. A PR-body `@`-mention is notify-don't-halt: the implementer
+proceeded through an AGENTS.md/CLAUDE.md danger zone under authorization
+already on record as an issue comment, and mentions the *author of that
+comment* — never a repo owner or a guessed handle, since this pipeline runs
+against every managed repo and `config/repos.yml` keeps no ownership
+registry to guess from. The mention always sits next to a link to the
+comment it came from; it surfaces the deviation, it does not block on it.
+Without recorded authorization, the implementer escalates instead of
+mentioning and proceeding. The local lane composes its PR body in code
+(`src/agent_ops/workflows/implement.py`) and never emits free-text mentions,
+so this convention applies to the CI lane's PR body only — it does not reach
+issue comments posted by triage, groom, or review, which carry no such rule
+yet. Like any prose convention with no gate behind it, it holds only as long
+as review keeps reading for it.
 
 ## Preview-environment standard (deployed frontends)
 
