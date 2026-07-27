@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from agent_ops import __version__, claims, github, messages, registry, stubs, surfaces, worktree
+from agent_ops import (
+    __version__,
+    claims,
+    github,
+    messages,
+    prompts,
+    registry,
+    stubs,
+    surfaces,
+    worktree,
+)
 from agent_ops.config import (
     PROJECT_CONFIG_REL,
     ProjectConfig,
@@ -744,6 +755,66 @@ def scout(
         _err(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"filed {len(results)} issue(s)" if results else "nothing filed")
+
+
+@app.command()
+def evolve(
+    lane: Annotated[str, typer.Argument(help="Lane to survey, e.g. spec, triage, implement")],
+    project: ProjectOpt = Path("."),
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Gather and print the evidence only; spawns no agent"),
+    ] = False,
+    window_days: Annotated[
+        int, typer.Option("--window-days", help="How many days of history to survey")
+    ] = 30,
+    min_runs: Annotated[
+        int,
+        typer.Option("--min-runs", help="Minimum runs in the window before a baseline is shown"),
+    ] = 5,
+) -> None:
+    """Survey a lane's recent run history — the evidence layer for the evolve pass (#151).
+
+    Deterministic and read-only: no agent is spawned on any path. The prompt
+    and verdict that would act on this evidence are #152/#153.
+    """
+    from agent_ops import status
+    from agent_ops.workflows.evolve import baseline, gather, render_baseline, render_survey
+
+    names = sorted(set(prompts.task_names()) | set(status.LANES))
+    if lane not in names:
+        _err(f"unknown lane {lane!r} — expected one of: {', '.join(names)}")
+        raise typer.Exit(1)
+    if not dry_run:
+        _err(
+            "agent evolve only gathers evidence for now — the prompt/verdict/PR pass "
+            "lands in #152; pass --dry-run to see the survey"
+        )
+        raise typer.Exit(1)
+
+    root = project.resolve()
+    try:
+        rows, notes = gather(root, lane, now=datetime.now(UTC), window_days=window_days)
+    except CommandError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    for note in notes:
+        typer.echo(f"note: {note}")
+
+    typer.echo(render_survey(rows))
+
+    b = baseline(rows, lane=lane, window_days=window_days)
+    if b.runs < min_runs:
+        typer.echo()
+        typer.echo(
+            f"only {b.runs} run(s) for {lane!r} in the last {window_days}d "
+            f"(need {min_runs}) — not enough evidence for a baseline"
+        )
+        return
+
+    typer.echo()
+    typer.echo(render_baseline(b))
 
 
 @app.command()

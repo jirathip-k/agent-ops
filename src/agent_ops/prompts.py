@@ -33,6 +33,11 @@ def render_task(name: str, **fields: str) -> str:
     return template.format(**fields)
 
 
+def task_names() -> list[str]:
+    """Every lane with a prompts/tasks/<name>.md template, sorted."""
+    return sorted(path.stem for path in TASKS_DIR.glob("*.md"))
+
+
 def _tail_after_sentinel(text: str) -> str | None:
     """What follows a leading sentinel word on the first non-empty line, or None.
 

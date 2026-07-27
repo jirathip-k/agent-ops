@@ -226,6 +226,17 @@ def _drift_in(
     )
 
 
+def caller_workflows(root: Path, lane: str) -> list[Path]:
+    """Every workflow file in `root` that calls this lane's reusable pipeline.
+
+    Public wrapper over `_caller_files`, for callers outside the drift check
+    that need to point `gh run list --workflow` at the right file (e.g.
+    `evolve`, which has no other way to name a lane's CI workflow — caller
+    filenames vary per repo).
+    """
+    return _caller_files(root, _pipeline_pattern(lane))
+
+
 def lane_caller_drift(root: Path, lane: str) -> CallerDrift | None:
     """Structural drift in the repo's caller for one lane vs. that lane's stub.
 
@@ -236,7 +247,7 @@ def lane_caller_drift(root: Path, lane: str) -> CallerDrift | None:
     """
     pattern = _pipeline_pattern(lane)
     in_sync: CallerDrift | None = None
-    for caller_path in _caller_files(root, pattern):
+    for caller_path in caller_workflows(root, lane):
         drift = _drift_in(caller_path, root, lane, pattern)
         if drift is None:
             continue
