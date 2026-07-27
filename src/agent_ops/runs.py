@@ -710,8 +710,22 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
         trustworthy = False
     for wt in worktrees:
         match = _BRANCH_RE.match(wt.branch)
-        if match is not None:
-            worktree_by_issue[int(match.group(1))] = wt.path
+        if match is None:
+            continue
+        # `git worktree list` is a registry, not a filesystem check: something
+        # can `rm -rf` a worktree's directory (an external cleanup, a
+        # container hiccup, a surface that deletes it as a side effect —
+        # issue #201's own repro) without ever deregistering it, and git keeps
+        # reporting the dead path as though nothing happened. Believing the
+        # registry there would take the pre-existing `worktree_path is not
+        # None` branch below and hide a dead dispatch behind the ordinary
+        # "worktree kept, no PR, no feedback" message. Requiring `is_dir()`
+        # here makes a vanished worktree indistinguishable from one that was
+        # never created, so it falls through to the `has_spawn_record`
+        # dead-dispatch branch (or "nothing at all") the same way.
+        if not wt.path.is_dir():
+            continue
+        worktree_by_issue[int(match.group(1))] = wt.path
 
     runs_dir = project_root / ".agent-runs"
     run_files = list(runs_dir.iterdir()) if runs_dir.is_dir() else []

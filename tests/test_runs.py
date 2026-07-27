@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from typer.testing import CliRunner
 
 from agent_ops import github, messages, orca, runs, worktree
 from agent_ops.cli import app
-from agent_ops.utils import CommandError
+from agent_ops.utils import CommandError, run
 
 cli_runner = CliRunner()
 
@@ -348,6 +349,10 @@ def test_discover_runs_unions_sources_dedupes_and_sorts(
     (tmp_path / ".agent-runs").mkdir()
     (tmp_path / ".agent-runs" / "issue-73-feedback.md").write_text("findings")
     (tmp_path / ".agent-runs" / "agent-issue-35.log").write_text("log")
+    # #77 is registered *and* on disk — it is the only candidate source it has,
+    # and it is reported live below, which would be inconsistent with a
+    # deleted worktree.
+    (tmp_path / ".worktrees" / "issue-77").mkdir(parents=True)
 
     monkeypatch.setattr(
         runs.worktree,
@@ -373,6 +378,7 @@ def test_discover_runs_unions_sources_dedupes_and_sorts(
 def test_discover_runs_empty_agent_runs_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -390,6 +396,7 @@ def test_discover_runs_empty_agent_runs_dir(
 def test_discover_runs_pr_lookup_failure_still_yields_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -539,6 +546,7 @@ def test_discover_runs_spawn_record_does_not_change_a_row_with_a_live_worktree(
 ) -> None:
     """Unchanged existing row shape: a spawn record alongside a worktree that
     actually exists must not steal the "worktree kept" row's detail."""
+    (tmp_path / ".worktrees" / "issue-204").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -553,6 +561,41 @@ def test_discover_runs_spawn_record_does_not_change_a_row_with_a_live_worktree(
     result, trustworthy = runs.discover_runs(tmp_path)
 
     assert result == [runs.Run(204, "stopped", STOPPED_DETAIL)]
+
+
+def test_discover_runs_treats_a_registered_but_deleted_worktree_as_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #201's actual repro, against real git rather than a monkeypatched
+    `list_worktrees`: something removes a worktree's directory (`rm -rf`, a
+    container hiccup, a surface that deletes it as a side effect of a failed
+    attach) without ever running `git worktree remove`. `git worktree list
+    --porcelain` keeps reporting the dead path, and `discover_runs` must not
+    believe it — it has to fall through to the dedicated dead-dispatch row
+    instead of the ordinary "worktree kept" one."""
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+    run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path)
+    run(["git", "config", "user.name", "test"], cwd=tmp_path)
+    (tmp_path / "README.md").write_text("hello\n")
+    run(["git", "add", "."], cwd=tmp_path)
+    run(["git", "commit", "-m", "init"], cwd=tmp_path)
+    wt_path = worktree.create(tmp_path, ".worktrees", "issue-201", "fix/issue-201", "main")
+    shutil.rmtree(wt_path)  # deletes the directory WITHOUT `git worktree remove`
+    # Confirms the premise: git's own registry still has it.
+    assert any(wt.branch == "fix/issue-201" for wt in worktree.list_worktrees(tmp_path))
+
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "")
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+    messages.record_spawn(
+        tmp_path, 201, surface="orca", handle="term_abc", kind=messages.DISPATCH_KIND
+    )
+
+    result, trustworthy = runs.discover_runs(tmp_path, log=lambda _: None)
+
+    assert [(r.issue, r.state) for r in result] == [(201, "stopped")]
+    assert "no worktree" in result[0].detail
+    assert result[0].detail != STOPPED_DETAIL
+    assert trustworthy is True
 
 
 def test_discover_runs_outcome_record_beats_stale_feedback_file(
@@ -735,6 +778,7 @@ def test_report_runs_prints_no_runs_found(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_report_runs_formats_each_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -749,6 +793,7 @@ def test_report_runs_formats_each_state(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_cli_runs_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -1054,6 +1099,7 @@ def test_wait_for_runs_worktree_listing_failure_mid_wait_recovers(
     """A single bad `git worktree list` mid-wait must not crash the wait, nor
     mark the run `gone`: the previous state carries forward until a
     trustworthy poll confirms the real outcome."""
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     wt_calls = {"n": 0}
 
     def list_worktrees(root: Path) -> list[worktree.Worktree]:
@@ -1249,6 +1295,7 @@ def test_cli_runs_wait_finishes_once_stopped_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`stopped` held across two polls (nothing on disk changes) exits 0."""
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
@@ -1268,6 +1315,7 @@ def test_cli_runs_wait_finishes_once_stopped_holds(
 def test_cli_runs_wait_timeout_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / ".worktrees" / "issue-68").mkdir(parents=True)  # registered *and* on disk
     monkeypatch.setattr(
         runs.worktree,
         "list_worktrees",
