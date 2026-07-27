@@ -1,10 +1,11 @@
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import github
+from agent_ops import claims, github
 from agent_ops.cli import app
 from agent_ops.cli import github as cli_github
 
@@ -39,6 +40,10 @@ def test_init_scaffolds_project(tmp_path: Path) -> None:
 
     template = tmp_path / ".github" / "ISSUE_TEMPLATE" / "task.md"
     assert "Acceptance criteria" in template.read_text()
+
+    settings = tmp_path / claims.CLAIM_SETTINGS_REL
+    (matcher,) = json.loads(settings.read_text())["hooks"]["SessionStart"]
+    assert matcher["hooks"][0]["command"] == claims.CLAIM_HOOK_COMMAND
 
     # no `origin` remote in a bare tmp_path — labels can't be synced, so
     # onboarding falls back to naming them instead
@@ -211,3 +216,7 @@ def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     template.write_text("custom\n")
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     assert template.read_text() == "custom\n"
+
+    # claim hook not duplicated
+    settings = tmp_path / claims.CLAIM_SETTINGS_REL
+    assert len(json.loads(settings.read_text())["hooks"]["SessionStart"]) == 1

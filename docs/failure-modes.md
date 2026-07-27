@@ -180,16 +180,20 @@ The eight hours between a crash and the TTL are real blocked time, and nothing
 shortens them for an operator who never runs `doctor`. That is the cost, stated
 rather than discounted.
 
-**A hand-started agent still claims nothing.** `agent implement`, `agent resume`
-and `agent spawn` claim on their own; an agent started by hand in a worktree —
-how most of this repo's own work happens, including #126 — runs no agent-ops
-command at all, so nothing can claim on its behalf. `agent claim <N>` covers it
-only if somebody remembers. What keeps that from being silent is the inverse
-check: `agent doctor` reports a `fix/issue-N` worktree on this machine whose
-issue carries no claim, which is exactly the #126 shape. It is a report, not a
-guard — the collision it describes is still possible, and the honest summary is
-that this closes the lanes the platform dispatches and only *surfaces* the one it
-does not.
+**A hand-started agent now claims itself, if it can.** `agent implement`, `agent
+resume` and `agent spawn` claim on their own; an agent started by hand in a
+worktree — how most of this repo's own work happens, including #126 and later
+sendmeter #269 — runs no agent-ops command at all, so nothing used to claim on
+its behalf. `agent init` now seeds a checked-in `SessionStart` hook that runs
+`agent claim --auto`, deriving the issue from the `fix/issue-N` branch, so the
+claim is a consequence of the session starting rather than a second command
+somebody has to remember (ADR 0006). It degrades exactly to the old behavior
+whenever it can't run: a declined hook, a non-Claude runtime, a repo that hasn't
+re-run `init`, or a branch the convention doesn't match. `agent claim <N>` by
+hand, and the inverse check — `agent doctor` reporting a `fix/issue-N` worktree
+on this machine whose issue carries no claim — are what's left for those cases.
+That report is still just a report, not a guard: the collision it describes
+remains possible wherever the hook doesn't run.
 
 **`agent doctor` cannot tell a foreign claim from a dead one.** A claim held by
 another machine looks identical to one whose run died: no local worktree, no

@@ -159,6 +159,60 @@ def test_claim_object_release_keeps_the_claim_when_gh_fails(
     assert claim.taken is True
 
 
+# --- the seeded session-start claim hook ------------------------------------
+
+
+def test_seed_claim_hook_writes_a_fresh_settings_file(tmp_path: Path) -> None:
+    written = claims.seed_claim_hook(tmp_path)
+
+    assert written is not None
+    assert written == tmp_path / claims.CLAIM_SETTINGS_REL
+    data = json.loads(written.read_text())
+    (matcher,) = data["hooks"]["SessionStart"]
+    assert matcher["hooks"] == [
+        {
+            "type": "command",
+            "command": claims.CLAIM_HOOK_COMMAND,
+            "timeout": claims.CLAIM_HOOK_TIMEOUT_S,
+        }
+    ]
+
+
+def test_seed_claim_hook_merges_into_settings_a_repo_already_had(tmp_path: Path) -> None:
+    settings = tmp_path / claims.CLAIM_SETTINGS_REL
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": "mine"}]}]}}))
+
+    assert claims.seed_claim_hook(tmp_path) == settings
+
+    data = json.loads(settings.read_text())
+    assert [e["hooks"][0]["command"] for e in data["hooks"]["SessionStart"]] == [
+        "mine",
+        claims.CLAIM_HOOK_COMMAND,
+    ]
+
+
+def test_seed_claim_hook_never_adds_the_same_hook_twice(tmp_path: Path) -> None:
+    claims.seed_claim_hook(tmp_path)
+    claims.seed_claim_hook(tmp_path)
+
+    data = json.loads((tmp_path / claims.CLAIM_SETTINGS_REL).read_text())
+    assert len(data["hooks"]["SessionStart"]) == 1
+
+
+def test_seed_claim_hook_leaves_a_settings_file_it_cannot_parse_alone(tmp_path: Path) -> None:
+    settings = tmp_path / claims.CLAIM_SETTINGS_REL
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{not json")
+    logged: list[str] = []
+
+    seeded = claims.seed_claim_hook(tmp_path, log=logged.append)
+
+    assert seeded is None
+    assert settings.read_text() == "{not json"
+    assert any("could not read" in line for line in logged)
+
+
 # --- reading the claim's age off GitHub ------------------------------------
 
 
@@ -491,7 +545,7 @@ def test_agent_claim_exits_nonzero_when_the_claim_did_not_land(
     assert result.exit_code == 1
 
 
-# --- lane wiring: who claims, and every way a claim is given back ----------
+# --- agent claim --auto (the seeded hook's own entry point) ----------------
 
 
 @pytest.fixture
@@ -503,6 +557,69 @@ def git_repo(tmp_path: Path) -> Path:
     utils_run(["git", "add", "."], cwd=tmp_path)
     utils_run(["git", "commit", "-m", "init"], cwd=tmp_path)
     return tmp_path
+
+
+def test_agent_claim_auto_derives_the_issue_from_the_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    utils_run(["git", "checkout", "-b", "fix/issue-178"], cwd=git_repo)
+    taken: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        cli.claims, "claim", lambda root, issue, **kw: taken.append(("claim", issue)) or True
+    )
+
+    result = runner.invoke(cli.app, ["claim", "--auto", "--project", str(git_repo)])
+
+    assert result.exit_code == 0
+    assert taken == [("claim", 178)]
+
+
+def test_agent_claim_auto_is_a_silent_no_op_off_a_non_issue_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`main` — or any branch that isn't `fix/issue-N` — must never call `gh`;
+    the hook runs on every session start, including ones with nothing to
+    claim."""
+    called: list[int] = []
+    monkeypatch.setattr(cli.claims, "claim", lambda root, issue, **kw: called.append(issue) or True)
+
+    result = runner.invoke(cli.app, ["claim", "--auto", "--project", str(git_repo)])
+
+    assert result.exit_code == 0
+    assert called == []
+    assert result.output == ""
+
+
+def test_agent_claim_auto_is_silent_when_the_claim_itself_fails(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` failure under --auto is the hook's ordinary "nothing to tell
+    anyone" case, not a fresh error — spamming every session start over a
+    flaky API call would be worse than the silent gap this replaces."""
+    utils_run(["git", "checkout", "-b", "fix/issue-178"], cwd=git_repo)
+    monkeypatch.setattr(cli.claims, "claim", lambda root, issue, **kw: False)
+
+    result = runner.invoke(cli.app, ["claim", "--auto", "--project", str(git_repo)])
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_agent_claim_requires_an_issue_without_auto(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["claim", "--project", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "issue number required" in result.output
+
+
+def test_agent_claim_auto_rejects_an_explicit_issue(git_repo: Path) -> None:
+    result = runner.invoke(cli.app, ["claim", "131", "--auto", "--project", str(git_repo)])
+
+    assert result.exit_code == 1
+    assert "do not pass one" in result.output
+
+
+# --- lane wiring: who claims, and every way a claim is given back ----------
 
 
 class _Ledger:

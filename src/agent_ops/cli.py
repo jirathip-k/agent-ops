@@ -29,6 +29,7 @@ from agent_ops.config import (
 )
 from agent_ops.fallback import artifact_footer
 from agent_ops.github import Label
+from agent_ops.runs import issue_from_branch
 from agent_ops.runtimes import get_runtime, runtime_names
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
@@ -468,39 +469,84 @@ def report(
         _err(f"could not report #{issue}: {exc}")
 
 
+def _current_branch_issue(root: Path) -> int | None:
+    """The issue number for `root`'s current branch, or None off an attached
+    HEAD that isn't a `fix/issue-N` branch, a detached HEAD, or missing `git`."""
+    try:
+        head = run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root, check=False)
+    except (CommandError, OSError):
+        return None
+    if head.returncode != 0:
+        return None
+    return issue_from_branch(head.stdout.strip())
+
+
 @app.command()
 def claim(
-    issue: Annotated[int, typer.Argument(help="GitHub issue number to claim")],
+    issue: Annotated[
+        int | None, typer.Argument(help="GitHub issue number to claim (omit with --auto)")
+    ] = None,
     project: ProjectOpt = Path("."),
     release: Annotated[
         bool, typer.Option("--release", help="Clear the claim instead of taking it")
+    ] = False,
+    auto: Annotated[
+        bool,
+        typer.Option(
+            "--auto",
+            help="Derive the issue from the current fix/issue-N branch; silent no-op otherwise",
+        ),
     ] = False,
 ) -> None:
     """Say an agent is working on this issue right now, so other lanes skip it.
 
     `agent implement`, `agent resume` and `agent spawn` claim and release on
-    their own — this is the manual path, and it exists for the one case they
-    cannot cover: an agent started by hand in a worktree, which is how most of
-    this platform's own work happens. No agent-ops command runs there, so
-    nothing can claim on its behalf; run this from the worktree instead, and
-    `--release` when you are done.
+    their own, and a Claude Code session started by hand in a worktree now
+    claims itself too — `agent init` seeds a `SessionStart` hook that runs
+    `agent claim --auto`, deriving the issue from the branch name. This is
+    what is left for everything that hook does not cover: a non-Claude
+    runtime, a hook a user declined, or claiming/releasing by hand.
+
+    `--auto` is the hook's own entry point, not a human one: it exits 0
+    whenever there is nothing to claim (branch does not name an issue, `gh`
+    fails, no `origin` remote) rather than erroring, because a hook has no one
+    to show an error to.
 
     A claim is not permanent. The CI lane treats one older than the TTL as the
-    residue of a dead run and clears it, and `agent doctor` reports stale claims
-    long before that.
+    residue of a dead run and clears it, and `agent doctor` reports stale
+    claims — and issues worked locally with no claim at all — long before
+    that.
     """
     root = project.resolve()
+    if auto:
+        if issue is not None:
+            _err("`--auto` derives the issue itself; do not pass one")
+            raise typer.Exit(1)
+        issue = _current_branch_issue(root)
+        if issue is None:
+            raise typer.Exit(0)
+    elif issue is None:
+        _err("issue number required (or pass --auto to derive it from the branch)")
+        raise typer.Exit(1)
+
+    # Under --auto this is a hook nobody is watching: a `gh` failure or a
+    # missing `origin` remote is exactly the "nothing to claim" case above,
+    # not a fresh error to surface.
+    hook_log = (lambda _msg: None) if auto else _err
+
     if release:
-        ok = claims.release(root, issue, log=_err)
-        typer.echo(f"released the claim on #{issue}" if ok else f"#{issue} was not released")
+        ok = claims.release(root, issue, log=hook_log)
+        if not auto:
+            typer.echo(f"released the claim on #{issue}" if ok else f"#{issue} was not released")
     else:
-        ok = claims.claim(root, issue, log=_err)
-        typer.echo(
-            f"claimed #{issue} — release it with `agent claim {issue} --release`"
-            if ok
-            else f"#{issue} was not claimed"
-        )
-    raise typer.Exit(0 if ok else 1)
+        ok = claims.claim(root, issue, log=hook_log)
+        if not auto:
+            typer.echo(
+                f"claimed #{issue} — release it with `agent claim {issue} --release`"
+                if ok
+                else f"#{issue} was not claimed"
+            )
+    raise typer.Exit(0 if (ok or auto) else 1)
 
 
 @app.command()
@@ -877,7 +923,7 @@ def init(
         ),
     ] = False,
 ) -> None:
-    """Scaffold .agent/config.yaml, AGENTS.md, and a CLAUDE.md link into a project repo."""
+    """Scaffold .agent/config.yaml, AGENTS.md, a CLAUDE.md link, and a claim-on-start hook."""
     root = project.resolve()
     templates = PLATFORM_ROOT / "templates" / "project"
 
@@ -915,6 +961,13 @@ def init(
         template_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(templates / "issue-template-task.md", template_dst)
         typer.echo(f"wrote {template_dst}")
+
+    # Claude Code only, and best-effort: a session started by hand is the one
+    # case no agent-ops command runs to claim on its behalf (issue #178), and
+    # this is what fills that gap without a separate remembered step.
+    hook_dst = claims.seed_claim_hook(root, log=_err)
+    if hook_dst is not None:
+        typer.echo(f"wrote {hook_dst} (claims the issue on session start)")
 
     gitignore = root / ".gitignore"
     for marker in _missing_gitignore_markers(root):
