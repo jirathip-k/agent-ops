@@ -42,20 +42,55 @@ on:
         type: string
 
 jobs:
+  # The lane filter has to live here rather than in a job-level `if:` on
+  # `evolve` below. A job `if:` is evaluated before the matrix expands, so
+  # `matrix` is not in scope in one — and referencing it there does not merely
+  # evaluate false, it makes the whole file unparseable. That is #213: from
+  # a2eb196 onward every push to any branch filed a startup-failure run named
+  # after the file path (no `name:` could be read, no job was ever allocated),
+  # and the Sunday cron this caller exists for never ran once. Selecting the
+  # lanes up front keeps the matrix exactly what should run, so nothing needs
+  # to be filtered after expansion.
+  #
+  # `promote` is deliberately absent from the list: it is a plain CLI command
+  # with no `prompts/tasks/promote.md` to evolve, so `agent evolve promote`
+  # fails by design (#153). Rejecting it here with a named error beats
+  # dispatching a run that fails three steps later for a reason the log makes
+  # you dig for.
+  lanes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lanes: ${{ steps.select.outputs.lanes }}
+    steps:
+      - id: select
+        # `inputs` is empty on the scheduled trigger, which is the same shape
+        # as a dispatch that left `lane` blank — both mean "sweep everything".
+        env:
+          LANE: ${{ inputs.lane }}
+        run: |
+          all='["triage","groom","spec","plan","scout"]'
+          if [ -z "$LANE" ]; then
+            echo "lanes=$all" >>"$GITHUB_OUTPUT"
+          elif printf '%s' "$all" | grep -q "\"$LANE\""; then
+            echo "lanes=[\"$LANE\"]" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error::unknown lane '$LANE' — expected one of $all"
+            exit 1
+          fi
+
   evolve:
+    needs: lanes
     strategy:
       fail-fast: false
       matrix:
-        lane: [triage, groom, spec, plan, scout]
+        lane: ${{ fromJSON(needs.lanes.outputs.lanes) }}
     # The caller must grant everything the pipeline requests — a called
     # workflow cannot exceed the caller's token.
     permissions:
       contents: write
       issues: write
       pull-requests: write
-    # Manual dispatch with a `lane` input runs only that lane; the scheduled
-    # trigger (and a manual dispatch with no `lane`) sweeps the full matrix.
-    if: github.event_name != 'workflow_dispatch' || inputs.lane == '' || inputs.lane == matrix.lane
     uses: jirathip-k/agent-ops/.github/workflows/evolve-pipeline.yml@main
     with:
       target_repo: ${{ github.repository }}
