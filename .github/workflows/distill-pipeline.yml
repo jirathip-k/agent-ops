@@ -1,0 +1,132 @@
+# Reusable distill pipeline workflow.
+# Runs the real `agent distill` CLI against a managed repo — the same code
+# path as local distilling, so pruning verdicts can't drift between lanes.
+# Managed repos call this via workflow_call (see
+# stubs/managed-repo-distill.yml).
+#
+# Dispatch-only, deliberately (owner decision, #198): unlike every other
+# lane, this one ships with no cron. Two reasons: distill deletes content
+# and its protection is a fixed list (`DistillConfig.protected_sections`) a
+# human can silently fall out of sync with by adding a heading, and it has
+# no evidence gate the way evolve waits on `--min-runs` — its only trigger
+# is "the file got long", which says nothing about whether it should be
+# shortened. A schedule can be added later; a pruned section a human wrote
+# cannot be un-pruned.
+
+name: Reusable · Distill Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo whose AGENTS.md to distill"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo whose AGENTS.md to distill"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  distill:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    # Distill's own group, not the shared triage one: it never touches
+    # issues or labels, so it can't collide with triage/groom/spec/plan/scout.
+    # This only stops two dispatched runs from racing on the same repo's
+    # stale-PR check (run_distill already refuses to stack a second distill
+    # PR on an open one, but that check itself isn't safe run concurrently).
+    concurrency:
+      group: agent-distill-${{ inputs.target_repo }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: write # push the distill branch
+      pull-requests: write # open the distill PR
+    steps:
+      - name: Checkout control repo (CLI + prompts)
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      # Idle guard: below min_lines, distill is a no-op (run_distill's own
+      # first check) — read that cheaply here too so a short AGENTS.md skips
+      # installing uv and the Claude Code CLI, not just the agent session.
+      # min_lines defaults to 200 (config.DistillConfig); read a project
+      # override the same coarse way promote-pipeline.yml reads base_branch,
+      # rather than parsing YAML properly for a pre-filter this cheap.
+      - name: Check AGENTS.md needs distilling
+        id: precheck
+        run: |
+          if [ ! -f target/AGENTS.md ]; then
+            echo "applies=no" >> "$GITHUB_OUTPUT"
+            echo "no AGENTS.md in target repo — nothing to distill"
+            exit 0
+          fi
+          MIN_LINES=$(sed -n 's/^[[:space:]]*min_lines:[[:space:]]*\([0-9]*\).*/\1/p' \
+            target/.agent/config.yaml 2>/dev/null | head -1)
+          MIN_LINES="${MIN_LINES:-200}"
+          # grep -c '', not wc -l: run_distill counts with Python's
+          # str.splitlines(), which counts a final line even without a
+          # trailing newline. wc -l counts newline chars, so on a file
+          # missing a trailing newline it undercounts by one — right at
+          # min_lines that skipped a run the CLI itself would have made.
+          LINES=$(grep -c '' target/AGENTS.md | tr -d ' ')
+          if [ "$LINES" -ge "$MIN_LINES" ]; then
+            echo "applies=yes" >> "$GITHUB_OUTPUT"
+            echo "AGENTS.md is $LINES lines (>= $MIN_LINES) — distilling"
+          else
+            echo "applies=no" >> "$GITHUB_OUTPUT"
+            echo "AGENTS.md is $LINES lines (< $MIN_LINES) — nothing to distill"
+          fi
+
+      - name: Install uv
+        if: steps.precheck.outputs.applies == 'yes'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code CLI
+        if: steps.precheck.outputs.applies == 'yes'
+        run: npm install -g @anthropic-ai/claude-code
+
+      # run_distill commits with plain git; GitHub-hosted runners set neither
+      # user.name nor user.email, so without this the run pays for the full
+      # planner session and then dies at "git commit" with "unable to
+      # auto-detect email address" (#198 review).
+      - name: Configure git identity
+        if: steps.precheck.outputs.applies == 'yes'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run distill
+        if: steps.precheck.outputs.applies == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        working-directory: agent-ops
+        run: uv run agent distill -C "$GITHUB_WORKSPACE/target"

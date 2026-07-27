@@ -14,7 +14,13 @@ from agent_ops.utils import CommandError, run
 
 BUCKETS = ("agent-ready", "needs-human", "backlog")
 
-LANES = ("triage", "groom", "promote", "spec", "plan", "scout")
+# evolve and distill are lanes (agent evolve/distill validate against this
+# tuple) but neither has a CI caller here: evolve's cadence is #153, and
+# distill is dispatch-only by deliberate decision (#198) — it never gets a
+# stub with a `schedule:`. Both are still listed so `agent status` and lane
+# validation treat them as real lanes rather than accidentally-valid names
+# that merely happen to have a prompt file.
+LANES = ("triage", "groom", "promote", "spec", "plan", "scout", "evolve", "distill")
 
 # Name of the control repo hosting the reusable pipelines. Detection accepts
 # any owner prefix (`<owner>/agent-ops/...`) so forks keep working, plus the

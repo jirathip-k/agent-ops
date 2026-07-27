@@ -177,3 +177,24 @@ convergence work. Tracked as a follow-up rather than folded into this file.
 promotion PR through the same code path. It is not in the table above because
 the issue that requested this page scoped it to the eight lanes with a
 CI-prompt divergence risk; `promote` never had one.
+
+## Footnote: a tenth lane, dispatch-only by decision
+
+`distill` also runs on both surfaces through one code path: local `agent
+distill` (`src/agent_ops/cli.py:891`, `distill`) → `run_distill`
+(`src/agent_ops/workflows/distill.py:168`), and CI's
+`uv run agent distill` (`.github/workflows/distill-pipeline.yml:132`) via
+`stubs/managed-repo-distill.yml`. It is not in the table above for the same
+reason `promote` isn't — no CI-prompt divergence risk to track.
+
+Unlike every cron-scheduled lane above, its stub ships `workflow_dispatch`
+only, with no `schedule:`. That is a deliberate decision
+([#198](https://github.com/jirathip-k/agent-ops/issues/198)), not an
+oversight: distill prunes `AGENTS.md` against a fixed allowlist
+(`DistillConfig.protected_sections`) that a human can silently fall out of
+sync with by adding a heading, and it has no evidence gate the way `evolve`
+waits on `--min-runs` — its only trigger, `min_lines`, says nothing about
+whether the file *should* be shortened. A schedule can be added later once a
+few dispatched runs have been watched; a pruned section a human wrote cannot
+be restored by removing one. See #198 before adding a `schedule:` to either
+`distill-pipeline.yml` or its stub.

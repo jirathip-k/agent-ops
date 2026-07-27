@@ -20,6 +20,13 @@ ORCHESTRATOR_LINES = (PLATFORM_ROOT / "prompts" / "orchestrator.md").read_text()
 EVOLVE_PIPELINE_LINES = (
     (PLATFORM_ROOT / ".github" / "workflows" / "evolve-pipeline.yml").read_text().splitlines()
 )
+CLI_LINES = (PLATFORM_ROOT / "src" / "agent_ops" / "cli.py").read_text().splitlines()
+DISTILL_WORKFLOW_LINES = (
+    (PLATFORM_ROOT / "src" / "agent_ops" / "workflows" / "distill.py").read_text().splitlines()
+)
+DISTILL_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "distill-pipeline.yml").read_text().splitlines()
+)
 
 
 def _line(n: int) -> str:
@@ -64,3 +71,18 @@ def test_step2b_reviewer_repair_citation_matches_orchestrator() -> None:
 def test_evolve_pipeline_citation_matches_workflow() -> None:
     assert ".github/workflows/evolve-pipeline.yml:160" in LANES
     assert 'uv run agent evolve "$LANE"' in _evolve_pipeline_line(160)
+
+
+def test_distill_cli_citation_matches_cli() -> None:
+    assert "src/agent_ops/cli.py:891" in LANES
+    assert "def distill(" in CLI_LINES[891 - 1]
+
+
+def test_distill_run_citation_matches_workflow() -> None:
+    assert "src/agent_ops/workflows/distill.py:168" in LANES
+    assert "def run_distill(" in DISTILL_WORKFLOW_LINES[168 - 1]
+
+
+def test_distill_pipeline_citation_matches_pipeline() -> None:
+    assert ".github/workflows/distill-pipeline.yml:132" in LANES
+    assert "uv run agent distill" in DISTILL_PIPELINE_LINES[132 - 1]

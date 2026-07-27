@@ -52,6 +52,23 @@ jobs:
 """
 
 
+IN_SYNC_DISTILL_CALLER = """
+name: Agent Distill
+on:
+  workflow_dispatch: {}
+jobs:
+  distill:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: acme/agent-ops/.github/workflows/distill-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+"""
+
+
 def _triage_drift(root: Path) -> CallerDrift | None:
     """The triage lane on its own — the case most of these tests exercise."""
     return lane_caller_drift(root, "triage")
@@ -460,6 +477,26 @@ def test_groom_caller_missing_a_permission_is_reported(tmp_path: Path) -> None:
     assert drift.permissions == ["issues"]
 
 
+def test_in_sync_distill_caller_has_no_drift(tmp_path: Path) -> None:
+    _write_named(tmp_path, "distill.yml", IN_SYNC_DISTILL_CALLER)
+
+    drift = lane_caller_drift(tmp_path, "distill")
+
+    assert _fields(drift) == ([], [])
+
+
+def test_distill_caller_missing_a_permission_is_reported(tmp_path: Path) -> None:
+    caller = IN_SYNC_DISTILL_CALLER.replace("      pull-requests: write\n", "")
+    _write_named(tmp_path, "distill.yml", caller)
+
+    drift = lane_caller_drift(tmp_path, "distill")
+
+    assert drift is not None
+    assert drift.lane == "distill"
+    assert drift.permissions == ["pull-requests"]
+    assert drift.stub.name == "managed-repo-distill.yml"
+
+
 def test_a_lane_is_compared_only_against_its_own_callers(tmp_path: Path) -> None:
     """A groom caller must not be read as a (drifting) triage caller, or vice versa."""
     _write_named(tmp_path, "groom.yml", IN_SYNC_GROOM_CALLER)
@@ -501,6 +538,7 @@ def test_lanes_are_discovered_from_the_shipped_stubs() -> None:
         "scout",
         "promote",
         "evolve",
+        "distill",
     }
 
 
@@ -553,3 +591,15 @@ def test_spec_and_plan_stubs_ship_a_nightly_cron() -> None:
     assert spec_crons == ["0 19 * * *"]
     assert plan_crons == ["20 19 * * *"]
     assert spec_crons != plan_crons
+
+
+def test_distill_stub_is_dispatch_only_with_no_cron() -> None:
+    """#198: distill ships dispatch-only, deliberately — unlike every other lane,
+    it must never gain a `schedule:` trigger (deletes content against a fixed
+    protected-sections allowlist, with no evidence gate)."""
+    parsed = yaml.safe_load(stubs.stub_for("distill").read_text())
+    # PyYAML (YAML 1.1) reads the bare `on:` key as the boolean True, not the
+    # string "on" — a well-known GitHub Actions/PyYAML gotcha.
+    triggers = parsed[True]
+    assert "schedule" not in triggers
+    assert "workflow_dispatch" in triggers
