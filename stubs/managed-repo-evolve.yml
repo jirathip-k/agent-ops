@@ -1,0 +1,56 @@
+# Copy this file into each managed repo at .github/workflows/evolve.yml
+# Replace YOUR-USERNAME with your GitHub username/org.
+#
+# Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
+# and workflow-reuse access on the agent-ops repo.
+#
+# Weekly sweep, one pipeline call per prompt-driven CI lane (triage, groom,
+# spec, plan, scout) via the matrix below — a full weekly run sweeps all five,
+# not a subset. `promote` has no prompts/tasks/promote.md to evolve, so it's
+# deliberately excluded from the matrix. `--min-runs` (default 5) means most
+# weeks most lanes no-op, so this is the sweep's upper bound, not its steady
+# state. Each call gets its own agent-evolve-<repo>-<lane> concurrency group
+# (see evolve-pipeline.yml) — keyed by lane too, not just repo, so this never
+# contends with triage/groom/spec/plan/scout, or with another lane in the
+# same sweep.
+
+name: Agent Evolve
+
+on:
+  schedule:
+    # 09:30 Asia/Bangkok (UTC+7), weekly (Sunday) = 02:30 UTC. Triage ticks
+    # every four hours (0 */4 * * * — 00:00, 04:00, 08:00, ...), so this
+    # lands after groom's 01:00 and the promote stub's 01:30, in the gap
+    # before triage's next tick at 04:00.
+    - cron: '30 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Single lane to evolve (leave blank to sweep every lane)"
+        required: false
+        type: string
+
+jobs:
+  evolve:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [triage, groom, spec, plan, scout]
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    # Manual dispatch with a `lane` input runs only that lane; the scheduled
+    # trigger (and a manual dispatch with no `lane`) sweeps the full matrix.
+    if: github.event_name != 'workflow_dispatch' || inputs.lane == '' || inputs.lane == matrix.lane
+    uses: YOUR-USERNAME/agent-ops/.github/workflows/evolve-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      lane: ${{ matrix.lane }}
+      # window_days: 30 # optional: how many days of run history to survey
+      # min_runs: 5     # optional: minimum runs before a baseline is shown
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

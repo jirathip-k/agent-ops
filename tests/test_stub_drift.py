@@ -492,8 +492,16 @@ def test_caller_drift_is_empty_for_a_repo_with_no_lanes(tmp_path: Path) -> None:
 
 
 def test_lanes_are_discovered_from_the_shipped_stubs() -> None:
-    """The six stubs in stubs/ are the lane list — no second copy to keep in step."""
-    assert set(known_lanes()) == {"triage", "groom", "spec", "plan", "scout", "promote"}
+    """The stubs in stubs/ are the lane list — no second copy to keep in step."""
+    assert set(known_lanes()) == {
+        "triage",
+        "groom",
+        "spec",
+        "plan",
+        "scout",
+        "promote",
+        "evolve",
+    }
 
 
 def test_a_new_stub_extends_coverage_without_a_code_change(tmp_path: Path, monkeypatch) -> None:

@@ -835,8 +835,9 @@ def evolve(
 
     Without --dry-run: a planner agent diagnoses the survey against four named
     failure modes and either opens a draft, human-merge-only PR against
-    `prompts/tasks/<lane>.md`, or states a reasoned no-op. No CI/CD wiring for
-    this yet (the scheduled cadence is #153) — this is manual-invocation only.
+    `prompts/tasks/<lane>.md`, or states a reasoned no-op. Also runs on a
+    weekly scheduled cadence in CI, one lane per pipeline call (#153,
+    `.github/workflows/evolve-pipeline.yml`).
     """
     from agent_ops import status
     from agent_ops.workflows.evolve import baseline, gather, render_baseline, render_survey

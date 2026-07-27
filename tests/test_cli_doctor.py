@@ -415,9 +415,9 @@ def test_doctor_stays_quiet_about_lanes_the_repo_has_not_wired(tmp_path: Path, m
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "✓ CI lane callers in sync: triage (not wired: groom, plan, promote, scout, spec)" in (
-        result.output
-    )
+    assert (
+        "✓ CI lane callers in sync: triage (not wired: evolve, groom, plan, promote, scout, spec)"
+    ) in result.output
     assert "is behind" not in result.output
 
 

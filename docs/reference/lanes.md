@@ -1,14 +1,14 @@
 # Lane reference: local vs. CI
 
-Eight lanes — groom, scout, spec, plan, triage, implement, review, merge —
-each run in two surfaces: the local `agent` CLI and the CI pipelines in
-`.github/workflows/`. "Local" and "CI" are two places the same code can run,
-not two designs; for five lanes below they are, in fact, the exact same code
-path (review joined that list in #171). The other three still run at least
-partly as prompt prose in `prompts/orchestrator.md` on the CI side — that
-split is history (`orchestrator.md` predates the CLI having those commands),
-not intent, and it is the exception being retired by the convergence work
-tracked in #171.
+Nine lanes — groom, scout, spec, plan, evolve, triage, implement, review,
+merge — each run in two surfaces: the local `agent` CLI and the CI pipelines
+in `.github/workflows/`. "Local" and "CI" are two places the same code can
+run, not two designs; for six lanes below they are, in fact, the exact same
+code path (review joined that list in #171, evolve shipped that way from the
+start in #153). The other three still run at least partly as prompt prose in
+`prompts/orchestrator.md` on the CI side — that split is history
+(`orchestrator.md` predates the CLI having those commands), not intent, and
+it is the exception being retired by the convergence work tracked in #171.
 
 This page is a reference, not a tutorial: every cell cites the file and line
 it was checked against. If a citation has drifted, that is this page falling
@@ -22,6 +22,7 @@ out of date — fix the page, don't route around it.
 | scout | `agent scout` — `src/agent_ops/cli.py:788` (`scout`) → `workflows/scout.py` | `uv run agent scout` — `.github/workflows/scout-pipeline.yml:90` | yes |
 | spec | `agent spec` — `src/agent_ops/cli.py:652` (`spec`) → `workflows/spec.py` | `uv run agent spec` — `.github/workflows/spec-pipeline.yml:155` | yes |
 | plan | `agent plan --post` — `src/agent_ops/cli.py:607` (`plan`) | `uv run agent plan --post` — `.github/workflows/plan-pipeline.yml:154` | yes |
+| evolve | `agent evolve <lane>` — `src/agent_ops/cli.py:818` (`evolve`) → `workflows/evolve.py:583` (`run_evolve`) | `uv run agent evolve "$LANE"` — `.github/workflows/evolve-pipeline.yml:151`, one call per lane via the weekly sweep matrix in `evolve.yml` (#153) | yes |
 | triage | `src/agent_ops/cli.py:751` (`triage`) → `workflows/triage.py:65` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-80) | **no** |
 | implement | `src/agent_ops/cli.py:227` (`implement`) → `workflows/implement.py:228` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 86, role file `prompts/agents/implementer.md` | **no** |
 | review | `src/agent_ops/cli.py:672` (`review`) → `workflows/review.py:84` (`run_review`), fan-out at `workflows/review.py:161` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 89 | **yes** (#171) |
