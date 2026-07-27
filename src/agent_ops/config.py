@@ -195,6 +195,21 @@ class DistillConfig(BaseModel):
     )
 
 
+class ScoutConfig(BaseModel):
+    """What this repo wants mined, on top of scout's standard signal list.
+
+    Free text, written by the repo it scouts. The standard signals (TODOs,
+    deferred review threads, swallowed errors, untested modules, stale docs)
+    are near-empty on a static or marketing site, so scout files nothing
+    there; `focus` is how such a repo names the signals that *do* exist for
+    it. It names signals, never goals — "pages missing meta descriptions",
+    not "do SEO research" — because a goal invites exactly the brainstorming
+    scout is built to refuse.
+    """
+
+    focus: str = ""
+
+
 class ProjectConfig(BaseModel):
     base_branch: str = "main"
     worktree_dir: str = ".worktrees"
@@ -221,6 +236,7 @@ class ProjectConfig(BaseModel):
     commands: Commands = Field(default_factory=Commands)
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
+    scout: ScoutConfig = Field(default_factory=ScoutConfig)
 
     def effective_runtime(self, role_name: str, runtime_override: str | None = None) -> str:
         """The runtime a role will actually run on: CLI override, role, then base."""

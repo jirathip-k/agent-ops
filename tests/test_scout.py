@@ -4,10 +4,15 @@ import pytest
 
 from agent_ops import github, worktree
 from agent_ops.config import ProjectConfig
+from agent_ops.prompts import TASKS_DIR, render_task
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError
 from agent_ops.workflows import scout as scout_module
-from agent_ops.workflows.scout import parse_scout, run_scout
+from agent_ops.workflows.scout import FOCUS_MAX_CHARS, focus_block, parse_scout, run_scout
+
+
+def _render(focus: str) -> str:
+    return render_task("scout", max_issues="3", repo_focus=focus_block(focus))
 
 
 def test_parses_filed_issues() -> None:
@@ -169,3 +174,45 @@ def test_run_scout_logs_a_single_label_failure_without_aborting(
 
     assert [r.number for r in results] == [41]
     assert any("backlog" in line and "HTTP 403: no scope" in line for line in logged)
+
+
+def test_focus_reaches_the_prompt_with_its_grounding_reminder() -> None:
+    prompt = _render("Pages with no meta description; posts not updated in 12 months.")
+    assert "## Repo focus" in prompt
+    assert "posts not updated in 12 months" in prompt
+    assert "still need a concrete signal" in prompt
+
+
+def test_focus_cannot_outrank_the_rules_around_it() -> None:
+    """A repo says what to look for; the caps and the danger-zone ban still bind."""
+    prompt = _render("Pages with no meta description.")
+    assert prompt.index("Ground every candidate in a signal") < prompt.index("## Repo focus")
+    assert prompt.index("## Repo focus") < prompt.index("## Filing")
+
+
+def test_no_focus_renders_todays_prompt_byte_for_byte() -> None:
+    """Repos that never configure a focus must see no trace of the feature —
+    not even the blank line a naive placeholder would leave behind."""
+    today = (TASKS_DIR / "scout.md").read_text().replace("{repo_focus}", "")
+    assert _render("") == today.format(max_issues="3")
+    assert "## Repo focus" not in _render("")
+    # the join today's prompt has, spelled out so the template can't drift into
+    # an extra blank line and still pass
+    assert "5. Docs or comments that contradict the current code\n\n## Filing" in _render("")
+
+
+def test_whitespace_only_focus_is_no_focus() -> None:
+    assert _render("   \n\t  \n") == _render("")
+
+
+def test_braces_in_focus_are_data_not_a_placeholder() -> None:
+    # focus is a str.format *value*, never part of the template
+    prompt = _render("Routes like {slug} rendering a 404")
+    assert "Routes like {slug} rendering a 404" in prompt
+
+
+def test_overlong_focus_is_truncated_and_the_prompt_stays_bounded() -> None:
+    baseline = len(_render(""))
+    prompt = _render("meta descriptions " * 500)
+    assert "…truncated]" in prompt
+    assert len(prompt) - baseline < FOCUS_MAX_CHARS + 300
