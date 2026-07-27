@@ -11,7 +11,7 @@ humans own `main`):
 | Lane | Entry point | Billing | Use for |
 | --- | --- | --- | --- |
 | **Local** | `agent` CLI | Claude/Codex subscription | Interactive: implement an issue, review a PR |
-| **CI** | `.github/workflows/triage-pipeline.yml` | Subscription OAuth token via `claude-code-action` | Scheduled triage/fix/review across managed repos |
+| **CI** | `.github/workflows/*-pipeline.yml` (six pipelines — see below) | Subscription OAuth token (triage via `claude-code-action`; the rest via the `agent` CLI directly) | Scheduled triage/groom/scout/spec/plan/promote across managed repos |
 
 See `docs/architecture.md` for the full picture and `docs/adr/` for why it's
 built this way.
@@ -39,21 +39,25 @@ overwritten.
 
 `agent init` also syncs the label set the lanes use (create-or-update, once
 per repo — `--print-labels` shows the `gh` commands instead of applying
-them). The gate labels (`spec-requested`, `plan-requested`,
-`approved-for-agent`) are still applied to individual issues by hand — `init`
-only makes sure the labels themselves exist to apply.
+them). Of the gate labels, `spec-requested` and `plan-requested` can now be
+applied by `agent groom` itself (locally or on its daily CI run) as well
+as by hand; `approved-for-agent` remains human-only.
 
 ## Use it
 
 ```sh
 agent scout                    # mine TODOs/deferred threads/gaps → file backlog issues (≤3)
+agent triage                   # classify untriaged issues: agent-ready / needs-human / backlog
+agent groom                    # re-validate open issues, promote workable ones, apply spec/plan-requested
 agent distill                  # prune a grown AGENTS.md: cut spent narration, keep durable notes
 agent spec 123                 # backlog idea → checklist acceptance criteria, posted on the issue
 agent queue                    # open issues labeled agent-ready, oldest first
 agent plan 123 --post          # planner only (smart model, read-only) → issue comment
 agent plan 123 --surface orca  # same, but on a visible Orca terminal instead of inline
+agent dispatch 123             # the normal way to start work: spawn implement on a visible surface
 agent implement 123            # worktree → plan → implement loop → gates → self-review → PR
 agent implement 123 --no-pr    # same, but stop before push/PR (good while building trust)
+agent claim 123                # mark an issue as being worked on by hand, so other lanes skip it
 agent resume 123               # rerun the implementer in the existing worktree
 agent resume 123 -m "..."      # ...with your feedback instead of the stored self-review
 agent spawn 123 -m "..."       # ad-hoc: an interactive agent in the worktree, wired to report back
@@ -61,6 +65,8 @@ agent report 123 --state done  # ...what that agent (or its stop hook) reports o
 agent review 45                # read-only review of PR #45 (add --post to comment)
 agent review 45 --surface orca # same, but on a visible Orca terminal instead of inline
 agent review --all             # review every open PR targeting base_branch, concurrently
+agent merge 45                 # squash-merge PR #45 into staging if merge rules pass
+agent promote                  # open the staging → main promotion PR for human verification
 agent worktree list            # see in-flight task worktrees
 agent runs                     # per-issue state: running / halted / stopped / done
 agent runs --wait              # block until every tracked run finishes, printing transitions
@@ -108,12 +114,35 @@ findings, or takes `--message`/`--message-file` to supply different feedback,
 and attaches to a surface the same way `agent dispatch` does. Feedback always
 reaches the agent via a file, never a shell-interpolated argument.
 
-## CI lane (scheduled triage pipeline)
+## CI lane (scheduled pipelines)
 
-Each managed repo gets a stub workflow (`stubs/managed-repo-triage.yml`)
-calling the reusable pipeline here. The orchestrator prompt
-(`prompts/orchestrator.md`) runs Planner → Implementer → Tester → Reviewer
-with fresh context per agent. Branch model per managed repo:
+Each managed repo gets stub workflows (`stubs/managed-repo-*.yml`) calling
+the reusable pipelines here. Six pipelines ship today, but only five have a
+caller workflow with its own `name:`/`cron:` in this repo's
+`.github/workflows/` — promote doesn't; only the reusable
+`promote-pipeline.yml` lives here, dispatch-only:
+
+| Pipeline | Workflow | Cadence | Runs |
+| --- | --- | --- | --- |
+| Triage | `triage.yml` | every 4 hours | orchestrator prompt (all 4 roles) |
+| Groom | `groom.yml` | daily, 01:00 UTC | `agent groom` CLI |
+| Scout | `scout.yml` | daily, 18:00 UTC | `agent scout` CLI |
+| Spec | `spec.yml` | nightly, 19:00 UTC (picks up issues labeled `spec-requested`) | `agent spec` CLI |
+| Plan | `plan.yml` | nightly, 19:20 UTC (picks up issues labeled `plan-requested`) | `agent plan --post` CLI |
+| Promote | `promote-pipeline.yml` | dispatch-only here; the stub adds a daily 01:30 UTC cron once copied to a managed repo | `agent promote` CLI |
+
+Promote is the odd one out: every other lane has a caller workflow with a
+cron here, and promote only has the reusable pipeline. Its stub carries a
+cron regardless, so a managed repo gets a scheduled promotion PR that this
+repo itself never runs on a timer.
+
+All six call a `*-pipeline.yml` reusable workflow, but they don't all run
+the same thing: only triage runs the orchestrator prompt
+(`prompts/orchestrator.md`, Planner → Implementer → Tester → Reviewer with
+fresh context per agent). Groom, scout, spec, plan, and promote each run the
+matching `agent <verb>` CLI directly instead — the same code path as the
+local lane, so output can't drift between them. Branch model per managed
+repo:
 
     fix/issue-N ──► staging (agent auto-merge, gated) ──► main (human only)
     hotfix/issue-N ──► main (human merge) ──► back-merge to staging
@@ -133,15 +162,29 @@ Setup:
 
 - Branch protection: `main` requires human-approved PR; `staging` requires
   green checks
-- Auto-merge only if: tests PASS, review APPROVE, CI green, diff ≤ 200 lines
-  / ≤ 5 files, no touches to CI/auth/migrations/deps/infra
+- Auto-merge only if: tests PASS, review APPROVE, CI green, no blocked label,
+  and `agent merge --check` reports no violations. Both lanes ask the same
+  code (`evaluate_merge`) since #150, so the caps mean the same thing in
+  either — they live in `merge.max_changed_lines` / `merge.max_changed_files`,
+  and `merge.blocked_paths` still covers CI/auth/migrations/deps/infra. The
+  orchestrator keeps one open-ended prose rule on top, for infra files the
+  coded list doesn't enumerate. See `docs/adr/0005-one-merge-cap-evaluator.md`.
 - Hotfixes are never auto-merged; one revision round per stage, then escalate
-- Caps: 3 issues per run, 55-minute timeout, concurrency lock
+- Caps vary per pipeline: triage caps at `max_issues: 3` (see `triage.yml`);
+  scout defaults to 3, spec and plan default to 2 (each overridable via
+  workflow input); groom has no per-run cap beyond the 100 open issues it
+  fetches. Every pipeline sets its own `timeout-minutes`; triage, groom,
+  scout, spec, and plan additionally share one concurrency group per repo
+  so they never race on the same labels — promote isn't in that group
 
 ### Operating it
 
-- **Pause one repo:** disable its triage workflow (Actions → ⋯ → Disable)
-- **Run manually:** Actions → Hourly Agent Triage → Run workflow
+- **Pause one repo:** disable each of its caller workflows (Actions → ⋯ →
+  Disable, once per pipeline) — disabling triage alone leaves groom, scout,
+  spec, plan and promote running on their own crons, since every stub ships
+  with one (see the cadence table above)
+- **Run manually:** Actions → the triage workflow (`triage.yml`, every 4
+  hours) → Run workflow
 - **Escalations:** anything unsafe gets `needs-human` with an explanation
 - **Widen autonomy gradually:** report-only → auto-merge to staging →
   shorter soak. Never let agents merge to `main`.
@@ -167,9 +210,13 @@ prompts/tasks/       local-lane task prompts (implement, review)
 prompts/orchestrator.md + prompts/agents/   CI-lane prompt pipeline
 skills/              reusable prompt skills (coding, testing, review, documentation)
 templates/project/   what `agent init` writes into a project
-config/defaults.yaml platform defaults; config/repos.yml managed-repo registry
-stubs/               workflow stub to copy into managed repos
-docs/                architecture, ADRs, roadmap, office-ops suggestion
+config/defaults.yaml platform defaults; config/repos.yml CI-lane defaults
+                     (the managed-repo registry is config/local/repos.yml,
+                     git-ignored, so no private repo names live in this
+                     public repo)
+stubs/               workflow stubs to copy into managed repos
+docs/                architecture, ci-cd, workflow, guide, failure-modes,
+                      roadmap, adr/, office-ops suggestion
 ```
 
 ## Notes on subscription usage

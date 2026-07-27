@@ -43,14 +43,21 @@ read-only) → PR. Each stage is a separate agent with fresh context; the plan
 is the only artifact handed forward, mirroring the CI lane's
 Planner → Implementer → Reviewer pipeline.
 
-**CI lane** (`.github/workflows/triage-pipeline.yml`): scheduled, unattended
-triage across managed repos via `claude-code-action` and the prompt pipeline
-in `prompts/orchestrator.md` (Planner → Implementer → Tester → Reviewer).
-State lives in GitHub itself: labels, branches, PR status. Runs are stateless.
+**CI lane** (`.github/workflows/*-pipeline.yml` — triage, groom, scout, spec,
+plan, promote): scheduled, unattended work across managed repos. Only triage
+runs via `claude-code-action` and the prompt pipeline in
+`prompts/orchestrator.md` (Planner → Implementer → Tester → Reviewer);
+groom, scout, spec, plan, and promote each run the matching `agent <verb>`
+CLI directly in Actions instead. State lives in GitHub itself: labels,
+branches, PR status. Runs are stateless.
 
 The lanes share the same philosophy — gates before merge, fresh context per
-retry, humans own `main` — but not code paths: the CI lane is prompt-driven
-so it runs anywhere `claude-code-action` runs.
+retry, humans own `main`. Code paths mostly converge too: five of the six CI
+pipelines run the local lane's CLI outright. Triage is the partial exception
+— it's prompt-driven, so it runs anywhere `claude-code-action` runs, but its
+merge gate calls `agent merge --check` rather than judging caps in prose
+(#150), so even there the rules come from one tested place. #171 tracks
+converging what's left: triage's classification, review, and implement.
 
 ## Where things live
 
