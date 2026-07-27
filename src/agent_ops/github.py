@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,11 +71,21 @@ def get_issue(number: int, cwd: Path) -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
-def create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
-    proc = run(
-        ["gh", "pr", "create", "--base", base, "--title", title, "--body", body],
-        cwd=cwd,
-    )
+def create_pr(
+    cwd: Path,
+    *,
+    base: str,
+    title: str,
+    body: str,
+    draft: bool = False,
+    labels: Sequence[str] = (),
+) -> str:
+    cmd = ["gh", "pr", "create", "--base", base, "--title", title, "--body", body]
+    if draft:
+        cmd.append("--draft")
+    for label in labels:
+        cmd += ["--label", label]
+    proc = run(cmd, cwd=cwd)
     return proc.stdout.strip()
 
 

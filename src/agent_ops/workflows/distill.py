@@ -122,29 +122,6 @@ def changed_files_ok(names: list[str]) -> bool:
     return names in ([], [_AGENTS_FILE])
 
 
-def _changed_paths(cwd: Path) -> list[str]:
-    """Every path git currently reports as changed: staged, unstaged, and untracked.
-
-    `-z` NUL-delimits entries so a path containing a space parses correctly,
-    and porcelain (not `git diff --name-only`) is what sees untracked files —
-    the planner has `Write`, so a relocated file (an archive doc, say) must
-    be visible to the "nothing but AGENTS.md" guard too, not just an edit.
-    """
-    proc = run(["git", "status", "--porcelain", "-z"], cwd=cwd)
-    entries = [e for e in proc.stdout.split("\0") if e]
-    paths = []
-    skip_next = False
-    for entry in entries:
-        if skip_next:
-            skip_next = False  # a rename/copy's old path trails as its own entry
-            continue
-        status, path = entry[:2], entry[3:]
-        paths.append(path)
-        if status[0] in "RC":
-            skip_next = True
-    return paths
-
-
 def parse_distill(text: str) -> list[DistillCut] | None:
     """Parse the DISTILL REPORT block.
 
@@ -300,7 +277,7 @@ def run_distill(project_root: Path, *, log: Callable[[str], None] = print) -> li
         if cuts is None:
             raise RuntimeError(f"Distill produced no parseable report:\n{result.text[-500:]}")
 
-        changed = _changed_paths(wt_path)
+        changed = worktree.changed_paths(wt_path)
         if not changed_files_ok(changed):
             raise RuntimeError(f"distill touched more than {_AGENTS_FILE}: {changed}")
 

@@ -23,8 +23,13 @@ def _config() -> ProjectConfig:
     )
 
 
-def _pr(files: list[dict[str, Any]], base: str = "staging") -> dict[str, Any]:
-    return {"baseRefName": base, "files": files}
+def _pr(
+    files: list[dict[str, Any]], base: str = "staging", labels: list[str] | None = None
+) -> dict[str, Any]:
+    pr: dict[str, Any] = {"baseRefName": base, "files": files}
+    if labels is not None:
+        pr["labels"] = [{"name": name} for name in labels]
+    return pr
 
 
 def test_clean_small_pr_passes() -> None:
@@ -56,6 +61,23 @@ def test_blocked_paths() -> None:
         pr = _pr([{"path": path, "additions": 1, "deletions": 0}])
         violations = evaluate_merge(pr, _config())
         assert any("blocked path" in v for v in violations), path
+
+
+def test_pr_carrying_blocked_label_is_blocked() -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}], labels=["human-merge-only"])
+    violations = evaluate_merge(pr, _config())
+    assert any("blocked label" in v and "human-merge-only" in v for v in violations)
+
+
+def test_pr_without_blocked_label_is_not_blocked() -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}], labels=["enhancement"])
+    assert evaluate_merge(pr, _config()) == []
+
+
+def test_pr_with_no_labels_key_is_not_blocked() -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}])
+    assert "labels" not in pr
+    assert evaluate_merge(pr, _config()) == []
 
 
 def test_mixed_pr_excludes_test_lines_from_cap() -> None:

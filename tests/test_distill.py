@@ -274,6 +274,7 @@ def _stub_distill_run(
         return _FakeRuntime(report_text, edit=edit), RunRequest(prompt=prompt, cwd=cwd)
 
     monkeypatch.setattr(distill_module, "run", fake_run)
+    monkeypatch.setattr(worktree, "run", fake_run)
     monkeypatch.setattr(distill_module, "role_request", fake_role_request)
     monkeypatch.setattr(distill_module.github, "open_prs", lambda *a, **k: existing_prs or [])
     monkeypatch.setattr(worktree, "create", lambda *a, **k: wt_path)

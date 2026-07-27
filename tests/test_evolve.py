@@ -6,11 +6,12 @@ from typing import Any
 
 import pytest
 
-from agent_ops import prompts
+from agent_ops import github, prompts, worktree
 from agent_ops.runs import Outcome
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError
 from agent_ops.workflows import evolve
-from agent_ops.workflows.evolve import SurveyRow, baseline, build_survey
+from agent_ops.workflows.evolve import EvolveChange, NoopVerdict, SurveyRow, baseline, build_survey
 
 NOW = datetime(2026, 7, 26, 0, 0, 0, tzinfo=UTC)
 WINDOW_DAYS = 30
@@ -779,3 +780,470 @@ def test_load_local_outcomes_skips_unreadable_record(tmp_path: Path) -> None:
     (runs_dir / "issue-9-outcome.json").write_text("not json")
 
     assert evolve._load_local_outcomes(tmp_path) == []
+
+
+# --- parse_evolve --------------------------------------------------------------
+
+
+def test_parse_evolve_no_marker_is_none() -> None:
+    assert evolve.parse_evolve("no block here") is None
+
+
+def test_parse_evolve_marker_with_empty_tail_is_none() -> None:
+    assert evolve.parse_evolve("EVOLVE VERDICT:\n\n") is None
+
+
+def test_parse_evolve_none_with_reason_is_noop_verdict() -> None:
+    result = evolve.parse_evolve(
+        "reviewed the survey\n\nEVOLVE VERDICT:\nnone — only 3 runs, too thin to act on\n"
+    )
+    assert result == NoopVerdict("only 3 runs, too thin to act on")
+
+
+def test_parse_evolve_bare_none_with_no_reason_raises() -> None:
+    with pytest.raises(ValueError, match="no reason"):
+        evolve.parse_evolve("EVOLVE VERDICT:\nnone\n")
+
+
+def test_parse_evolve_single_change() -> None:
+    text = (
+        "EVOLVE VERDICT:\n"
+        "drift — stop re-reading closed issues — https://github.com/o/r/actions/runs/1\n"
+    )
+    result = evolve.parse_evolve(text)
+    assert result == [
+        EvolveChange(
+            "drift", "stop re-reading closed issues", "https://github.com/o/r/actions/runs/1"
+        )
+    ]
+
+
+def test_parse_evolve_multiple_changes() -> None:
+    text = (
+        "EVOLVE VERDICT:\n"
+        "vagueness — pin the escalation wording — #150\n"
+        "fuzzy gate — only speak above 2 failures — https://github.com/o/r/actions/runs/2\n"
+    )
+    result = evolve.parse_evolve(text)
+    assert result == [
+        EvolveChange("vagueness", "pin the escalation wording", "#150"),
+        EvolveChange(
+            "fuzzy gate", "only speak above 2 failures", "https://github.com/o/r/actions/runs/2"
+        ),
+    ]
+
+
+def test_parse_evolve_unknown_failure_mode_raises() -> None:
+    text = "EVOLVE VERDICT:\nperformance — speed it up — #150\n"
+    with pytest.raises(ValueError, match="not a named failure mode"):
+        evolve.parse_evolve(text)
+
+
+def test_parse_evolve_change_with_no_citation_raises() -> None:
+    text = "EVOLVE VERDICT:\ndrift — stop doing the thing — trust me\n"
+    with pytest.raises(ValueError, match="cites no run URL"):
+        evolve.parse_evolve(text)
+
+
+def test_parse_evolve_line_with_no_separators_raises() -> None:
+    text = "EVOLVE VERDICT:\njust some prose with no structure at all\n"
+    with pytest.raises(ValueError, match="unparseable"):
+        evolve.parse_evolve(text)
+
+
+def test_parse_evolve_uses_last_marker() -> None:
+    text = "EVOLVE VERDICT:\ndrift — draft attempt — #1\nEVOLVE VERDICT:\nnone — changed my mind\n"
+    assert evolve.parse_evolve(text) == NoopVerdict("changed my mind")
+
+
+def test_parse_evolve_summary_with_internal_dash_is_not_truncated() -> None:
+    """A summary containing its own spaced dash must not spill into citations.
+
+    A naive `split(maxsplit=2)` stops after the first two separators, so a
+    summary like "retries were added - even though the prompt didn't ask"
+    would spill its tail into the citations field and garble the PR body.
+    """
+    text = (
+        "EVOLVE VERDICT:\n"
+        "drift — retries were added - even though the prompt didn't ask - see #123\n"
+    )
+    result = evolve.parse_evolve(text)
+    assert result == [
+        EvolveChange(
+            "drift",
+            "retries were added - even though the prompt didn't ask",
+            "see #123",
+        )
+    ]
+
+
+# --- run_evolve ------------------------------------------------------------
+
+
+def _survey_rows(n: int = 6, *, lane: str = "spec") -> list[SurveyRow]:
+    return [
+        SurveyRow(
+            when=NOW,
+            lane=lane,
+            trigger="schedule",
+            conclusion="success",
+            duration="-",
+            url=f"https://github.com/o/r/actions/runs/{i}",
+            source="ci",
+        )
+        for i in range(n)
+    ]
+
+
+class _FakeEvolveRuntime:
+    name = "fake"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def available(self) -> bool:
+        return True
+
+    def run(self, request: RunRequest) -> RunResult:
+        return RunResult(ok=True, text=self.text)
+
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        return FailureKind.AGENT_FAILURE
+
+
+class _FakeEvolveProc:
+    def __init__(self, stdout: str = "") -> None:
+        self.stdout = stdout
+
+
+def _stub_run_evolve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    lane: str = "spec",
+    verdict_text: str,
+    diff_output: str = "",
+    rows: list[SurveyRow] | None = None,
+) -> dict[str, Any]:
+    """Wire run_evolve's collaborators with fakes; return captured calls/state."""
+    (tmp_path / "prompts" / "tasks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "prompts" / "tasks" / f"{lane}.md").write_text("# existing prompt\n")
+    wt_path = tmp_path / ".worktrees" / f"evolve-{lane}-tmp"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    calls: list[list[str]] = []
+    captured: dict[str, Any] = {"calls": calls}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> _FakeEvolveProc:
+        calls.append(cmd)
+        if cmd[:2] == ["git", "status"]:
+            paths = [p for p in diff_output.splitlines() if p]
+            porcelain = "".join(f" M {p}\0" for p in paths)
+            return _FakeEvolveProc(porcelain)
+        if cmd[:3] == ["git", "rev-parse", "--short"]:
+            return _FakeEvolveProc("abc1234\n")
+        return _FakeEvolveProc("")
+
+    def fake_role_request(
+        config: Any, role_name: str, prompt: str, cwd: Path, **kwargs: Any
+    ) -> tuple[object, RunRequest]:
+        return _FakeEvolveRuntime(verdict_text), RunRequest(prompt=prompt, cwd=cwd)
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        captured["synced_labels"] = labels
+        return github.LabelSync(created=list(labels), updated=[], unchanged=[], failed=[])
+
+    def fake_create_pr(
+        cwd: Path, *, base: str, title: str, body: str, draft: bool = False, labels: Any = ()
+    ) -> str:
+        captured["pr"] = {
+            "cwd": cwd,
+            "base": base,
+            "title": title,
+            "body": body,
+            "draft": draft,
+            "labels": labels,
+        }
+        return "https://github.com/acme/widgets/pull/9"
+
+    monkeypatch.setattr(evolve, "run", fake_run)
+    monkeypatch.setattr(worktree, "run", fake_run)
+    monkeypatch.setattr(evolve, "role_request", fake_role_request)
+    fallback_rows = rows if rows is not None else _survey_rows(lane=lane)
+    monkeypatch.setattr(evolve, "gather", lambda *a, **k: (fallback_rows, []))
+
+    def fake_remove(*args: Any, **kwargs: Any) -> None:
+        captured["removed"] = True
+        captured["remove_kwargs"] = kwargs
+
+    monkeypatch.setattr(worktree, "create_detached", lambda *a, **k: wt_path)
+    monkeypatch.setattr(worktree, "remove", fake_remove)
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(github, "create_pr", fake_create_pr)
+    monkeypatch.setattr(github, "open_prs", lambda *a, **k: [])
+    return captured
+
+
+def test_run_evolve_missing_task_file_raises_and_spawns_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no worktree should be created for a lane with no prompt file")
+
+    monkeypatch.setattr(worktree, "create_detached", unreachable)
+
+    with pytest.raises(RuntimeError, match="no prompts/tasks/ghost.md"):
+        evolve.run_evolve(tmp_path, "ghost")
+
+
+def test_run_evolve_below_min_runs_is_a_cheap_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "prompts" / "tasks").mkdir(parents=True)
+    (tmp_path / "prompts" / "tasks" / "spec.md").write_text("# existing prompt\n")
+    monkeypatch.setattr(evolve, "gather", lambda *a, **k: (_survey_rows(2), []))
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("below min_runs must return before spawning any agent")
+
+    monkeypatch.setattr(worktree, "create_detached", unreachable)
+    logged: list[str] = []
+
+    result = evolve.run_evolve(tmp_path, "spec", min_runs=5, log=logged.append)
+
+    assert result == []
+    assert any("no-op" in line for line in logged)
+
+
+def test_run_evolve_open_pr_for_lane_short_circuits_to_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second evolve PR must not stack on an unreviewed first for the same lane."""
+    (tmp_path / "prompts" / "tasks").mkdir(parents=True)
+    (tmp_path / "prompts" / "tasks" / "spec.md").write_text("# existing prompt\n")
+    monkeypatch.setattr(evolve, "gather", lambda *a, **k: (_survey_rows(6), []))
+    monkeypatch.setattr(
+        github,
+        "open_prs",
+        lambda *a, **k: [
+            {
+                "number": 7,
+                "url": "https://github.com/o/r/pull/7",
+                "headRefName": "evolve/spec-abc1234",
+            }
+        ],
+    )
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an already-open evolve PR for this lane must short-circuit")
+
+    monkeypatch.setattr(github, "sync_labels", unreachable)
+    monkeypatch.setattr(worktree, "create_detached", unreachable)
+    logged: list[str] = []
+
+    result = evolve.run_evolve(tmp_path, "spec", log=logged.append)
+
+    assert result == []
+    assert any("#7" in line for line in logged)
+
+
+def test_run_evolve_stale_pr_check_fails_closed_before_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` failure checking for a stale PR must abort, not fail open.
+
+    Failing open here would still spend a worktree, an agent run, a commit,
+    and a push before dying at `create_pr` on the same underlying `gh`
+    failure — same reasoning as distill's stale-PR guard (agent-ops#175).
+    """
+    (tmp_path / "prompts" / "tasks").mkdir(parents=True)
+    (tmp_path / "prompts" / "tasks" / "spec.md").write_text("# existing prompt\n")
+    monkeypatch.setattr(evolve, "gather", lambda *a, **k: (_survey_rows(6), []))
+
+    def broken_open_prs(*args: Any, **kwargs: Any) -> Any:
+        raise CommandError("gh: not authenticated")
+
+    monkeypatch.setattr(github, "open_prs", broken_open_prs)
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a failed stale-PR check must abort before any label sync")
+
+    monkeypatch.setattr(github, "sync_labels", unreachable)
+    monkeypatch.setattr(worktree, "create_detached", unreachable)
+
+    with pytest.raises(RuntimeError, match="could not check for a stale evolve PR"):
+        evolve.run_evolve(tmp_path, "spec")
+
+
+def test_run_evolve_failed_label_sync_aborts_before_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A label that fails to sync must abort before any worktree/branch exists.
+
+    `human-merge-only` is the containment mechanism for the draft PR this run
+    would open — continuing past a sync failure risks a push and a PR with no
+    label to keep it human-merge-only, leaving a dangling branch behind.
+    """
+    (tmp_path / "prompts" / "tasks").mkdir(parents=True)
+    (tmp_path / "prompts" / "tasks" / "spec.md").write_text("# existing prompt\n")
+    monkeypatch.setattr(evolve, "gather", lambda *a, **k: (_survey_rows(6), []))
+    monkeypatch.setattr(github, "open_prs", lambda *a, **k: [])
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(
+        github,
+        "sync_labels",
+        lambda *a, **k: github.LabelSync(
+            created=[], updated=[], unchanged=[], failed=[("human-merge-only", "no write scope")]
+        ),
+    )
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no worktree should be created when the label sync failed")
+
+    monkeypatch.setattr(worktree, "create_detached", unreachable)
+
+    with pytest.raises(RuntimeError, match="could not sync the human-merge-only label"):
+        evolve.run_evolve(tmp_path, "spec")
+
+
+def test_run_evolve_noop_verdict_opens_no_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(
+        monkeypatch, tmp_path, verdict_text="EVOLVE VERDICT:\nnone — nothing repeatable yet\n"
+    )
+    logged: list[str] = []
+
+    result = evolve.run_evolve(tmp_path, "spec", log=logged.append)
+
+    assert result == []
+    assert "pr" not in captured
+    assert not any(c[:2] == ["git", "push"] for c in captured["calls"])
+    assert captured.get("removed") is True
+    assert captured["remove_kwargs"].get("delete_branch") is True
+    assert any("nothing repeatable yet" in line for line in logged)
+
+
+def test_run_evolve_unparseable_verdict_raises_not_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(monkeypatch, tmp_path, verdict_text="no verdict block at all")
+
+    with pytest.raises(RuntimeError, match="no parseable verdict"):
+        evolve.run_evolve(tmp_path, "spec")
+
+    assert "pr" not in captured
+    assert captured.get("removed") is True
+
+
+def test_run_evolve_malformed_verdict_raises_not_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_run_evolve(
+        monkeypatch, tmp_path, verdict_text="EVOLVE VERDICT:\nperformance — speed it up — #1\n"
+    )
+
+    with pytest.raises(RuntimeError, match="unparseable verdict"):
+        evolve.run_evolve(tmp_path, "spec")
+
+
+def test_run_evolve_diff_outside_allowlist_aborts_before_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(
+        monkeypatch,
+        tmp_path,
+        verdict_text="EVOLVE VERDICT:\ndrift — tighten it — #1\n",
+        diff_output="prompts/orchestrator.md\n",
+    )
+
+    with pytest.raises(RuntimeError, match="disallowed path"):
+        evolve.run_evolve(tmp_path, "spec")
+
+    assert "pr" not in captured
+    assert not any(c[:2] == ["git", "push"] for c in captured["calls"])
+
+
+def test_run_evolve_change_verdict_with_empty_diff_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(
+        monkeypatch,
+        tmp_path,
+        verdict_text="EVOLVE VERDICT:\ndrift — tighten it — #1\n",
+        diff_output="",
+    )
+
+    with pytest.raises(RuntimeError, match="unchanged"):
+        evolve.run_evolve(tmp_path, "spec")
+
+    assert "pr" not in captured
+
+
+def test_run_evolve_noop_verdict_with_stray_edit_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(
+        monkeypatch,
+        tmp_path,
+        verdict_text="EVOLVE VERDICT:\nnone — nothing to do\n",
+        diff_output="prompts/tasks/spec.md\n",
+    )
+
+    with pytest.raises(RuntimeError, match="changed anyway"):
+        evolve.run_evolve(tmp_path, "spec")
+
+    assert "pr" not in captured
+
+
+def test_run_evolve_happy_path_opens_draft_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(
+        monkeypatch,
+        tmp_path,
+        verdict_text=(
+            "EVOLVE VERDICT:\n"
+            "drift — stop re-reading closed issues — https://github.com/o/r/actions/runs/1\n"
+        ),
+        diff_output="prompts/tasks/spec.md\n",
+    )
+
+    result = evolve.run_evolve(tmp_path, "spec")
+
+    assert result == [
+        EvolveChange(
+            "drift",
+            "stop re-reading closed issues",
+            "https://github.com/o/r/actions/runs/1",
+        )
+    ]
+    assert captured["pr"]["draft"] is True
+    assert captured["pr"]["labels"] == ("human-merge-only",)
+    assert "drift" in captured["pr"]["body"]
+    assert "stop re-reading closed issues" in captured["pr"]["body"]
+    assert "https://github.com/o/r/actions/runs/1" in captured["pr"]["body"]
+    assert "baseline for spec" in captured["pr"]["body"]
+    assert captured["synced_labels"] and "human-merge-only" in captured["synced_labels"]
+    assert any(c[:3] == ["git", "checkout", "-b"] for c in captured["calls"])
+    push_calls = [c for c in captured["calls"] if c[:2] == ["git", "push"]]
+    assert push_calls and push_calls[0][-1].startswith("evolve/spec-")
+    commit_calls = [c for c in captured["calls"] if c[:2] == ["git", "commit"]]
+    assert commit_calls and commit_calls[0][-2:] == ["--", "prompts/tasks/spec.md"]
+    assert captured.get("removed") is True
+    assert captured["remove_kwargs"].get("delete_branch") is True
+
+
+def test_run_evolve_worktree_removed_even_when_run_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_run_evolve(monkeypatch, tmp_path, verdict_text="garbage, no marker")
+
+    with pytest.raises(RuntimeError):
+        evolve.run_evolve(tmp_path, "spec")
+
+    assert captured.get("removed") is True
+    assert captured["remove_kwargs"].get("delete_branch") is True

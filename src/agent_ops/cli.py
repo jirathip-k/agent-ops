@@ -819,26 +819,38 @@ def evolve(
         typer.Option("--min-runs", help="Minimum runs in the window before a baseline is shown"),
     ] = 5,
 ) -> None:
-    """Survey a lane's recent run history — the evidence layer for the evolve pass (#151).
+    """Survey a lane's run history and evolve its prompt — or pass --dry-run to
+    only see the evidence.
 
-    Deterministic and read-only: no agent is spawned on any path. The prompt
-    and verdict that would act on this evidence are #152/#153.
+    Without --dry-run: a planner agent diagnoses the survey against four named
+    failure modes and either opens a draft, human-merge-only PR against
+    `prompts/tasks/<lane>.md`, or states a reasoned no-op. No CI/CD wiring for
+    this yet (the scheduled cadence is #153) — this is manual-invocation only.
     """
     from agent_ops import status
     from agent_ops.workflows.evolve import baseline, gather, render_baseline, render_survey
 
+    # prompts/tasks/evolve.md makes "evolve" itself a valid lane name here
+    # (self-targeting). Not a deliberately supported case — it has no CI
+    # caller workflow, so `run_evolve` always sees zero runs and no-ops.
     names = sorted(set(prompts.task_names()) | set(status.LANES))
     if lane not in names:
         _err(f"unknown lane {lane!r} — expected one of: {', '.join(names)}")
         raise typer.Exit(1)
-    if not dry_run:
-        _err(
-            "agent evolve only gathers evidence for now — the prompt/verdict/PR pass "
-            "lands in #152; pass --dry-run to see the survey"
-        )
-        raise typer.Exit(1)
 
     root = project.resolve()
+
+    if not dry_run:
+        from agent_ops.workflows.evolve import run_evolve
+
+        try:
+            changes = run_evolve(root, lane, window_days=window_days, min_runs=min_runs)
+        except (CommandError, RuntimeError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo(f"opened draft PR with {len(changes)} change(s)" if changes else "no-op")
+        return
+
     try:
         rows, notes = gather(root, lane, now=datetime.now(UTC), window_days=window_days)
     except CommandError as exc:

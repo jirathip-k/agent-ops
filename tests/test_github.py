@@ -48,6 +48,61 @@ def test_pr_references_issue_does_not_match_bare_title_mention() -> None:
     assert not github.pr_references_issue(pr, 132)
 
 
+def test_create_pr_default_has_no_draft_or_label_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1")
+
+    monkeypatch.setattr(github, "run", fake_run)
+    github.create_pr(tmp_path, base="main", title="t", body="b")
+
+    assert captured["cmd"] == [
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--title",
+        "t",
+        "--body",
+        "b",
+    ]
+
+
+def test_create_pr_draft_and_labels_add_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1")
+
+    monkeypatch.setattr(github, "run", fake_run)
+    github.create_pr(
+        tmp_path, base="main", title="t", body="b", draft=True, labels=("human-merge-only",)
+    )
+
+    assert captured["cmd"] == [
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--title",
+        "t",
+        "--body",
+        "b",
+        "--draft",
+        "--label",
+        "human-merge-only",
+    ]
+
+
 def test_pr_references_issue_regression_sendmeter_bare_mention_does_not_block() -> None:
     """Regression fixture from #64: a cross-reference must not count as fixing it."""
     pr = {

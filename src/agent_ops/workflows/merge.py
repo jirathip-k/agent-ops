@@ -41,7 +41,14 @@ def _is_test_file(path: str, patterns: list[str]) -> bool:
 
 
 def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
-    """Return the list of rule violations blocking an agent merge (empty = mergeable)."""
+    """Return the list of rule violations blocking an agent merge (empty = mergeable).
+
+    `pr["labels"]` carrying one of `config.merge.blocked_labels` (e.g.
+    `human-merge-only`) is a violation like any other here — `--override` can
+    bypass it the same way it bypasses a size cap or a blocked path, since
+    this rail is for agents, not for the human operator who applied the
+    label in the first place.
+    """
     violations: list[str] = []
 
     if pr["baseRefName"] != config.base_branch:
@@ -105,6 +112,11 @@ def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
             if fnmatch(f["path"].lower(), pattern.lower()):
                 violations.append(f"blocked path: {f['path']} (matches {pattern!r})")
                 break
+
+    label_names = {label["name"] for label in pr.get("labels", [])}
+    for blocked in config.merge.blocked_labels:
+        if blocked in label_names:
+            violations.append(f"carries blocked label: {blocked!r}")
     return violations
 
 
@@ -116,7 +128,11 @@ def _fetch_pr(project_root: Path, pr_number: int) -> dict[str, Any]:
             "view",
             str(pr_number),
             "--json",
-            "baseRefName,headRefName,title,url,files,state",
+            # `labels` feeds merge.blocked_labels — requested here rather than
+            # only in run_merge so `agent merge --check` sees them too. The CI
+            # lane reaches the rules through --check, so a label enforced only
+            # on the local path would be no containment at all.
+            "baseRefName,headRefName,title,url,files,state,labels",
         ],
         cwd=project_root,
     )
@@ -162,8 +178,9 @@ def run_merge(
     """Squash-merge a PR into the working branch if every rule passes.
 
     Rules: base must be the working branch, CI green (missing checks warn),
-    diff within caps, no blocked paths. `override=True` merges anyway but
-    logs every overridden rule — that is a human decision, never automate it.
+    diff within caps, no blocked paths, no blocked label. `override=True`
+    merges anyway but logs every overridden rule — that is a human decision,
+    never automate it.
     """
     config = load_project_config(project_root)
     pr = _fetch_pr(project_root, pr_number)
