@@ -237,6 +237,13 @@ def run_spawn(
     wt_path = worktree.create(
         project_root, config.worktree_dir, task_id, branch, config.base_branch, reuse=True
     )
+    if not wt_path.is_dir():
+        # `worktree.create` already enforces this postcondition and would have
+        # raised `CommandError` above — this only catches something removing
+        # the directory in the window between that check and here (issue #201).
+        raise CommandError(
+            f"worktree {wt_path} vanished before a session could be seeded for #{issue}"
+        )
     hook_path = runtime.seed_stop_hook(wt_path, report_command(project_root, issue))
     if hook_path is None:
         log(
@@ -294,6 +301,21 @@ def run_spawn(
         spawner=messages.current_handle(),
         log=log,
     )
+    if not wt_path.is_dir():
+        # Spawn must never report success over a session with nowhere to work
+        # (issue #201): the surface returned normally, but the worktree it
+        # should have attached to is gone — e.g. removed as a side effect of
+        # the surface's own attach step. The spawn record above is written
+        # first so a session that is still alive somewhere is not
+        # untraceable: `agent runs` reports it as a dead dispatch rather than
+        # showing nothing at all. Nothing was actually delivered, so the claim
+        # taken above is handed back for a retry.
+        claims.release(project_root, issue, log=log)
+        raise CommandError(
+            f"{spawned.where} was created, but the worktree {wt_path} it should be running in "
+            f"does not exist — spawn did NOT produce a worktree. Close or end that session by "
+            f"hand; `agent runs {issue}` will show it as a dead dispatch until then."
+        )
     return Delegated(spawned=spawned, worktree=wt_path, hook_path=hook_path)
 
 

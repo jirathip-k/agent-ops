@@ -56,6 +56,11 @@ class Spawned:
     handle: str | None = None
     pid: int | None = None
     log_path: Path | None = None
+    # Set when the spawn succeeded but degraded from what was asked for (e.g.
+    # the project-root fallback below) — a caller that only echoes `where`
+    # would otherwise bury this in a parenthetical (issue #201). Defaulted so
+    # every existing constructor call stays valid.
+    warning: str | None = None
 
 
 class Surface(Protocol):
@@ -182,6 +187,14 @@ class OrcaSurface:
         self, label: str, command: list[str], cwd: Path, attach_path: Path | None = None
     ) -> Spawned:
         target = attach_path or cwd
+        # Give this attach the same ~36s indexing window `run_spawn` already
+        # gets (issue #201): `_attach_with_retry`'s own budget (~4s) exists to
+        # adopt a terminal a timed-out `create` left behind, not to outlast
+        # Orca's periodic rescan of a brand-new external worktree — without
+        # this, dispatch hits the project-root fallback far more often than a
+        # `spawn` on the very same worktree would. A no-op when Orca is
+        # unavailable or `target` is already indexed.
+        orca.await_indexed([target])
         handle, last_err, adopted = _attach_with_retry(target, label, command)
         if handle is not None:
             where = f"orca terminal {label!r} (handle {handle})"
@@ -202,14 +215,20 @@ class OrcaSurface:
             fallback_label = f"{label} (shell: project root, not the worktree)"
             handle, stderr = _attempt_orca_attach(cwd, fallback_label, command)
             if handle is not None:
+                # The full explanation goes in `warning`, not buried in a
+                # parenthetical on the success line a caller might only
+                # glance at (issue #201) — `where` stays short.
+                warning = (
+                    f"{target} was not indexed by Orca in time, so {label!r} was attached to "
+                    f"the project root's card instead of the worktree's — its shell starts at "
+                    f"{cwd}, not the worktree, and the sidebar shows this run under the "
+                    f"project root rather than {target.name}'s card"
+                )
                 return Spawned(
-                    where=(
-                        f"orca terminal {label!r} (handle {handle}; {target} not indexed yet by "
-                        f"Orca, fell back to project root card — shell starts at {cwd}, not "
-                        f"the worktree)"
-                    ),
+                    where=f"orca terminal {label!r} (handle {handle}; fell back to project root)",
                     surface=self.name,
                     handle=handle,
+                    warning=warning,
                 )
             last_err = stderr
 
