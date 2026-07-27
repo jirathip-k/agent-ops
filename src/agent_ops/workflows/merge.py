@@ -108,6 +108,50 @@ def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
     return violations
 
 
+def _fetch_pr(project_root: Path, pr_number: int) -> dict[str, Any]:
+    proc = run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--json",
+            "baseRefName,headRefName,title,url,files,state",
+        ],
+        cwd=project_root,
+    )
+    return json.loads(proc.stdout)  # type: ignore[no-any-return]
+
+
+def run_merge_check(
+    project_root: Path,
+    pr_number: int,
+    *,
+    log: Callable[[str], None] = print,
+) -> list[str]:
+    """Report merge-rule violations for a PR without merging it.
+
+    Same rules `run_merge` enforces (`evaluate_merge`), exposed as a
+    check-only entry point so the CI lane can judge caps by the same code
+    the local lane merges with, instead of re-deriving the numbers in prompt
+    prose (issue #150). A non-OPEN PR counts as blocking rather than clean.
+    """
+    config = load_project_config(project_root)
+    pr = _fetch_pr(project_root, pr_number)
+    if pr["state"] != "OPEN":
+        violations = [f"PR #{pr_number} is {pr['state']} — nothing to merge"]
+        log(violations[0])
+        return violations
+
+    violations = evaluate_merge(pr, config)
+    if violations:
+        for v in violations:
+            log(f"blocked: {v}")
+    else:
+        log(f"PR #{pr_number} has no merge-rule violations")
+    return violations
+
+
 def run_merge(
     project_root: Path,
     pr_number: int,
@@ -122,18 +166,7 @@ def run_merge(
     logs every overridden rule — that is a human decision, never automate it.
     """
     config = load_project_config(project_root)
-    proc = run(
-        [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            "--json",
-            "baseRefName,headRefName,title,url,files,state",
-        ],
-        cwd=project_root,
-    )
-    pr = json.loads(proc.stdout)
+    pr = _fetch_pr(project_root, pr_number)
     if pr["state"] != "OPEN":
         log(f"PR #{pr_number} is {pr['state']} — nothing to merge")
         return False

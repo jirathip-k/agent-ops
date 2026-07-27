@@ -44,7 +44,7 @@ from agent_ops.workflows import (
     run_spawn,
 )
 from agent_ops.workflows.implement import make_plan, task_identifiers
-from agent_ops.workflows.merge import run_merge, run_promote
+from agent_ops.workflows.merge import run_merge, run_merge_check, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES
 from agent_ops.workflows.spawn import REPORT_STATES
 from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
@@ -837,9 +837,19 @@ def merge(
     override: Annotated[
         bool, typer.Option("--override", help="Human override: merge despite rule violations")
     ] = False,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Report merge-rule violations only; never merge"),
+    ] = False,
 ) -> None:
     """Squash-merge a PR into the working branch (staging) if all merge rules pass."""
+    if check and override:
+        _err("--check and --override are mutually exclusive")
+        raise typer.Exit(1)
     try:
+        if check:
+            violations = run_merge_check(project.resolve(), pr)
+            raise typer.Exit(0 if not violations else 1)
         ok = run_merge(project.resolve(), pr, override=override)
     except CommandError as exc:
         _err(str(exc))

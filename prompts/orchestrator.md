@@ -123,14 +123,32 @@ Faster, not looser — all four agents run, gates are stricter:
 ---
 
 ## Step 3 — Auto-merge to `BASE_BRANCH` (normal lane only)
+Diff-size and blocked-path caps are judged by `agent merge --check`, not by
+you — this keeps the CI lane and the local `agent merge` command agreeing on
+what a cap counts (issue #150) instead of drifting from independently
+maintained numbers. Run:
+
+    uv run --project agent-ops agent merge <PR_NUMBER> --project target --check
+
+Its exit code and printed lines are the verdict on size/blocked-path gates —
+honour them verbatim and quote its violation lines in the PR comment / run
+summary rather than re-deriving them. If the command itself fails to run
+(network, `uv` resolution, etc.), treat that as a blocking violation: label
+`needs-human`, merge nothing, and say why in the run summary.
+One thing it does not cover: infra files outside its configured blocked-path
+list (e.g. `*.tfvars`, `docker-compose.yml`, Helm charts) — if the diff
+touches infra files the check doesn't recognize, treat that as blocking too
+rather than merging past it.
+
 If AUTO_MERGE is false, run in REPORT-ONLY mode: perform every check below,
 but never merge — label qualifying PRs `ready-to-merge` and state in the run
 summary that they passed all gates. Otherwise, merge ONLY if ALL of the
 following hold:
 - Tester verdict PASS and Reviewer verdict APPROVE
 - All CI checks green (never merge on pending or failing checks)
-- Diff ≤ 200 changed lines and ≤ 5 files
+- `agent merge --check` reports no violations
 - No changes to CI/CD, auth, migrations, dependency manifests, or infra files
+  the check above doesn't already cover
 Method: squash merge into `BASE_BRANCH`, delete the branch.
 Any condition failed → leave PR open with approving review, label
 `ready-to-merge`, comment which gate failed.

@@ -1,11 +1,20 @@
+import json
 import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from agent_ops.config import ProjectConfig
-from agent_ops.workflows.merge import _is_test_file, closable_issue_refs, evaluate_merge
+from agent_ops.workflows import merge as merge_module
+from agent_ops.workflows.merge import (
+    _is_test_file,
+    closable_issue_refs,
+    evaluate_merge,
+    run_merge_check,
+)
 
 
 def _config() -> ProjectConfig:
@@ -202,6 +211,111 @@ def test_closable_refs_trailing_issue_numbers_only() -> None:
 def test_closable_refs_drops_closed_issues_and_pr_numbers() -> None:
     subjects = ["fix: thing (#5)", "fix: other (#6)", "fix: third (#7)"]
     assert closable_issue_refs(subjects, {6}) == [6]
+
+
+# ---------- run_merge_check: CI lane and `agent merge` share one verdict (#150) ----------
+
+
+def _stub_gh(monkeypatch: pytest.MonkeyPatch, pr: dict[str, Any]) -> list[list[str]]:
+    """Fake `gh pr view` returning `pr`; records every command and refuses to merge."""
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr), stderr="")
+        raise AssertionError(f"run_merge_check must not invoke: {cmd}")
+
+    monkeypatch.setattr(merge_module, "run", fake_run)
+    monkeypatch.setattr(merge_module, "load_project_config", lambda root: _config())
+    return calls
+
+
+def test_check_clean_pr_reports_no_violations_and_never_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 30, "deletions": 5}])
+    pr["state"] = "OPEN"
+    calls = _stub_gh(monkeypatch, pr)
+
+    violations = run_merge_check(tmp_path, 1, log=lambda _msg: None)
+
+    assert violations == []
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_check_over_cap_pr_reports_violations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 500, "deletions": 0}])
+    pr["state"] = "OPEN"
+    calls = _stub_gh(monkeypatch, pr)
+
+    violations = run_merge_check(tmp_path, 2, log=lambda _msg: None)
+
+    assert any("changed lines" in v for v in violations)
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_check_blocked_path_pr_reports_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = _pr([{"path": "package-lock.json", "additions": 1, "deletions": 0}])
+    pr["state"] = "OPEN"
+    _stub_gh(monkeypatch, pr)
+
+    violations = run_merge_check(tmp_path, 3, log=lambda _msg: None)
+
+    assert any("blocked path" in v for v in violations)
+
+
+def test_check_non_open_pr_is_blocking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}])
+    pr["state"] = "MERGED"
+    calls = _stub_gh(monkeypatch, pr)
+
+    violations = run_merge_check(tmp_path, 4, log=lambda _msg: None)
+
+    assert violations != []
+    assert any("MERGED" in v for v in violations)
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_check_verdict_matches_evaluate_merge_for_same_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pr = _pr(
+        [
+            {"path": "src/app.ts", "additions": 300, "deletions": 0},
+            {"path": "tests/test_app.py", "additions": 400, "deletions": 0},
+        ]
+    )
+    pr["state"] = "OPEN"
+    _stub_gh(monkeypatch, pr)
+
+    assert run_merge_check(tmp_path, 5, log=lambda _msg: None) == evaluate_merge(pr, _config())
+
+
+def test_check_passes_150_production_plus_300_test_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PR from issue #150's worked example: refused by the old CI prose
+
+    cap (200 total changed lines), mergeable under production-only caps with
+    a raw backstop. `--check` must land on the same side as `evaluate_merge`.
+    """
+    pr = _pr(
+        [
+            {"path": "src/app.ts", "additions": 150, "deletions": 0},
+            {"path": "tests/test_app.py", "additions": 300, "deletions": 0},
+        ]
+    )
+    pr["state"] = "OPEN"
+    _stub_gh(monkeypatch, pr)
+
+    assert run_merge_check(tmp_path, 6, log=lambda _msg: None) == []
 
 
 def test_closable_refs_empty_when_no_refs() -> None:
