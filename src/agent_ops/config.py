@@ -110,6 +110,44 @@ class MergeConfig(BaseModel):
     stable_branch: str = "main"  # promotion target; only humans merge into it
     max_changed_lines: int = 400
     max_changed_files: int = 12
+    # Backstop multiplier applied to the caps above, counting ALL files
+    # (including tests) — without it, excluding test lines from the production
+    # caps would leave a mixed PR with no ceiling at all (200 production lines
+    # + 50,000 test lines would auto-merge). Expressed as a ratio rather than
+    # absolute numbers so it tracks a project's own overridden caps: a repo
+    # that tightens max_changed_lines to 200 still gets a 4x backstop instead
+    # of silently inheriting an 8x one.
+    # ge=1: a ratio of 0 would zero both backstops and block every PR on a
+    # single changed line. 1 is allowed but deliberate — it pins the total to
+    # the production cap, opting the project out of the test exclusion.
+    total_cap_ratio: int = Field(default=4, ge=1)
+    # Test-file patterns excluded from max_changed_lines/max_changed_files
+    # (see workflows.merge._is_test_file). Patterns anchored at a literal (not
+    # already starting with `*`) need a `*/`-prefixed twin so they also match
+    # nested copies — fnmatch's `*` spans `/`, so a pattern that already
+    # starts with `*` (e.g. `*Tests/*`) already matches at any depth and needs
+    # no twin. The `[!/]` in `test_[!/]*.py` / `*/test_[!/]*.py` anchors the
+    # pattern to the filename so it can't swallow a whole subdirectory tree —
+    # without it, `test_*.py` would match every `.py` file under a
+    # `test_data/` directory (e.g. `test_data/schema.py`,
+    # `src/test_data/schema.py`), both of which are production code despite
+    # starting with `test_`.
+    test_paths: list[str] = Field(
+        default_factory=lambda: [
+            "test_[!/]*.py",
+            "*/test_[!/]*.py",
+            "*_test.py",
+            "tests/*",
+            "*/tests/*",
+            "__tests__/*",
+            "*/__tests__/*",
+            "*.test.*",
+            "*.spec.*",
+            "*_test.go",
+            "*Tests.swift",
+            "*Tests/*",
+        ]
+    )
     blocked_paths: list[str] = Field(
         default_factory=lambda: [
             ".github/*",

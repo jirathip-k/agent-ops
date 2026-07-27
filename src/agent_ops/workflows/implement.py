@@ -9,7 +9,7 @@ from agent_ops import claims, github, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
-from agent_ops.prompts import escalated, opens_with_escalation_word, render_task
+from agent_ops.prompts import escalated, opens_with_escalation_word, render_task, verdict_of
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
 from agent_ops.skills import load_skills
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, flush_print, run
@@ -845,7 +845,9 @@ def _self_review(
         config, "reviewer", prompt, wt_path, runtime_override=runtime_override
     )
     result = run_with_fallback(runtime, request, on_event=log)
-    verdict_ok = result.ok and "APPROVE" in result.text.upper().split("REQUEST CHANGES")[0]
+    # `verdict_of` returning "unknown" (no `VERDICT:` line) makes this False —
+    # an unparseable self-review halts the run rather than proceeding (fail-closed).
+    verdict_ok = result.ok and verdict_of(result.text) == "approve"
     log(
         f"self-review verdict: {'APPROVE' if verdict_ok else 'REQUEST CHANGES'} "
         f"({model_note(request, result)})"
