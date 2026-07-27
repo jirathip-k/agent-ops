@@ -342,3 +342,23 @@ def test_check_passes_150_production_plus_300_test_lines(
 
 def test_closable_refs_empty_when_no_refs() -> None:
     assert closable_issue_refs(["docs: update guide"], {1, 2}) == []
+
+
+def test_check_blocked_label_pr_reports_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--check` is how the CI lane asks, so it must see labels too.
+
+    `_fetch_pr` feeds both `run_merge` and `run_merge_check`; if only the
+    former requested `labels`, `human-merge-only` would be enforced locally
+    and silently not in CI — which is the lane `agent evolve` opens its draft
+    PRs in, so the containment would be exactly backwards.
+    """
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}], labels=["human-merge-only"])
+    pr["state"] = "OPEN"
+    calls = _stub_gh(monkeypatch, pr)
+
+    violations = run_merge_check(tmp_path, 4, log=lambda _msg: None)
+
+    assert any("blocked label" in v and "human-merge-only" in v for v in violations)
+    assert any("labels" in c[-1] for c in calls if c[:3] == ["gh", "pr", "view"])
