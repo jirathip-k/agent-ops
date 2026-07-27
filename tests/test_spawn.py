@@ -7,6 +7,7 @@ instruction misses), and Orca being absent entirely.
 
 import json
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -674,6 +675,39 @@ def test_a_spawn_that_cannot_attach_says_what_it_left_behind(
     assert str(wt) in result.output
     assert "agent spawn 113" in result.output  # how to retry
     assert "agent worktree remove issue-113" in result.output  # how to drop it
+
+
+def test_spawn_fails_when_the_surface_reports_success_over_a_dead_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The twin of `dispatch`'s issue #201 fix, left unpatched the first time
+    around: a surface can report a successful spawn while the worktree it
+    should be running in is gone — e.g. removed as a side effect of the
+    surface's own attach step, in the window between `worktree.create`
+    returning and `.spawn()` finishing. `agent spawn` must not print its
+    success line over that."""
+    _claude_installed(monkeypatch)
+
+    class WorktreeEatingSurface(FakeSurface):
+        def spawn(self, label, command, cwd, attach_path=None):  # type: ignore[no-untyped-def]
+            if attach_path is not None:
+                shutil.rmtree(attach_path, ignore_errors=True)
+            return surfaces.Spawned(
+                where="fake surface (handle term_ghost)", surface=self.name, handle="term_ghost"
+            )
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": WorktreeEatingSurface())
+
+    result = runner.invoke(app, ["spawn", "113", "--project", str(repo)])
+
+    assert result.exit_code == 1
+    assert "spawned an agent" not in result.output  # no false success line
+    assert "does not exist" in result.output
+    # The spawn record is still written — it is the only address an orphaned
+    # session has once the worktree itself is gone (mirrors `dispatch`'s fix).
+    record = messages.load_spawn(repo.resolve(), 113)
+    assert record is not None
+    assert record.handle == "term_ghost"
 
 
 # --- case 3: no Orca -------------------------------------------------------

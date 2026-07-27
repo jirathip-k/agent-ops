@@ -141,10 +141,35 @@ def test_orca_surface_attaches_terminal_to_attach_path(monkeypatch: pytest.Monke
         attach_path=Path("/repo/.worktrees/issue-7"),
     )
     assert "term_abc" in spawned.where
+    assert spawned.warning is None  # a direct attach has nothing to warn about
     (cmd,) = calls
     assert cmd[1:3] == ["terminal", "create"]
     assert "path:/repo/.worktrees/issue-7" in cmd
     assert "agent implement 7 --project /repo" in cmd  # shell-joined, one --command arg
+
+
+def test_orca_surface_awaits_indexing_before_attaching(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #201: `_attach_with_retry`'s own budget (~4s) exists to adopt a
+    terminal a timed-out `create` left behind, not to outlast Orca's rescan of
+    a brand-new external worktree (~36s) — `run_spawn` already waits that out
+    via `await_indexed`, and dispatch must get the same wait rather than
+    falling back to the project-root card on every slightly-slow index."""
+    calls = _orca_spawn_calls(monkeypatch)
+    awaited: list[list[Path]] = []
+
+    def fake_await_indexed(paths: list[Path]) -> bool:
+        awaited.append(list(paths))
+        return True
+
+    monkeypatch.setattr(surfaces.orca, "await_indexed", fake_await_indexed)
+
+    target = Path("/repo/.worktrees/issue-7")
+    surfaces.OrcaSurface().spawn(
+        "agent-issue-7", ["agent", "implement", "7"], Path("/repo"), attach_path=target
+    )
+
+    assert awaited == [[target]]
+    assert calls  # the attach itself still happened, after the wait
 
 
 def test_orca_surface_defaults_attach_to_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,7 +245,6 @@ def test_orca_surface_falls_back_to_project_root_after_persistent_selector_not_f
 
     assert "term_root" in spawned.where
     assert "fell back" in spawned.where
-    assert "/repo" in spawned.where  # states where the shell actually starts
     # the fallback terminal is still a terminal: its handle must be kept too,
     # or a run that landed on the project-root card would silently lose its
     # push channel
@@ -228,6 +252,13 @@ def test_orca_surface_falls_back_to_project_root_after_persistent_selector_not_f
     assert len(calls) == surfaces._ATTACH_ATTEMPTS + 1
     assert _worktree_selector(calls[-1]) == "path:/repo"
     assert "project root" in calls[-1][calls[-1].index("--title") + 1]
+    # The full explanation (where the shell actually starts, why the sidebar
+    # card looks empty) moves to `warning` — a caller must surface it
+    # explicitly rather than it riding along inside the success line's
+    # parenthetical (issue #201).
+    assert spawned.warning is not None
+    assert "/repo" in spawned.warning
+    assert "not indexed" in spawned.warning
 
 
 def test_orca_surface_raises_when_worktree_and_fallback_both_fail(

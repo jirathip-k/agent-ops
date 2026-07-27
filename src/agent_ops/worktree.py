@@ -96,16 +96,29 @@ def create(
             timeout=SLOW_GIT_TIMEOUT_S,
         )
         if proc.returncode == 0:
+            if not path.is_dir():
+                raise CommandError(
+                    f"git worktree add reported success for {branch!r}, but {path} does not "
+                    "exist afterwards"
+                )
             return path
         last_err = proc.stderr.strip() or proc.stdout.strip()
+        contention = "could not lock" in last_err
+        if not contention and _pristine_checkout(path, branch):
+            # Not a lock race, and `path` is already a clean checkout of the
+            # right branch: a concurrent invocation finished its own `add` in
+            # the window between our failure and this check. That is its
+            # finished work, not our half-made debris — adopt it instead of
+            # deleting a concurrent winner's worktree and branch (issue #201).
+            return path
         run(["git", "worktree", "remove", "--force", str(path)], cwd=project_root, check=False)
         if (
             run(["git", "rev-parse", "--verify", branch], cwd=project_root, check=False).returncode
             == 0
         ):
             run(["git", "branch", "-D", branch], cwd=project_root, check=False)
-        if "could not lock" not in last_err and attempt == 0:
-            break  # non-contention error — retrying won't help
+        if not contention:
+            break  # non-contention error — retrying won't help, on any attempt
         time.sleep(1.5 * (attempt + 1))
     raise CommandError(f"git worktree add failed for {branch!r}:\n{last_err}")
 
