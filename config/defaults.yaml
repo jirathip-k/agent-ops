@@ -86,8 +86,10 @@ loop:
   self_review: true        # run a read-only review agent before committing
 
 # Agent merges go into base_branch (set it to `staging` per project to use
-# the promotion flow); merge.stable_branch is human-only — `agent promote`
-# opens the verification PR, a human merges it.
+# the promotion flow); merge.stable_branch is human-only when it is a
+# separate branch from base_branch. When they're the same (the single-branch
+# model, e.g. both `main`), agents merge straight into it — see
+# workflows.merge.evaluate_merge.
 merge:
   stable_branch: main
   max_changed_lines: 400
