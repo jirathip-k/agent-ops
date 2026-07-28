@@ -6,13 +6,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import github, worktree
+from agent_ops import github, status, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, LABEL_COLORS
+
+# Marker title for the issue groom's own-workflow check opens — searched for
+# on every run so a repeat run updates nothing new rather than filing a
+# second issue for the same still-broken lane (#217).
+_STARTUP_ALERT_TITLE = "groom: workflow(s) failing at startup"
 
 # Verdicts that route an issue into a CI lane instead of bucketing it (#97).
 # They say "not ready to implement", so they clear `agent-ready` — but they
@@ -48,6 +53,77 @@ def parse_groom(text: str) -> list[GroomResult]:
     return results
 
 
+def _startup_alert_body(repo: str, paths: list[str]) -> str:
+    listed = "\n".join(f"- `{p}`" for p in paths)
+    return (
+        "**Groom: workflow startup failure** — `agent status --failures` "
+        "already shows this; nothing was running it (#217).\n\n"
+        f"The following workflow file(s) in {repo} failed their most recent "
+        "run(s) at `startup_failure` — almost always a file GitHub can no "
+        f"longer parse:\n\n{listed}\n\n"
+        "Confirm with `agent doctor`, or open the run `agent status "
+        "--failures` lists for the exact error."
+    )
+
+
+def _report_own_startup_failures(project_root: Path, repo: str, log: Callable[[str], None]) -> None:
+    """Groom's own arrival path for a signal that already existed but nothing
+    ran unprompted (#217): if this repo's own workflows are failing at
+    startup, land a `needs-human` issue instead of leaving it for someone to
+    notice by typing `agent status --failures`.
+
+    Runs before the "no open issues" early return below so a startup failure
+    is reported even on a day groom has nothing else to do. Every `gh` call
+    here is defensive: this is a bonus signal, and it must never abort the
+    issue-grooming this function exists for.
+    """
+    failures = status.own_repo_startup_failures(repo)
+    if not failures:
+        return
+    paths = sorted({str(f.get("path") or f.get("name") or "?") for f in failures})
+    try:
+        existing = run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--search",
+                f'"{_STARTUP_ALERT_TITLE}" in:title',
+                "--json",
+                "number",
+            ],
+            cwd=project_root,
+        )
+        open_alerts = json.loads(existing.stdout)
+        if open_alerts:
+            log(f"workflow startup failures already tracked in #{open_alerts[0]['number']}")
+            return
+        github.sync_labels(project_root, {"needs-human": LABEL_COLORS["needs-human"]}, repo=repo)
+        run(
+            [
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                _STARTUP_ALERT_TITLE,
+                "--body",
+                _startup_alert_body(repo, paths),
+                "--label",
+                "needs-human",
+            ],
+            cwd=project_root,
+        )
+    except CommandError as exc:
+        log(f"could not open a needs-human issue for startup failures: {exc}")
+        return
+    log(
+        f"opened a needs-human issue for {len(paths)} workflow(s) failing at startup: "
+        f"{', '.join(paths)}"
+    )
+
+
 def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list[GroomResult]:
     """Re-validate every open issue against the current working branch.
 
@@ -55,8 +131,15 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
     promotes workable ones to agent-ready, routes the ones that need design
     or elaboration into the plan/spec lanes, and refreshes stale buckets.
     Dispatch and merge remain the human's — groom only maintains the queue.
+
+    Also checks this repo's own workflows for startup failures (#217) before
+    anything else, since that check must run even on a day with no open
+    issues to groom.
     """
     config = load_project_config(project_root)
+    repo = github.remote_slug(project_root)
+    if repo is not None:
+        _report_own_startup_failures(project_root, repo, log)
     proc = run(
         [
             "gh",

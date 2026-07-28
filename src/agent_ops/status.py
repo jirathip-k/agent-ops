@@ -440,6 +440,74 @@ def fleet_failures(
         )
 
 
+def _startup_failed_runs(repo: str, limit: int) -> list[dict[str, Any]]:
+    """The `limit` most recent startup_failure runs for `repo`, straight from the
+    REST API rather than `gh run list --json`: the run's `path` field — which
+    `own_repo_startup_failures` needs to tell a broken workflow from a disabled
+    one — is a documented REST field, not a `gh` CLI projection.
+    """
+    proc = run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/actions/runs",
+            "-f",
+            "status=startup_failure",
+            "-f",
+            f"per_page={limit}",
+            "--jq",
+            ".workflow_runs",
+        ],
+        check=False,
+        timeout=FAILURE_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()
+        raise CommandError(detail[-1] if detail else f"gh api failed for {repo}")
+    return json.loads(proc.stdout)
+
+
+def _disabled_workflow_paths(repo: str) -> set[str]:
+    """Paths of `repo`'s workflows not in GitHub's `active` state.
+
+    A workflow someone turned off with `gh workflow disable` is expected to
+    never run again, not broken — so its past failures must not be reported
+    alongside a caller that stopped parsing on its own (#217). Empty on any
+    read failure: a workflow list that can't be read must not suppress a real
+    failure, so this degrades to "nothing is disabled" rather than dropping
+    the alert silently.
+    """
+    proc = run(
+        ["gh", "api", f"repos/{repo}/actions/workflows", "--jq", ".workflows"],
+        check=False,
+        timeout=FAILURE_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        return set()
+    return {w["path"] for w in json.loads(proc.stdout) if w.get("state") != "active"}
+
+
+def own_repo_startup_failures(repo: str, limit: int = FAILURE_LIMIT) -> list[dict[str, Any]]:
+    """Recent startup_failure runs against `repo`'s own currently-enabled workflows.
+
+    This is the exact signal `agent status --failures` already surfaces
+    (#133) — the gap it closes is that nothing ran the command on its own
+    (#217): a caller that no longer parses fails every run at startup, so
+    whatever cadence it runs on (a weekly cron, in the case that motivated
+    this) silently never arms. A deliberately disabled workflow is excluded:
+    its failures are expected, and reporting them would just teach whoever
+    reads this signal to start ignoring it too.
+    """
+    try:
+        runs = _startup_failed_runs(repo, limit)
+    except CommandError:
+        return []
+    if not runs:
+        return []
+    disabled = _disabled_workflow_paths(repo)
+    return [r for r in runs if r.get("path") not in disabled]
+
+
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """One screen: every registered repo's open PRs and issue buckets."""
     for repo in config.repos:

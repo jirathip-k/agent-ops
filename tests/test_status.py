@@ -729,6 +729,134 @@ def test_pipeline_status_below_the_limit_has_no_truncation_warning(
     assert "≥" not in text
 
 
+# --- own_repo_startup_failures ------------------------------------------------
+
+
+def _api_run(fixtures: dict[str, Proc]) -> FakeRun:
+    """A `run()` stand-in for the two `gh api` calls the check makes,
+    dispatched on which REST path the command hits."""
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        path = cmd[2]
+        if path.endswith("/actions/runs"):
+            return fixtures["runs"]
+        if path.endswith("/actions/workflows"):
+            return fixtures["workflows"]
+        raise AssertionError(f"unexpected gh api path: {path}")
+
+    return fake
+
+
+def _workflow_run(path: str, conclusion: str = "startup_failure") -> dict[str, Any]:
+    return {"path": path, "conclusion": conclusion, "name": path}
+
+
+def _workflow(path: str, state: str = "active") -> dict[str, Any]:
+    return {"path": path, "state": state}
+
+
+def test_own_repo_startup_failures_reports_an_active_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(json.dumps([_workflow_run(".github/workflows/evolve.yml")])),
+                "workflows": _proc(json.dumps([_workflow(".github/workflows/evolve.yml")])),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_excludes_a_deliberately_disabled_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(
+                    json.dumps(
+                        [
+                            _workflow_run(".github/workflows/evolve.yml"),
+                            _workflow_run(".github/workflows/old-lane.yml"),
+                        ]
+                    )
+                ),
+                "workflows": _proc(
+                    json.dumps(
+                        [
+                            _workflow(".github/workflows/evolve.yml", state="active"),
+                            _workflow(".github/workflows/old-lane.yml", state="disabled_manually"),
+                        ]
+                    )
+                ),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    # Only the still-enabled workflow is reported — the disabled one failing
+    # is expected, and reporting it would just teach a human to ignore this.
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_empty_when_no_startup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run({"runs": _proc("[]"), "workflows": _proc(json.dumps([_workflow("x.yml")]))}),
+    )
+
+    assert status.own_repo_startup_failures("o/a") == []
+
+
+def test_own_repo_startup_failures_degrades_to_reporting_everything_when_workflow_list_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `gh api .../actions/workflows` failure must not silently hide a real
+    startup failure behind a swallowed exception — it degrades to treating
+    every workflow as active rather than suppressing the alert."""
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(json.dumps([_workflow_run(".github/workflows/evolve.yml")])),
+                "workflows": _proc(returncode=1, stderr="HTTP 403: no scope"),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_empty_when_the_runs_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {"runs": _proc(returncode=1, stderr="HTTP 404: Not Found"), "workflows": _proc("[]")}
+        ),
+    )
+
+    assert status.own_repo_startup_failures("o/a") == []
+
+
 # --- CLI wiring --------------------------------------------------------------
 
 

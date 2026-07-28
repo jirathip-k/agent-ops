@@ -23,6 +23,25 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
 
+      # Catches a workflow file GitHub itself can't parse before it merges —
+      # #213/#217: a job-level `if:` referencing `matrix` made evolve.yml
+      # unreadable, and nothing caught it for a day. Must fail, not warn: a
+      # lint that only reports would be another signal nobody reads.
+      #
+      # `-shellcheck=` disables the shellcheck integration. This gate is about
+      # whether GitHub can parse and evaluate the file, not about shell style
+      # inside `run:` blocks — and shellcheck's info-level findings in
+      # long-standing pipelines would have made the gate red on arrival, which
+      # is how a check gets ignored or removed. Verified the narrower gate
+      # still catches the actual #213 bug: actionlint reports
+      # `context "matrix" is not allowed here` on the exact `if:` that broke
+      # evolve.yml. Widening to shellcheck is a separate decision with its own
+      # cleanup, not a side effect of adding this.
+      - name: Lint workflows (actionlint)
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck=
+
       - name: Typecheck
         run: uv run pyright
 

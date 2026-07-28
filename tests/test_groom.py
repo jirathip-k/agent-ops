@@ -329,3 +329,154 @@ def test_a_run_of_only_unrecognised_verdicts_does_not_raise(
     )
 
     assert [r.verdict for r in run_groom(tmp_path, log=lambda _msg: None)] == ["maybe-later"]
+
+
+# --- own-workflow startup-failure alert (#217) ---------------------------------
+
+
+def _issue_list_fake(
+    calls: list[list[str]], issues: list[dict[str, Any]], open_alerts: list[dict[str, Any]]
+) -> Any:
+    """A `run()` stand-in covering both `gh issue list` shapes groom makes:
+    the plain fetch-issues-to-groom call, and the alert-search call this
+    feature adds — distinguished the same way the real commands are, by
+    whether `--search` is present."""
+
+    def fake(cmd: list[str], **kwargs: object) -> _FakeProc:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return _FakeProc(json.dumps(open_alerts if "--search" in cmd else issues))
+        return _FakeProc("")
+
+    return fake
+
+
+def test_run_groom_opens_a_needs_human_issue_for_its_own_startup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Must run even on a day with nothing else to groom — the gap #217
+    describes is exactly a signal with no open issue to piggyback on."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(groom_module, "run", _issue_list_fake(calls, [], []))
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(
+        groom_module.status,
+        "own_repo_startup_failures",
+        lambda repo, limit=5: [{"path": ".github/workflows/evolve.yml"}],
+    )
+    synced: list[dict[str, github.Label]] = []
+    monkeypatch.setattr(
+        github,
+        "sync_labels",
+        lambda project_root, labels, *, repo=None: (
+            synced.append(labels)
+            or github.LabelSync(created=[], updated=[], unchanged=[], failed=[])
+        ),
+    )
+    logged: list[str] = []
+
+    results = run_groom(tmp_path, log=logged.append)
+
+    assert results == []  # no open issues, but the check still ran
+    create = next(cmd for cmd in calls if cmd[:3] == ["gh", "issue", "create"])
+    assert create[create.index("--label") + 1] == "needs-human"
+    assert ".github/workflows/evolve.yml" in create[create.index("--body") + 1]
+    assert synced and "needs-human" in synced[0]
+    assert any("opened a needs-human issue" in line for line in logged)
+
+
+def test_run_groom_does_not_duplicate_an_already_open_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(groom_module, "run", _issue_list_fake(calls, [], [{"number": 42}]))
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(
+        groom_module.status,
+        "own_repo_startup_failures",
+        lambda repo, limit=5: [{"path": ".github/workflows/evolve.yml"}],
+    )
+    logged: list[str] = []
+
+    run_groom(tmp_path, log=logged.append)
+
+    assert not any(cmd[:3] == ["gh", "issue", "create"] for cmd in calls)
+    assert any("already tracked in #42" in line for line in logged)
+
+
+def test_run_groom_does_nothing_when_no_startup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(groom_module, "run", _issue_list_fake(calls, [], []))
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(groom_module.status, "own_repo_startup_failures", lambda repo, limit=5: [])
+
+    run_groom(tmp_path, log=lambda _msg: None)
+
+    # No failures means no alert search, no label sync, no issue creation.
+    assert not any("--search" in cmd for cmd in calls if cmd[:3] == ["gh", "issue", "list"])
+    assert not any(cmd[:3] == ["gh", "issue", "create"] for cmd in calls)
+
+
+def test_run_groom_skips_the_startup_check_when_the_repo_cannot_be_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `origin` remote to check means nothing to report against — must not
+    crash trying to check a repo groom cannot name."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(groom_module, "run", _issue_list_fake(calls, [], []))
+    monkeypatch.setattr(github, "remote_slug", lambda root: None)
+
+    def unreachable(repo: str, limit: int = 5) -> list[dict[str, Any]]:
+        raise AssertionError("must not check startup failures without a resolved repo")
+
+    monkeypatch.setattr(groom_module.status, "own_repo_startup_failures", unreachable)
+
+    run_groom(tmp_path, log=lambda _msg: None)
+
+
+def test_run_groom_startup_alert_failure_does_not_abort_grooming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh` failure while filing the startup-failure alert must not stop
+    groom from still applying verdicts to the issues it was asked to groom."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> _FakeProc:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"] and "--search" in cmd:
+            raise CommandError("HTTP 403: no scope")
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return _FakeProc(json.dumps([_issue(30, [])]))
+        return _FakeProc("")
+
+    def fake_role_request(
+        config: object, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        return (
+            _FakeRuntime("GROOM RESULTS:\n#30 agent-ready — clear repro, small diff\n"),
+            RunRequest(prompt=prompt, cwd=cwd),
+        )
+
+    monkeypatch.setattr(groom_module, "run", fake_run)
+    monkeypatch.setattr(groom_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+    monkeypatch.setattr(
+        groom_module.status,
+        "own_repo_startup_failures",
+        lambda repo, limit=5: [{"path": "x.yml"}],
+    )
+    monkeypatch.setattr(
+        github,
+        "sync_labels",
+        lambda *args, **kwargs: github.LabelSync(created=[], updated=[], unchanged=[], failed=[]),
+    )
+    logged: list[str] = []
+
+    results = run_groom(tmp_path, log=logged.append)
+
+    assert [(r.number, r.verdict) for r in results] == [(30, "agent-ready")]
+    assert any("could not open a needs-human issue" in line for line in logged)
