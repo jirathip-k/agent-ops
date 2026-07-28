@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agent_ops import stubs
@@ -158,6 +159,63 @@ jobs:
 
 def test_no_triage_yml_returns_none(tmp_path: Path) -> None:
     assert _triage_drift(tmp_path) is None
+
+
+def _make_workflows_dir_unreadable(tmp_path: Path, monkeypatch) -> Path:
+    """Simulate `.github/workflows` existing but not being listable.
+
+    `chmod 000` is a no-op for root/CI containers, so the listing itself is
+    patched to raise instead — only for this repo's workflows path, so other
+    `iterdir()` calls in the same test (e.g. over `stubs/`) are unaffected.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "triage.yml").write_text(IN_SYNC_CALLER)
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self: Path) -> object:
+        if self == workflows:
+            raise PermissionError(13, "Permission denied", str(workflows))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    return workflows
+
+
+def test_caller_workflows_raises_when_the_directory_cannot_be_listed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workflows = _make_workflows_dir_unreadable(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="can't read") as excinfo:
+        stubs.caller_workflows(tmp_path, "triage")
+    assert str(workflows) in str(excinfo.value)
+
+
+def test_lane_caller_drift_reports_an_unreadable_workflows_dir_as_an_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workflows = _make_workflows_dir_unreadable(tmp_path, monkeypatch)
+
+    drift = _triage_drift(tmp_path)
+
+    assert drift is not None
+    assert drift.error is not None
+    assert "can't read" in drift.error
+    assert str(workflows) in drift.error
+    assert drift.secrets == []
+    assert drift.permissions == []
+
+
+def test_caller_drift_returns_error_results_not_a_traceback_when_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _make_workflows_dir_unreadable(tmp_path, monkeypatch)
+
+    results = caller_drift(tmp_path)
+
+    assert results  # one per known lane
+    assert all(drift.error is not None and "can't read" in drift.error for drift in results)
 
 
 def test_missing_stub_reports_error_not_traceback(tmp_path: Path, monkeypatch) -> None:

@@ -432,6 +432,24 @@ def test_fetch_ci_runs_fails_open_on_bad_json(
     assert evolve._fetch_ci_runs(tmp_path, "triage", 10) == ([], False)
 
 
+def test_fetch_ci_runs_fails_open_when_workflows_dir_cannot_be_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#242: `caller_workflows` raises `ValueError` for an unreadable dir — fail open."""
+
+    def raise_value_error(root: Path, lane: str) -> list[Path]:
+        raise ValueError(f"can't read {root}/.github/workflows: Permission denied")
+
+    monkeypatch.setattr(evolve.stubs, "caller_workflows", raise_value_error)
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("gh must not be called when the caller listing failed")
+
+    monkeypatch.setattr(evolve, "run", unreachable)
+
+    assert evolve._fetch_ci_runs(tmp_path, "triage", 10) == ([], False)
+
+
 # --- _fetch_prs / _fetch_escalations fail open --------------------------------
 
 

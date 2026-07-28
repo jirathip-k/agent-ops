@@ -165,12 +165,22 @@ def _caller_files(root: Path, pattern: re.Pattern[str]) -> list[Path]:
     or folded into a larger workflow — so the reference to the reusable
     pipeline is the only reliable marker. A cheap text search prefilters before
     the YAML parse.
+
+    Raises `ValueError` when the directory exists but can't be listed (e.g.
+    permissions) — distinct from a missing directory, which is a normal "no
+    lanes wired up" and returns `[]`. An individual unreadable *file* is still
+    silently skipped by the per-file guard below; only the listing itself,
+    which nothing downstream can route around, is escalated.
     """
     workflows = root / WORKFLOWS_REL
     if not workflows.is_dir():
         return []
+    try:
+        entries = sorted(workflows.iterdir())
+    except OSError as exc:
+        raise ValueError(f"can't read {workflows}: {exc}") from exc
     found: list[Path] = []
-    for path in sorted(workflows.iterdir()):
+    for path in entries:
         if path.suffix not in _STUB_SUFFIXES or not path.is_file():
             continue
         try:
@@ -233,6 +243,9 @@ def caller_workflows(root: Path, lane: str) -> list[Path]:
     that need to point `gh run list --workflow` at the right file (e.g.
     `evolve`, which has no other way to name a lane's CI workflow — caller
     filenames vary per repo).
+
+    Raises `ValueError` when `.github/workflows` exists but can't be listed
+    (e.g. permissions) — a missing directory is not an error and returns `[]`.
     """
     return _caller_files(root, _pipeline_pattern(lane))
 
@@ -246,8 +259,12 @@ def lane_caller_drift(root: Path, lane: str) -> CallerDrift | None:
     lane at all, or every caller is in sync.
     """
     pattern = _pipeline_pattern(lane)
+    try:
+        callers = caller_workflows(root, lane)
+    except ValueError as exc:
+        return CallerDrift(lane, stub_for(lane), [], [], error=str(exc))
     in_sync: CallerDrift | None = None
-    for caller_path in caller_workflows(root, lane):
+    for caller_path in callers:
         drift = _drift_in(caller_path, root, lane, pattern)
         if drift is None:
             continue

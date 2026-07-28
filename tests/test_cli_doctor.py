@@ -306,6 +306,35 @@ def test_doctor_reports_each_drifting_lane_on_its_own_line(tmp_path: Path, monke
     )
 
 
+def test_doctor_survives_an_unreadable_workflows_directory(tmp_path: Path, monkeypatch) -> None:
+    """#242: an unlistable `.github/workflows` must not crash `doctor`.
+
+    `chmod 000` is a no-op for root/CI containers, so `Path.iterdir` is
+    patched to raise for this repo's workflows dir specifically instead.
+    """
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "triage.yml").write_text(IN_SYNC_TRIAGE_CALLER)
+    _all_clis_present(monkeypatch)
+
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self: Path) -> object:
+        if self == workflows:
+            raise PermissionError(13, "Permission denied", str(workflows))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert "! CI caller drift check skipped: can't read" in result.output
+    assert str(workflows) in result.output
+
+
 # --- model tiers, per runtime (#42) -----------------------------------------
 
 

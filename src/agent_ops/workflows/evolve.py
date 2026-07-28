@@ -126,9 +126,14 @@ def _fetch_ci_runs(root: Path, lane: str, limit: int) -> tuple[list[dict[str, An
 
     Fails open (drops that caller's runs) on any `gh` failure — non-zero
     exit, timeout, missing binary, or bad JSON — same as every other fetch
-    here; a survey with fewer rows than the truth beats a crash.
+    here; a survey with fewer rows than the truth beats a crash. Also fails
+    open (as if the lane had no caller) when `.github/workflows` exists but
+    can't be listed.
     """
-    callers = stubs.caller_workflows(root, lane)
+    try:
+        callers = stubs.caller_workflows(root, lane)
+    except ValueError:
+        callers = []
     runs: list[dict[str, Any]] = []
     truncated = False
     for caller in callers:
