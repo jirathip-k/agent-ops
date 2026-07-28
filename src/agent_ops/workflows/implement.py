@@ -497,7 +497,7 @@ def _finish_run(
 
     title = f"fix: {issue['title']} (#{issue_number})"
     run(["git", "add", "-A"], cwd=wt_path)
-    run(["git", "commit", "-m", title], cwd=wt_path)
+    worktree.commit(wt_path, title)
 
     pr_url: str | None = None
     if open_pr:

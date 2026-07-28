@@ -436,3 +436,63 @@ def test_changed_paths_sees_untracked_and_staged_files(repo: Path) -> None:
     assert "README.md" not in diff_only
 
     assert set(worktree.changed_paths(repo)) == {"README.md", "untracked.md"}
+
+
+def test_commit_uses_the_existing_identity_when_one_is_configured(repo: Path) -> None:
+    """A developer's local git identity (set by the `repo` fixture) must
+    commit as that developer, not be silently overridden by the CI fallback.
+    """
+    (repo / "README.md").write_text("local edit\n")
+    run(["git", "add", "README.md"], cwd=repo)
+
+    worktree.commit(repo, "local edit")
+
+    author = run(["git", "log", "-1", "--format=%an <%ae>"], cwd=repo).stdout.strip()
+    assert author == "test <test@example.com>"
+
+
+def test_commit_falls_back_to_a_bot_identity_when_the_probe_finds_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #203: GitHub-hosted runners configure neither `user.name` nor
+    `user.email`, so a plain `git commit` there fails with "unable to
+    auto-detect email address" — only after a CI-lane pipeline already paid
+    for checkout, setup, and a full agent run.
+
+    A dev machine's OS-level username/hostname can make git auto-detect *some*
+    identity even with no config at all, so only the `GIT_AUTHOR_IDENT` probe
+    is faked here (matching the `hung_fetch` pattern above) — the actual
+    `git commit -c user.name=... -c user.email=...` still runs for real,
+    proving the injected identity is what git ends up using.
+    """
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+    (tmp_path / "f.txt").write_text("hi\n")
+    run(["git", "add", "."], cwd=tmp_path)
+
+    real_run = worktree.run
+
+    def no_identity(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["git", "var", "GIT_AUTHOR_IDENT"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no identity")
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree, "run", no_identity)
+
+    worktree.commit(tmp_path, "no local identity")
+
+    author = run(["git", "log", "-1", "--format=%an <%ae>"], cwd=tmp_path).stdout.strip()
+    assert author == "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+
+
+def test_commit_with_paths_leaves_other_staged_changes_staged(repo: Path) -> None:
+    (repo / "a.txt").write_text("a\n")
+    (repo / "b.txt").write_text("b\n")
+    run(["git", "add", "a.txt", "b.txt"], cwd=repo)
+
+    worktree.commit(repo, "only a.txt", paths=["a.txt"])
+
+    status = run(["git", "status", "--porcelain"], cwd=repo).stdout
+    assert "b.txt" in status
+    assert "a.txt" not in status
+    log = run(["git", "log", "-1", "--name-only", "--format="], cwd=repo).stdout.strip()
+    assert log == "a.txt"

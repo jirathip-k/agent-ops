@@ -345,3 +345,35 @@ def remove(
                 f"Worktree removed, but branch {branch!r} was kept: it has unmerged "
                 f"commits. Delete it with `git branch -D {branch}` if you are sure."
             ) from exc
+
+
+# GitHub-hosted runners configure neither `user.name` nor `user.email`, so a
+# plain `git commit` there fails with "unable to auto-detect email address" —
+# only after a CI-lane pipeline already paid for checkout, setup, and a full
+# agent run (issue #203). Same identity the CI-lane workflows configure by
+# hand via `git config --global` before invoking a committing verb.
+_BOT_IDENTITY = (
+    "-c",
+    "user.name=github-actions[bot]",
+    "-c",
+    "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+)
+
+
+def commit(wt_path: Path, message: str, *, paths: list[str] | None = None) -> None:
+    """Commit whatever the caller already `git add`ed, with a CI-safe identity fallback.
+
+    `git var GIT_AUTHOR_IDENT` is the same resolution `git commit` itself
+    would perform; when it fails, no identity is configured anywhere (global,
+    system, repo, or env), so fall back to the bot identity. When it
+    succeeds — any local dev machine, or a runner that already configured one
+    (e.g. via the CI-lane's own `git config --global` step) — commit with
+    that identity untouched, never overriding a developer's local config.
+    """
+    identity = ()
+    if run(["git", "var", "GIT_AUTHOR_IDENT"], cwd=wt_path, check=False).returncode != 0:
+        identity = _BOT_IDENTITY
+    cmd = ["git", *identity, "commit", "-m", message]
+    if paths:
+        cmd += ["--", *paths]
+    run(cmd, cwd=wt_path)

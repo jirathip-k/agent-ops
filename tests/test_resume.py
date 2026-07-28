@@ -930,13 +930,16 @@ def test_finish_run_clears_the_stored_findings_on_success(
 
     monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
     monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
     # _finish_run stages and commits in the worktree; this test is about what
     # happens after that, so the git calls are stubbed rather than staged.
-    monkeypatch.setattr(
-        implement_module,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
-    )
+    # worktree.commit shells out through worktree.run (not implement.run), so
+    # both need the same stub.
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, stdout="1 file changed")
+
+    monkeypatch.setattr(implement_module, "run", fake_run)
+    monkeypatch.setattr(implement_module.worktree, "run", fake_run)
 
     ok = implement_module._finish_run(
         repo,
@@ -962,11 +965,12 @@ def test_finish_run_clears_the_stored_findings_on_success(
 
 def _stub_finish_run_git_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
-    monkeypatch.setattr(
-        implement_module,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
-    )
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, stdout="1 file changed")
+
+    monkeypatch.setattr(implement_module, "run", fake_run)
+    monkeypatch.setattr(implement_module.worktree, "run", fake_run)
 
 
 def test_finish_run_writes_outcome_record_with_pr_url(
@@ -1044,6 +1048,19 @@ def test_finish_run_outcome_survives_worktree_removal_and_discover_runs_reports_
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
     )
+
+    # worktree.commit shells its identity probe and commit through worktree.run
+    # (not implement.run above), so fake just those two calls -- everything
+    # else (worktree.remove, in particular) must stay real: this test's whole
+    # point is that a real removal survives and `agent runs` still sees `done`.
+    real_worktree_run = worktree.run
+
+    def fake_commit_calls(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["git", "var", "GIT_AUTHOR_IDENT"] or cmd[:2] == ["git", "commit"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="1 file changed")
+        return real_worktree_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(implement_module.worktree, "run", fake_commit_calls)
     monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
 
     wt_path = worktree.create(repo, ".worktrees", "issue-7", "fix/issue-7", "main")
