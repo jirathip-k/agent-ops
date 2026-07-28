@@ -4,6 +4,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -273,6 +274,68 @@ def test_detect_lanes_unparseable_yaml_falls_back_to_line_scan() -> None:
 
 def test_detect_lanes_empty() -> None:
     assert detect_lanes({}) == {}
+
+
+# --- local_deployed_lanes ------------------------------------------------
+
+
+def test_local_deployed_lanes_no_workflows_dir_is_empty_set(tmp_path: Path) -> None:
+    assert status.local_deployed_lanes(tmp_path) == set()
+
+
+def test_local_deployed_lanes_empty_workflows_dir_is_empty_set(tmp_path: Path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    assert status.local_deployed_lanes(tmp_path) == set()
+
+
+def test_local_deployed_lanes_detects_a_wired_lane(tmp_path: Path) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "triage.yml").write_text(_stub("triage"))
+    assert status.local_deployed_lanes(tmp_path) == {"triage"}
+
+
+def test_local_deployed_lanes_multiple_files_yml_and_yaml(tmp_path: Path) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "triage.yml").write_text(_stub("triage"))
+    (workflows / "groom.yaml").write_text(_stub("groom"))
+    (workflows / "README.md").write_text("not a workflow")
+    assert status.local_deployed_lanes(tmp_path) == {"triage", "groom"}
+
+
+def test_local_deployed_lanes_unreadable_directory_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def fake_iterdir(self: Path) -> Any:
+        if self == workflows:
+            raise OSError("permission denied")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    assert status.local_deployed_lanes(tmp_path) is None
+
+
+def test_local_deployed_lanes_unreadable_file_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    bad = workflows / "triage.yml"
+    bad.write_text(_stub("triage"))
+    original_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == bad:
+            raise OSError("permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    assert status.local_deployed_lanes(tmp_path) is None
 
 
 def test_short_runner_labels() -> None:

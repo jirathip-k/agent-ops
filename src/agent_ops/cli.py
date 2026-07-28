@@ -32,6 +32,7 @@ from agent_ops.fallback import artifact_footer
 from agent_ops.github import Label
 from agent_ops.runs import issue_from_branch
 from agent_ops.runtimes import get_runtime, runtime_names
+from agent_ops.status import STAGE_CONSUMERS, local_deployed_lanes
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
     dispatch_plan,
@@ -119,6 +120,65 @@ def _print_label_commands() -> None:
             f"  gh label create {name} --color {label.color} "
             f'--description "{label.description}" --force'
         )
+
+
+def _lane_copy_command(lane: str, root: Path) -> str:
+    """The `cp` command that deploys `lane`'s stub caller into `root`.
+
+    Goes through `stubs.stub_for` for the source so a lane whose shipped stub
+    is `.yaml` rather than `.yml` still resolves to a real file.
+    """
+    stub = stubs.stub_for(lane)
+    dest = root / ".github" / "workflows" / f"{lane}{stub.suffix}"
+    return f"  cp {stub} {dest}"
+
+
+def _warn_unserviced_labels(root: Path) -> None:
+    """Warn when this repo's label vocabulary has no deployed CI lane to act
+    on it (issue #237/#229/#230): `init` syncs the full onboarding label set
+    unconditionally, but deploying the lane caller workflows is a separate,
+    easy-to-skip manual step — leaving a repo with the vocabulary of an
+    automated repo and none of the machinery.
+
+    Warn-only, by design: this never changes `init`'s exit code and never
+    blocks the label sync/print above it, so a repo that hasn't wired a lane
+    yet still gets its labels and can wire the lane whenever it's ready.
+
+    Explicit decision (issue #237): this does NOT offer to copy the stub
+    workflows for you, even though it already knows exactly which ones are
+    missing. Each stub needs a real owner filled in, a cadence/runner choice
+    that varies per repo, and secrets configured — copying one unattended
+    would hand back a workflow broken on its first run, worse than the manual
+    step it replaces. `.github/workflows/` writes are also this repo's own
+    reviewed danger zone (see AGENTS.md); doing that from `init` without a
+    human in the loop is exactly what that policy exists to prevent. So this
+    only ever names what's missing and prints the command to fix it.
+    """
+    lanes = local_deployed_lanes(root)
+    if lanes is None:
+        typer.echo(
+            "! could not read .github/workflows here — can't tell whether any CI lane is "
+            "deployed to act on the labels above; run `agent doctor` for a closer look"
+        )
+        return
+
+    if not lanes:
+        all_lanes = sorted({lane for consumers in STAGE_CONSUMERS.values() for lane in consumers})
+        typer.echo(
+            "\n! labels exist, but no lane workflows are deployed in this checkout — nothing "
+            "will act on agent-ready/spec-requested/plan-requested until a stub is copied:"
+        )
+        for lane in all_lanes:
+            typer.echo(_lane_copy_command(lane, root))
+        typer.echo("  (edit each stub's owner placeholder before using it)")
+        return
+
+    for stage, consumers in STAGE_CONSUMERS.items():
+        if consumers & lanes:
+            continue
+        missing = ", ".join(sorted(consumers))
+        commands = "; ".join(_lane_copy_command(lane, root).strip() for lane in sorted(consumers))
+        typer.echo(f"! `{stage}` has no deployed lane ({missing}) to service it — {commands}")
 
 
 def _missing_gitignore_markers(root: Path) -> list[str]:
@@ -1089,6 +1149,7 @@ def init(
     if print_labels:
         typer.echo("\nlabels the lanes use — run once per repo:")
         _print_label_commands()
+        _warn_unserviced_labels(root)
         return
 
     # Git discovers a repo by walking UP from cwd, so `agent init --project
@@ -1105,6 +1166,7 @@ def init(
             "--print-labels:"
         )
         _print_label_commands()
+        _warn_unserviced_labels(root)
         return
 
     slug = github.remote_slug(root)
@@ -1114,6 +1176,7 @@ def init(
             "or with --print-labels:"
         )
         _print_label_commands()
+        _warn_unserviced_labels(root)
         return
 
     try:
@@ -1130,6 +1193,7 @@ def init(
         _err(f"\ncould not sync labels: {exc}")
         typer.echo("labels were not synced — run these once you can:")
         _print_label_commands()
+        _warn_unserviced_labels(root)
         return
 
     typer.echo()
@@ -1142,6 +1206,7 @@ def init(
             _err(f"label {name} failed: {reason}")
     if not (sync.created or sync.updated or sync.failed):
         typer.echo(f"labels: all {len(sync.unchanged)} already match")
+    _warn_unserviced_labels(root)
 
 
 @app.command()

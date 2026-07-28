@@ -7,9 +7,10 @@ import pytest
 from typer.testing import CliRunner
 
 import agent_ops.cli as cli_module
-from agent_ops import claims, github
+from agent_ops import claims, github, stubs
 from agent_ops.cli import app
 from agent_ops.cli import github as cli_github
+from agent_ops.status import STAGE_CONSUMERS
 
 runner = CliRunner()
 
@@ -270,3 +271,105 @@ def test_init_is_idempotent_and_keeps_existing_files(tmp_path: Path) -> None:
     # claim hook not duplicated
     settings = tmp_path / claims.CLAIM_SETTINGS_REL
     assert len(json.loads(settings.read_text())["hooks"]["SessionStart"]) == 1
+
+
+# --- init's unserviced-labels warning (issue #237) ---------------------------
+
+
+def _stub_workflow(lane: str) -> str:
+    """Minimal caller content `detect_lanes` recognizes as wiring up `lane`."""
+    return (
+        "on:\n  workflow_dispatch:\n"
+        "jobs:\n"
+        f"  {lane}:\n"
+        f"    uses: acme/agent-ops/.github/workflows/{lane}-pipeline.yml@main\n"
+    )
+
+
+def _deploy_lane(tmp_path: Path, lane: str) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / f"{lane}.yml").write_text(_stub_workflow(lane))
+
+
+def _fake_sync_unchanged(
+    project_root: Path, labels: dict, *, repo: str | None = None
+) -> github.LabelSync:
+    return github.LabelSync(created=[], updated=[], unchanged=list(labels), failed=[])
+
+
+def test_init_no_lanes_warns_and_prints_copy_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo_with_remote(tmp_path)
+    monkeypatch.setattr(cli_github, "sync_labels", _fake_sync_unchanged)
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "no lane workflows are deployed" in result.output
+    assert "cp " in result.output
+    assert "managed-repo-triage.yml" in result.output
+    assert "managed-repo-groom.yml" in result.output
+    assert "managed-repo-spec.yml" in result.output
+    assert "managed-repo-plan.yml" in result.output
+    assert "owner placeholder" in result.output
+
+
+def test_init_partial_lanes_warns_only_for_unconsumed_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo_with_remote(tmp_path)
+    monkeypatch.setattr(cli_github, "sync_labels", _fake_sync_unchanged)
+    _deploy_lane(tmp_path, "triage")  # services untriaged + agent-ready only
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "no lane workflows are deployed" not in result.output
+    assert "`untriaged`" not in result.output
+    assert "`agent-ready`" not in result.output
+    assert "`backlog`" in result.output
+    assert "`spec-requested`" in result.output
+    assert "`plan-requested`" in result.output
+
+
+def test_init_fully_wired_repo_has_no_lane_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo_with_remote(tmp_path)
+    monkeypatch.setattr(cli_github, "sync_labels", _fake_sync_unchanged)
+    for lane in {lane for consumers in STAGE_CONSUMERS.values() for lane in consumers}:
+        _deploy_lane(tmp_path, lane)
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "no lane workflows are deployed" not in result.output
+    assert "has no deployed lane" not in result.output
+    assert "could not read" not in result.output
+
+
+def test_init_unreadable_lane_listing_warns_uncertainty_not_no_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same fail-safe rule as #230's `_deployed_lanes`: a workflow listing that
+    can't be read must be reported as uncertainty, never as "no lanes"."""
+    _init_repo_with_remote(tmp_path)
+    monkeypatch.setattr(cli_github, "sync_labels", _fake_sync_unchanged)
+    monkeypatch.setattr(cli_module, "local_deployed_lanes", lambda root: None)
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "could not read" in result.output
+    assert "agent doctor" in result.output
+    assert "no lane workflows are deployed" not in result.output
+
+
+def test_every_stage_consumer_lane_has_a_shipped_stub() -> None:
+    # Drift guard: `_warn_unserviced_labels`'s copy commands assume every lane
+    # named in STAGE_CONSUMERS has a real stub file to copy.
+    for consumers in STAGE_CONSUMERS.values():
+        for lane in consumers:
+            assert stubs.stub_for(lane).is_file(), f"no stub shipped for lane {lane!r}"
