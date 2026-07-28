@@ -180,6 +180,27 @@ class RepoSummary:
     unserviced: bool
 
 
+def repo_display_names(repos: list[str]) -> dict[str, str]:
+    """The name each repo should render as in the fleet list.
+
+    `owner/repo` in full is the identifiable form, but the owner is usually
+    the same across a fleet and the repo pane is narrow — left as full
+    strings, the shared owner eats the width and the pane truncates exactly
+    the part that distinguishes one row from the next (#232's post-review
+    fix). Bare repo name is used wherever it alone is unique across the
+    registered fleet; a name shared by two different owners keeps its
+    `owner/repo` form since that's the only thing that still tells them
+    apart.
+    """
+    bare = [repo.rsplit("/", 1)[-1] for repo in repos]
+    counts: dict[str, int] = {}
+    for name in bare:
+        counts[name] = counts.get(name, 0) + 1
+    return {
+        repo: name if counts[name] == 1 else repo for repo, name in zip(repos, bare, strict=True)
+    }
+
+
 def repo_summary(fr: FleetRepo) -> RepoSummary:
     if not fr.data.readable:
         return RepoSummary(

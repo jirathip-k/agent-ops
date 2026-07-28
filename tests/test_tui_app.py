@@ -130,6 +130,36 @@ def test_selecting_a_repo_fills_flow_and_filters_issues(
     _run(scenario())
 
 
+def test_flow_header_shows_true_open_count_not_flow_stage_subtotal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#232's post-review feedback: `needs-human` and `triage:done` issues are
+    real open issues but aren't `FLOW_ORDER` stages, so summing stage counts
+    for the header undercounted and mislabeled the shortfall as the repo's
+    total open issue count."""
+    issues = [
+        _issue(1, "2026-01-01T00:00:00Z", "agent-ready"),
+        _issue(2, "2026-01-02T00:00:00Z", "needs-human"),
+        _issue(3, "2026-01-03T00:00:00Z", "triage:done"),
+    ]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            rendered = str(stage_row.content)
+            assert "o/a — 3 open issue(s)" in rendered
+            assert "1 open issue(s)" not in rendered
+
+    _run(scenario())
+
+
 def test_dispatch_runs_for_the_local_repos_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -372,9 +402,42 @@ def test_repos_pane_show_loading_lists_every_repo_as_outstanding() -> None:
 
             assert pane.rows == [None, None]
             items = list(pane.children)
-            assert "o/a" in str(items[0].query_one(Label).content)
+            # Bare short name, not the "o/" prefix — each is unique on its own.
+            assert "a" in str(items[0].query_one(Label).content)
             assert "loading" in str(items[0].query_one(Label).content)
-            assert "o/b" in str(items[1].query_one(Label).content)
+            assert "b" in str(items[1].query_one(Label).content)
+
+    _run(scenario())
+
+
+def test_repos_pane_elides_shared_owner_but_keeps_colliding_names() -> None:
+    """The truncation bug from #232's post-review feedback: with a long owner
+    shared by most rows, `owner/repo` in full left three of four rows
+    indistinguishable in a narrow pane. Rows whose short name is unique drop
+    the owner; a short name shared by two different owners keeps it, since
+    that's the only thing still telling those two apart."""
+
+    async def scenario() -> None:
+        app = _ReposHarness()
+        async with app.run_test(size=(40, 24)) as pilot:
+            pane = app.query_one(ReposPane)
+            pane.show_loading(
+                [
+                    "synergy-services-cooling-tower/synergy-costing",
+                    "synergy-services-cooling-tower/synergy-erp",
+                    "jirathip-k/agent-ops",
+                    "alice/widgets",
+                    "bob/widgets",
+                ]
+            )
+            await pilot.pause()
+
+            items = list(pane.children)
+            assert str(items[0].query_one(Label).content).startswith("synergy-costing")
+            assert str(items[1].query_one(Label).content).startswith("synergy-erp")
+            assert str(items[2].query_one(Label).content).startswith("agent-ops")
+            assert str(items[3].query_one(Label).content).startswith("alice/widgets")
+            assert str(items[4].query_one(Label).content).startswith("bob/widgets")
 
     _run(scenario())
 

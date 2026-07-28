@@ -198,6 +198,34 @@ def test_repo_summary_serviced_when_lane_deployed() -> None:
     assert data.repo_summary(fr).unserviced is False
 
 
+# --- repo_display_names -------------------------------------------------------
+#
+# The fleet list is narrow, and `owner/repo` in full let the (usually shared)
+# owner eat the width that should go to the part that tells rows apart
+# (#232's post-review fix).
+
+
+def test_repo_display_names_drops_owner_when_short_name_is_unique() -> None:
+    repos = [
+        "jirathip-k/agent-ops",
+        "synergy-services-cooling-tower/synergy-costing",
+        "synergy-services-cooling-tower/synergy-erp",
+    ]
+    assert data.repo_display_names(repos) == {
+        "jirathip-k/agent-ops": "agent-ops",
+        "synergy-services-cooling-tower/synergy-costing": "synergy-costing",
+        "synergy-services-cooling-tower/synergy-erp": "synergy-erp",
+    }
+
+
+def test_repo_display_names_keeps_owner_when_short_name_collides() -> None:
+    repos = ["alice/widgets", "bob/widgets"]
+    assert data.repo_display_names(repos) == {
+        "alice/widgets": "alice/widgets",
+        "bob/widgets": "bob/widgets",
+    }
+
+
 # --- repo_detail / flow / callout --------------------------------------------
 
 

@@ -66,6 +66,7 @@ class ReposPane(ListView):
         super().__init__(**kwargs)
         self.repo_names: list[str] = []
         self.rows: list[data.RepoSummary | None] = []
+        self.display_names: dict[str, str] = {}
 
     def on_mount(self) -> None:
         self.border_title = "Repos"
@@ -73,12 +74,13 @@ class ReposPane(ListView):
     def show_loading(self, repos: list[str]) -> None:
         self.repo_names = list(repos)
         self.rows = [None] * len(repos)
+        self.display_names = data.repo_display_names(repos)
         self.clear()
         if not repos:
             self.append(ListItem(Label("(no repos registered)")))
             return
         for repo in repos:
-            self.append(ListItem(Label(f"{repo}  loading…")))
+            self.append(ListItem(Label(f"{self.display_names[repo]}  loading…")))
         _select_first(self)
 
     def update_row(self, index: int, row: data.RepoSummary) -> None:
@@ -89,13 +91,13 @@ class ReposPane(ListView):
         if index < len(items):
             items[index].query_one(Label).update(self._line(row))
 
-    @staticmethod
-    def _line(row: data.RepoSummary) -> str:
+    def _line(self, row: data.RepoSummary) -> str:
+        name = self.display_names.get(row.repo, row.repo)
         if not row.readable:
-            return f"{row.repo}  ⚠ unreadable"
+            return f"{name}  ⚠ unreadable"
         count = f"≥{row.total_open}" if row.truncated else str(row.total_open)
         marker = " ⚠" if row.unserviced else ""
-        return f"{row.repo}  {count}{marker}"
+        return f"{name}  {count}{marker}"
 
 
 class StageRow(Static):
@@ -155,10 +157,13 @@ class StageRow(Static):
         if not d.readable:
             self.update(f"{d.repo}\n⚠ unreadable — could not list this repo's issues")
             return
-        total = sum(s.count for s in d.stages)
-        header = f"{d.repo} — {total} open issue(s)"
-        if d.truncated:
-            header += " ⚠ truncated"
+        # The true open-issue count, not the flow stages' subtotal: `needs-human`
+        # and `triage:done` issues are real open issues but aren't in FLOW_ORDER,
+        # so summing `s.count` here undercounted and mislabeled the shortfall as
+        # "open issue(s)" (#232's post-review fix — the #151 shape).
+        total = len(d.issues)
+        count = f"≥{total}" if d.truncated else str(total)
+        header = f"{d.repo} — {count} open issue(s)"
         parts = []
         for i, s in enumerate(d.stages):
             label = f"{s.display}:{s.count}"
