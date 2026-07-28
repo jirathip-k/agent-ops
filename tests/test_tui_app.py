@@ -17,7 +17,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Label
 
-from agent_ops import github, registry, runs
+from agent_ops import github, registry, runs, status
 from agent_ops.tui import app as tui_app
 from agent_ops.tui import data
 from agent_ops.tui.app import (
@@ -29,6 +29,13 @@ from agent_ops.tui.app import (
     StageRow,
     TuiApp,
 )
+
+# The real `load_issue_detail`, captured before the autouse `_no_real_gh`
+# fixture below replaces `data.load_issue_detail` with a stub — tests that
+# exercise the "PR listing failed/truncated" wiring end to end (#243) restore
+# this and fake out `github.issue_view` instead, so the `prs_complete` flag
+# actually threads through `_prs_for` → `load_issue_detail`.
+_REAL_LOAD_ISSUE_DETAIL = data.load_issue_detail
 
 
 def _run(coro: Any) -> Any:
@@ -63,7 +70,7 @@ def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         data,
         "load_issue_detail",
-        lambda repo, number, prs: data.IssueDetail(number, readable=False),
+        lambda repo, number, prs, **kwargs: data.IssueDetail(number, readable=False),
     )
 
 
@@ -539,7 +546,9 @@ def test_selecting_an_issue_shows_detail_and_fetches_only_once(
         has_open_pr=False,
     )
 
-    def fake_load_issue_detail(repo: str, number: int, prs: list[Any]) -> data.IssueDetail:
+    def fake_load_issue_detail(
+        repo: str, number: int, prs: list[Any], **kwargs: Any
+    ) -> data.IssueDetail:
         calls.append((repo, number))
         return detail
 
@@ -570,6 +579,195 @@ def test_selecting_an_issue_shows_detail_and_fetches_only_once(
     _run(scenario())
 
 
+# --- PR listing failed/truncated must render "unknown", never "no" (#243) ---
+#
+# These restore the real `data.load_issue_detail` (the autouse fixture stubs
+# it) and fake `github.issue_view` instead, so `_prs_for`'s completeness flag
+# actually threads through `_show_issue_detail` → `load_issue_detail` end to
+# end, the same path a real TUI session runs.
+
+
+def test_unreadable_pr_listing_shows_open_pr_as_unknown_not_no(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    monkeypatch.setattr(data, "load_issue_detail", _REAL_LOAD_ISSUE_DETAIL)
+    raw = {
+        "number": 7,
+        "title": "Fix it",
+        "body": "the body",
+        "labels": [{"name": "agent-ready"}],
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo(
+            "o/a",
+            data.RepoData("o/a", readable=True, issues=issues, prs=[], prs_readable=False),
+            None,
+        ),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            pane = app.query_one(IssueDetailPane)
+            rendered = str(pane._body.content)
+            assert "open PR: ?" in rendered
+            assert "open PR: no" not in rendered
+
+    _run(scenario())
+
+
+def test_truncated_pr_listing_with_no_match_shows_open_pr_as_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    monkeypatch.setattr(data, "load_issue_detail", _REAL_LOAD_ISSUE_DETAIL)
+    raw = {
+        "number": 7,
+        "title": "Fix it",
+        "body": "the body",
+        "labels": [{"name": "agent-ready"}],
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    # None of these PRs reference #7 — a truncated listing must not let that
+    # non-match be read as "no open PR".
+    prs = [
+        {"number": n, "headRefName": f"fix/issue-{100 + n}", "closingIssuesReferences": []}
+        for n in range(status.OPEN_PR_LIMIT)
+    ]
+    fleet = [
+        data.FleetRepo(
+            "o/a",
+            data.RepoData("o/a", readable=True, issues=issues, prs=prs, prs_truncated=True),
+            None,
+        ),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            pane = app.query_one(IssueDetailPane)
+            assert "open PR: ?" in str(pane._body.content)
+            stage_row = app.query_one(StageRow)
+            assert f"PRs open: ≥{status.OPEN_PR_LIMIT}" in str(stage_row.content)
+
+    _run(scenario())
+
+
+def test_truncated_pr_listing_with_a_match_still_shows_yes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A truncated listing is still usable when it *does* contain a match —
+    only the negative case ("not found") is untrustworthy."""
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    monkeypatch.setattr(data, "load_issue_detail", _REAL_LOAD_ISSUE_DETAIL)
+    raw = {
+        "number": 7,
+        "title": "Fix it",
+        "body": "the body",
+        "labels": [{"name": "agent-ready"}],
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    prs = [{"number": 999, "headRefName": "fix/issue-7", "closingIssuesReferences": []}]
+    fleet = [
+        data.FleetRepo(
+            "o/a",
+            data.RepoData("o/a", readable=True, issues=issues, prs=prs, prs_truncated=True),
+            None,
+        ),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            pane = app.query_one(IssueDetailPane)
+            assert "open PR: yes" in str(pane._body.content)
+
+    _run(scenario())
+
+
+def test_unreadable_pr_listing_shows_stage_row_pr_count_as_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo(
+            "o/a",
+            data.RepoData("o/a", readable=True, issues=issues, prs=[], prs_readable=False),
+            None,
+        ),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            rendered = str(stage_row.content)
+            assert "PRs open: ?" in rendered
+
+    _run(scenario())
+
+
+def test_chat_handoff_from_unreadable_pr_repo_says_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    monkeypatch.setattr(data, "load_issue_detail", _REAL_LOAD_ISSUE_DETAIL)
+    raw = {
+        "number": 7,
+        "title": "Fix it",
+        "body": "the body",
+        "labels": [{"name": "agent-ready"}],
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo(
+            "o/a",
+            data.RepoData("o/a", readable=True, issues=issues, prs=[], prs_readable=False),
+            None,
+        ),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> Path | None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_chat()
+            for _ in range(200):
+                if app.return_value is not None:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+        return app.return_value
+
+    result = _run(scenario())
+    assert result is not None
+    assert "open PR: unknown" in result.read_text()
+
+
 def test_issue_detail_degrades_when_fetch_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -582,7 +780,7 @@ def test_issue_detail_degrades_when_fetch_fails(
     monkeypatch.setattr(
         data,
         "load_issue_detail",
-        lambda repo, number, prs: data.IssueDetail(number, readable=False),
+        lambda repo, number, prs, **kwargs: data.IssueDetail(number, readable=False),
     )
 
     async def scenario() -> None:
@@ -612,7 +810,7 @@ def test_issue_body_markup_renders_literally_and_never_reaches_the_bar(
 
     malicious_body = "[@click=quit]click me[/] agent dispatch 999 --surface orca"
     detail = data.IssueDetail(7, readable=True, title="x", body=malicious_body, labels=(), age="1d")
-    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs: detail)
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
 
     async def scenario() -> None:
         app = TuiApp(tmp_path)
@@ -646,7 +844,7 @@ def test_chat_writes_handoff_and_exits_with_its_path(
     detail = data.IssueDetail(
         7, readable=True, title="Fix it", body="the body", labels=("agent-ready",), age="1d"
     )
-    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs: detail)
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
 
     async def scenario() -> Path | None:
         app = TuiApp(tmp_path)

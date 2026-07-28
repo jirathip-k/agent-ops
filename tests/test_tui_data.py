@@ -35,7 +35,10 @@ def test_load_repo_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
         raise CommandError("nope")
 
     monkeypatch.setattr(status, "_pipeline_issues", boom)
-    assert data.load_repo("o/a") == data.RepoData("o/a", readable=False)
+    # The PR fetch never even ran here, so `prs_readable` must say so too —
+    # it must not default to "readable" for a listing that was never
+    # attempted (#243).
+    assert data.load_repo("o/a") == data.RepoData("o/a", readable=False, prs_readable=False)
 
 
 def test_load_repo_readable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +62,31 @@ def test_load_repo_pr_failure_degrades_to_empty(monkeypatch: pytest.MonkeyPatch)
     result = data.load_repo("o/a")
     assert result.readable
     assert result.prs == []
+    # A swallowed `CommandError` must not be indistinguishable from "zero
+    # open PRs" downstream — this is the #243 fallback-that-didn't-say-so.
+    assert result.prs_readable is False
+
+
+def test_load_repo_pr_listing_at_cap_is_flagged_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(status, "_pipeline_issues", lambda repo: [])
+    monkeypatch.setattr(
+        status, "_open_prs", lambda repo: [_pr(n) for n in range(status.OPEN_PR_LIMIT)]
+    )
+    result = data.load_repo("o/a")
+    assert result.prs_readable is True
+    assert result.prs_truncated is True
+
+
+def test_load_repo_pr_listing_below_cap_is_not_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(status, "_pipeline_issues", lambda repo: [])
+    monkeypatch.setattr(
+        status, "_open_prs", lambda repo: [_pr(n) for n in range(status.OPEN_PR_LIMIT - 1)]
+    )
+    result = data.load_repo("o/a")
+    assert result.prs_readable is True
+    assert result.prs_truncated is False
 
 
 def test_load_fleet_skips_lane_check_when_nothing_could_be_flagged(
@@ -100,7 +128,9 @@ def test_load_fleet_unreadable_repo_never_asks_for_lanes(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(data, "lanes_for", unreachable)
     fleet = data.load_fleet(RegistryConfig(repos=["o/a"]))
-    assert fleet[0] == data.FleetRepo("o/a", data.RepoData("o/a", readable=False), None)
+    assert fleet[0] == data.FleetRepo(
+        "o/a", data.RepoData("o/a", readable=False, prs_readable=False), None
+    )
 
 
 def test_load_fleet_fetches_repos_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,6 +283,26 @@ def test_repo_detail_stage_flow_and_pr_count() -> None:
     assert detail.pr_count == 1
 
 
+def test_repo_detail_propagates_prs_readable_and_truncated() -> None:
+    rd = data.RepoData("o/a", readable=True, issues=[], prs=[], prs_readable=False)
+    fr = data.FleetRepo("o/a", rd, lanes=None)
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    assert detail.prs_readable is False
+    assert detail.prs_truncated is False
+
+    rd2 = data.RepoData("o/a", readable=True, issues=[], prs=[], prs_truncated=True)
+    fr2 = data.FleetRepo("o/a", rd2, lanes=None)
+    detail2 = data.repo_detail(fr2, is_local=False, local_running=False)
+    assert detail2.prs_readable is True
+    assert detail2.prs_truncated is True
+
+
+def test_repo_detail_unreadable_repo_marks_prs_unreadable_too() -> None:
+    fr = data.FleetRepo("o/a", data.RepoData("o/a", readable=False), None)
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    assert detail.prs_readable is False
+
+
 def test_callout_ready_nothing_running_only_for_local_repo() -> None:
     issues = [_issue(1, "2026-01-01T00:00:00Z", "agent-ready")]
     rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
@@ -319,6 +369,23 @@ def test_waiting_on_you_aggregates_fleet_and_local() -> None:
     assert summary.halted_runs == 1
     assert summary.unserviced_repos == 1
     assert summary.unreadable_repos == ("o/b",)
+    assert summary.open_prs_incomplete is False
+
+
+def test_waiting_on_you_flags_incomplete_when_a_readable_repos_prs_failed() -> None:
+    repo = data.FleetRepo(
+        "o/a", data.RepoData("o/a", readable=True, issues=[], prs=[], prs_readable=False), lanes={}
+    )
+    summary = data.waiting_on_you([repo], [])
+    assert summary.open_prs_incomplete is True
+
+
+def test_waiting_on_you_flags_incomplete_when_a_readable_repos_prs_are_truncated() -> None:
+    repo = data.FleetRepo(
+        "o/a", data.RepoData("o/a", readable=True, issues=[], prs=[], prs_truncated=True), lanes={}
+    )
+    summary = data.waiting_on_you([repo], [])
+    assert summary.open_prs_incomplete is True
 
 
 # --- issue_stage ---------------------------------------------------------------
@@ -412,6 +479,44 @@ def test_load_issue_detail_bare_mention_does_not_count_as_open_pr(
     assert data.load_issue_detail("o/a", 7, prs).has_open_pr is False
 
 
+def test_load_issue_detail_incomplete_listing_with_no_match_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-match against an incomplete PR listing (fetch failed or hit
+    `OPEN_PR_LIMIT`) must not be reported as "no open PR" — that is exactly
+    the #243 fallback shape: "not found in what we could see" is not the
+    same claim as "there is no open PR"."""
+    raw = _issue_view_payload(7, "x", "y", "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+
+    detail = data.load_issue_detail("o/a", 7, prs=[], prs_complete=False)
+
+    assert detail.has_open_pr is None
+
+
+def test_load_issue_detail_incomplete_listing_with_match_is_still_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _issue_view_payload(7, "x", "y", "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+    prs = [{"headRefName": "fix/issue-7", "closingIssuesReferences": []}]
+
+    detail = data.load_issue_detail("o/a", 7, prs, prs_complete=False)
+
+    assert detail.has_open_pr is True
+
+
+def test_load_issue_detail_complete_listing_with_no_match_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _issue_view_payload(7, "x", "y", "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(github, "issue_view", lambda repo, number: raw)
+
+    detail = data.load_issue_detail("o/a", 7, prs=[], prs_complete=True)
+
+    assert detail.has_open_pr is False
+
+
 def test_load_issue_detail_degrades_on_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(repo: str, number: int) -> dict[str, Any]:
         raise CommandError("nope")
@@ -492,4 +597,18 @@ def test_write_chat_handoff_unreadable_detail_says_so(tmp_path: Path) -> None:
 
     text = path.read_text()
     assert "could not be fetched" in text
-    assert "open PR: no" in text
+    # `has_open_pr` defaults to `None` (unknown), not `False` — an unreadable
+    # issue's PR status was never checked, so the handoff must not assert
+    # "no" (#243).
+    assert "open PR: unknown" in text
+
+
+def test_write_chat_handoff_unknown_pr_status_says_unknown(tmp_path: Path) -> None:
+    detail = data.IssueDetail(
+        7, readable=True, title="t", body="b", labels=(), age="1d", has_open_pr=None
+    )
+    path = data.chat_handoff_path(tmp_path)
+
+    data.write_chat_handoff(path, "o/a", detail)
+
+    assert "open PR: unknown" in path.read_text()

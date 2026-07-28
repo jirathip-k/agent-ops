@@ -598,6 +598,13 @@ def fetch_repos[T](
     return [(repo, results[repo]) for repo in repos]
 
 
+# Per-repo bound for the open-PR listing. Mirrors `PIPELINE_ISSUE_LIMIT` below:
+# high enough that no registered repo is likely to hit it in ordinary use;
+# when one does, callers (the TUI's `RepoData.prs_truncated`) must say so
+# rather than silently render a smaller, wrong count (#243).
+OPEN_PR_LIMIT = 20
+
+
 def _open_prs(repo: str) -> list[dict[str, Any]]:
     """Open PRs for `repo`, newest first — the same listing `fleet_status` prints,
     factored out so the TUI's fleet sweep can read it too without a second
@@ -617,7 +624,7 @@ def _open_prs(repo: str) -> list[dict[str, Any]]:
                 "--state",
                 "open",
                 "--limit",
-                "20",
+                str(OPEN_PR_LIMIT),
                 "--json",
                 "number,title,baseRefName,headRefName,closingIssuesReferences",
             ],
