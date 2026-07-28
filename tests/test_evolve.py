@@ -726,6 +726,30 @@ def test_gather_does_not_note_missing_source_for_implement(
     assert notes == []
 
 
+def test_gather_fails_open_when_workflows_dir_cannot_be_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#242 regression: `gather`'s own `caller_workflows` call (the "no evidence
+    source" check, distinct from the one inside `_fetch_ci_runs`) must not let
+    `ValueError` from an unreadable `.github/workflows` propagate either.
+    """
+    monkeypatch.setattr(evolve, "_fetch_ci_runs", lambda root, lane, limit: ([], False))
+    monkeypatch.setattr(evolve, "_fetch_prs", _unreachable)
+    monkeypatch.setattr(evolve, "_fetch_escalations", _unreachable)
+    monkeypatch.setattr(evolve, "_load_local_outcomes", _unreachable)
+
+    def raise_value_error(root: Path, lane: str) -> list[Path]:
+        raise ValueError(f"can't read {root}/.github/workflows: Permission denied")
+
+    monkeypatch.setattr(evolve.stubs, "caller_workflows", raise_value_error)
+
+    rows, notes = evolve.gather(tmp_path, "triage", now=NOW, window_days=WINDOW_DAYS)
+
+    assert rows == []
+    assert len(notes) == 1
+    assert "no evidence source" in notes[0]
+
+
 # --- prompts.task_names ------------------------------------------------------
 
 

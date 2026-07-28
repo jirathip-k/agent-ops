@@ -442,6 +442,10 @@ def gather(
     runs: "no evidence exists" and "no evidence source exists" are different
     findings, and only the caller (`cli.evolve`) can tell them apart if
     `gather` reports them identically.
+
+    Fails open (treats the lane as having no caller) when `.github/workflows`
+    exists but can't be listed — same as `_fetch_ci_runs` — rather than
+    letting `stubs.caller_workflows`'s `ValueError` propagate uncaught.
     """
     ci_runs, ci_truncated = _fetch_ci_runs(root, lane, limit)
     prs, prs_truncated = _fetch_prs(root, limit) if lane in ("implement", "pr") else ([], False)
@@ -477,7 +481,13 @@ def gather(
             f"may be missing entirely"
         )
     other_source = lane in ("implement", "pr") or lane in LANE_ESCALATION_HEADERS
-    if not other_source and not stubs.caller_workflows(root, lane):
+    try:
+        has_caller = bool(stubs.caller_workflows(root, lane))
+    except ValueError:
+        # Same fail-open as `_fetch_ci_runs`: an unreadable `.github/workflows`
+        # must not crash `evolve` — treat it as "no caller found" here too.
+        has_caller = False
+    if not other_source and not has_caller:
         notes.append(
             f"{lane!r} has no evidence source: no CI caller workflow, PR/escalation "
             f"mapping, or local outcome convention exists for it — this is not the "
