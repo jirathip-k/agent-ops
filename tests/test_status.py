@@ -663,6 +663,7 @@ def test_pipeline_status_multi_label_issue_counts_once(monkeypatch: pytest.Monke
         _pipeline_issue(2, "2026-07-21T00:00:00Z", "backlog"),
     ]
     monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"groom"})
     lines: list[str] = []
 
     status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
@@ -691,6 +692,7 @@ def test_pipeline_status_skips_a_repo_that_404s_and_finishes_the_sweep(
             }
         ),
     )
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage"})
     lines: list[str] = []
 
     status.pipeline_status(RegistryConfig(repos=["o/gone", "o/b"]), log=lines.append)
@@ -706,6 +708,7 @@ def test_pipeline_status_flags_a_truncated_listing(monkeypatch: pytest.MonkeyPat
     limit = status.PIPELINE_ISSUE_LIMIT
     issues = [_pipeline_issue(i, "2026-07-20T00:00:00Z", "agent-ready") for i in range(limit)]
     monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage"})
     lines: list[str] = []
 
     status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
@@ -720,6 +723,7 @@ def test_pipeline_status_below_the_limit_has_no_truncation_warning(
 ) -> None:
     issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready")]
     monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage"})
     lines: list[str] = []
 
     status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
@@ -727,6 +731,129 @@ def test_pipeline_status_below_the_limit_has_no_truncation_warning(
     text = "\n".join(lines)
     assert "truncated" not in text
     assert "≥" not in text
+
+
+# --- pipeline_status: unserviced-stage detection (#229) ----------------------
+
+
+def test_pipeline_status_flags_stage_with_no_deployed_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The dotfiles#1 case the issue was filed about: a repo with no lanes
+    # deployed at all. Assert on the stage row itself, not the full output —
+    # the trailing legend line also contains the words "⚠ unserviced", so a
+    # marker that never fired on the row would still pass a whole-text check.
+    issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready")]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: set())
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    stage_line = next(line for line in lines if line.strip().startswith("agent-ready"))
+    assert "⚠ unserviced" in stage_line
+
+
+def test_pipeline_status_partial_lanes_flags_only_unconsumed_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [
+        _pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready"),
+        _pipeline_issue(2, "2026-07-21T00:00:00Z"),  # untriaged
+        _pipeline_issue(3, "2026-07-22T00:00:00Z", "backlog"),
+    ]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    # triage services both untriaged and agent-ready here; groom is missing,
+    # so backlog — serviced only by groom — must be the one flagged.
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage"})
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    stage_lines = {
+        line.split()[0]: line
+        for line in lines
+        if line.startswith("  ") and line.split()[0] in ("agent-ready", "untriaged", "backlog")
+    }
+    assert "⚠ unserviced" not in stage_lines["agent-ready"]
+    assert "⚠ unserviced" not in stage_lines["untriaged"]
+    assert "⚠ unserviced" in stage_lines["backlog"]
+
+
+def test_pipeline_status_spec_requested_unserviced_without_spec_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "spec-requested")]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage"})
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    spec_line = next(line for line in lines if line.strip().startswith("spec-requested"))
+    assert "⚠ unserviced" in spec_line
+    assert "unserviced check skipped" not in text
+
+
+def test_pipeline_status_fully_wired_repo_has_no_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    issues = [
+        _pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready"),
+        _pipeline_issue(2, "2026-07-21T00:00:00Z", "backlog"),
+        _pipeline_issue(3, "2026-07-22T00:00:00Z", "spec-requested"),
+        _pipeline_issue(4, "2026-07-23T00:00:00Z", "plan-requested"),
+        _pipeline_issue(5, "2026-07-24T00:00:00Z"),  # untriaged
+    ]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: {"triage", "groom", "spec", "plan"})
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "⚠ unserviced —" not in text
+
+
+def test_pipeline_status_needs_human_never_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "needs-human")]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+
+    def unreachable(repo: str) -> set[str] | None:
+        raise AssertionError("needs-human alone must not trigger the lane-wiring API call")
+
+    monkeypatch.setattr(status, "_deployed_lanes", unreachable)
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "needs-human" in text
+    assert "⚠ unserviced —" not in text
+
+
+def test_pipeline_status_unreadable_lane_wiring_reports_uncertainty_not_unserviced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready")]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    monkeypatch.setattr(status, "_deployed_lanes", lambda repo: None)
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "unserviced check skipped" in text
+    assert "⚠ unserviced —" not in text
+
+
+def test_stage_consumers_values_are_real_lanes_and_gate_stages_are_derived() -> None:
+    # Drift guard (#150 shape): every consumer named here must be a lane that
+    # actually exists, and the gate-stage entries must come from GATE_STAGES
+    # itself rather than a second hand-typed copy.
+    all_lanes = set(status.LANES)
+    for stage, consumers in status.STAGE_CONSUMERS.items():
+        assert consumers <= all_lanes, f"{stage} names a lane that doesn't exist: {consumers}"
+    for stage in GATE_STAGES:
+        assert status.STAGE_CONSUMERS[stage] == {stage.removesuffix("-requested")}
+    assert "needs-human" not in status.STAGE_CONSUMERS
 
 
 # --- own_repo_startup_failures ------------------------------------------------

@@ -33,6 +33,25 @@ GATE_STAGES = ("plan-requested", "spec-requested")
 # (classified but left bucketless) sits last, just above "untriaged".
 STAGE_PRECEDENCE: tuple[str, ...] = (CLAIM_LABEL, *GATE_STAGES, *BUCKETS, TRIAGE_DONE_LABEL)
 
+# Which lane(s) consume each stage — a stage held here with none of its lanes
+# deployed is work no CI lane will ever pick up (#229). The gate entries are
+# derived from GATE_STAGES itself (`spec-requested` -> `spec`, `plan-requested`
+# -> `plan`) rather than typed a second time; a drift test pins every value in
+# this map to a real lane name, so a typo here fails loudly instead of quietly
+# never matching. `needs-human`, `agent:claimed` and `triage:done` are
+# deliberately absent: a human is `needs-human`'s servicing lane, not a CI
+# lane, and flagging it would swamp 28-of-67-open-issues worth of signal.
+STAGE_CONSUMERS: dict[str, frozenset[str]] = {
+    "untriaged": frozenset({"triage"}),
+    # groom only: it's what promotes a backlog item to agent-ready or applies
+    # a gate label. spec-pipeline.yml selects solely on the spec-requested
+    # label, so it never picks up a plain backlog issue — listing it here
+    # would have rendered backlog serviced by a lane that can't reach it.
+    "backlog": frozenset({"groom"}),
+    "agent-ready": frozenset({"triage"}),  # triage pipeline's implement step
+    **{stage: frozenset({stage.removesuffix("-requested")}) for stage in GATE_STAGES},
+}
+
 # evolve and distill are lanes (agent evolve/distill validate against this
 # tuple) but neither has a CI caller here: evolve's cadence is #153, and
 # distill is dispatch-only by deliberate decision (#198) — it never gets a
@@ -209,6 +228,24 @@ def _repo_workflows(repo: str) -> dict[str, str]:
         )
         workflows[name] = base64.b64decode(blob.stdout).decode()
     return workflows
+
+
+def _deployed_lanes(repo: str) -> set[str] | None:
+    """Lanes `repo` has an actual CI caller wired up for, or None if the
+    workflow listing itself couldn't be read.
+
+    None is distinct from an empty set: a repo whose workflow directory reads
+    fine but is genuinely empty has no lanes (report unserviced); a repo whose
+    listing failed is unknown (report uncertainty, never "no lanes" — that
+    would flag a healthy repo the same as a dead one, the fail-safe
+    `_disabled_workflow_paths` already takes). Costs one API call per workflow
+    file, same as `pipeline_coverage` already pays per repo.
+    """
+    try:
+        workflows = _repo_workflows(repo)
+    except CommandError:
+        return None
+    return set(detect_lanes(workflows))
 
 
 def _short_runner(runner: str | None) -> str:
@@ -632,17 +669,32 @@ def pipeline_status(config: RegistryConfig, log: Callable[[str], None] = print) 
         counted = {
             stage: (f"≥{entry.count}" if truncated else str(entry.count)) for stage, entry in rows
         }
+        # The extra API call only happens when some row could even be flagged —
+        # a repo whose open issues are all `needs-human` pays nothing more.
+        lanes: set[str] | None = set()
+        if any(stage in STAGE_CONSUMERS for stage, _ in rows):
+            lanes = _deployed_lanes(repo)
+            if lanes is None:
+                log("  ⚠ lane wiring unreadable — unserviced check skipped")
         stage_w = max(len(stage) for stage, _ in rows)
         count_w = max(len(s) for s in counted.values())
         for stage, entry in rows:
             age = _age(entry.oldest_created_at) if entry.oldest_created_at else "?"
             oldest = f"#{entry.oldest_number}" if entry.oldest_number is not None else "?"
             count = counted[stage].rjust(count_w)
-            log(f"  {stage.ljust(stage_w)}  {count}  oldest {age} ({oldest})")
+            unserviced = (
+                lanes is not None
+                and stage in STAGE_CONSUMERS
+                and not STAGE_CONSUMERS[stage] & lanes
+            )
+            marker = "  ⚠ unserviced — no deployed lane consumes this stage" if unserviced else ""
+            log(f"  {stage.ljust(stage_w)}  {count}  oldest {age} ({oldest}){marker}")
 
     if skipped:
         log(f"\n{len(skipped)} repo(s) skipped ({', '.join(skipped)})")
     log(
         "\nage = oldest issue's age, not time-in-stage — an issue that just "
-        "entered a stage can look stuck when it isn't"
+        "entered a stage can look stuck when it isn't\n"
+        "⚠ unserviced = this stage holds items but no deployed lane consumes "
+        "them — needs-human is never marked, a human is its lane"
     )
