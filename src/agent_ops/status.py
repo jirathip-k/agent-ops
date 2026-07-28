@@ -5,14 +5,33 @@ import json
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import yaml
 
+from agent_ops.claims import CLAIM_LABEL
 from agent_ops.registry import EXAMPLE_REGISTRY_FILE, REGISTRY_FILE, RegistryConfig
 from agent_ops.utils import CommandError, run
+from agent_ops.workflows.triage import TRIAGE_DONE_LABEL
 
 BUCKETS = ("agent-ready", "needs-human", "backlog")
+
+# Order for the two gate labels within STAGE_PRECEDENCE below: `plan-requested`
+# outranks `spec-requested` because it only ever lands on an issue already
+# `agent-ready` — one stage further along than where `spec-requested` applies
+# (see the lane diagram in issue #227). A test asserts this set stays equal to
+# `workflows.triage.GATE_LABELS`, so the two can't drift apart (the #150 shape).
+GATE_STAGES = ("plan-requested", "spec-requested")
+
+# Every label the pipeline's lanes read or write that marks an issue's
+# position, highest-precedence first. `stage_counts` walks this tuple in
+# order and stops at the first label an issue carries, so a multi-labeled
+# issue (`agent-ready` + `agent:claimed`) counts once, at the furthest-along
+# stage — `agent:claimed` beats every gate label (it's being worked, not
+# merely requested), the buckets keep triage's own order, and `triage:done`
+# (classified but left bucketless) sits last, just above "untriaged".
+STAGE_PRECEDENCE: tuple[str, ...] = (CLAIM_LABEL, *GATE_STAGES, *BUCKETS, TRIAGE_DONE_LABEL)
 
 # evolve and distill are lanes (agent evolve/distill validate against this
 # tuple) but neither has a CI caller here: evolve's cadence is #153, and
@@ -47,6 +66,63 @@ def bucket_counts(issues: list[dict[str, Any]]) -> dict[str, int]:
         else:
             counts["untriaged"] += 1
     return counts
+
+
+@dataclass(frozen=True)
+class StageEntry:
+    """One pipeline stage's count and its oldest open issue, for age-based
+    "what's stuck" reporting rather than a plain bucket count."""
+
+    count: int
+    oldest_created_at: str | None
+    oldest_number: int | None
+
+
+def stage_counts(issues: list[dict[str, Any]]) -> dict[str, StageEntry]:
+    """Count open issues per pipeline stage, plus each stage's oldest issue.
+
+    Each issue counts exactly once, at the first (furthest-along) label it
+    carries in `STAGE_PRECEDENCE` — an `agent-ready` issue also carrying
+    `agent:claimed` is one item in flight, not two. An issue with none of
+    these labels is `untriaged`: it hasn't even reached `triage:done`.
+
+    "Oldest" is the issue's own `createdAt`, not time-since-label — the truer
+    number needs one `gh issue view --json timelineItems` call per issue,
+    which does not scale to a fleet sweep of every registered repo.
+    """
+    counts: dict[str, list[Any]] = {
+        stage: [0, None, None] for stage in (*STAGE_PRECEDENCE, "untriaged")
+    }
+    for issue in issues:
+        labels = {lbl["name"] for lbl in issue.get("labels", [])}
+        for stage in STAGE_PRECEDENCE:
+            if stage in labels:
+                break
+        else:
+            stage = "untriaged"
+        entry = counts[stage]
+        entry[0] += 1
+        created = issue.get("createdAt")
+        if created is not None and (entry[1] is None or created < entry[1]):
+            entry[1] = created
+            entry[2] = issue.get("number")
+    return {
+        stage: StageEntry(count, created, number)
+        for stage, (count, created, number) in counts.items()
+    }
+
+
+def _age(created_at: str, *, now: datetime | None = None) -> str:
+    """`2026-07-24T08:14:22Z` → `4d`; below a day, hours; below an hour, minutes."""
+    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    seconds = ((now or datetime.now(UTC)) - created).total_seconds()
+    if seconds >= 86400:
+        return f"{int(seconds // 86400)}d"
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m"
+    return "<1m"
 
 
 @dataclass(frozen=True)
@@ -412,3 +488,93 @@ def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> 
             log(f"  PR #{pr['number']} → {pr['baseRefName']}{promo}  {title}")
         if not prs:
             log("  no open PRs")
+
+
+# Per-repo bound for the pipeline sweep's issue listing. High enough that no
+# registered repo is likely to hit it in ordinary use; when one does, the
+# sweep must say so rather than silently render a smaller, wrong count (#151).
+PIPELINE_ISSUE_LIMIT = 500
+
+
+def _pipeline_issues(repo: str, limit: int = PIPELINE_ISSUE_LIMIT) -> list[dict[str, Any]]:
+    """Open issues for `repo`, with just enough fields to stage and age them.
+
+    Raises `CommandError` for anything that makes the repo unreadable — 404,
+    no access, renamed, wedged `gh` — the same contract `_failed_runs` uses;
+    the sweep turns that into a skip rather than aborting the fleet.
+    """
+    proc = run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,labels,createdAt",
+        ],
+        check=False,
+        timeout=FAILURE_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()
+        raise CommandError(detail[-1] if detail else f"gh issue list exited {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def pipeline_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
+    """Per registered repo: how many open issues sit in each pipeline stage,
+    and the age of the oldest one — the question a hand-written `jq`
+    one-liner used to answer, by hand, one repo at a time.
+
+    A repo whose listing hits `PIPELINE_ISSUE_LIMIT` is not fully counted: its
+    stage counts render as lower bounds (`≥N`) with an explicit warning, never
+    as a clean table that happens to be wrong. A repo `gh` cannot read at all
+    is named and skipped, like `fleet_failures`; the sweep continues.
+    """
+    if not config.repos:
+        log(f"no repos registered — copy {EXAMPLE_REGISTRY_FILE.name} to {REGISTRY_FILE}")
+        return
+
+    skipped: list[str] = []
+    for repo in config.repos:
+        try:
+            issues = _pipeline_issues(repo)
+        except CommandError as exc:
+            skipped.append(repo)
+            log(f"\033[1m{repo}\033[0m — skipped: {exc}")
+            continue
+
+        truncated = len(issues) == PIPELINE_ISSUE_LIMIT
+        rows = [(stage, entry) for stage, entry in stage_counts(issues).items() if entry.count]
+        note = (
+            f" ⚠ listing truncated at {PIPELINE_ISSUE_LIMIT} — counts below are lower bounds"
+            if truncated
+            else ""
+        )
+        log(f"\n\033[1m{repo}\033[0m — {len(issues)} open issue(s){note}")
+        if not rows:
+            log("  no open issues")
+            continue
+
+        counted = {
+            stage: (f"≥{entry.count}" if truncated else str(entry.count)) for stage, entry in rows
+        }
+        stage_w = max(len(stage) for stage, _ in rows)
+        count_w = max(len(s) for s in counted.values())
+        for stage, entry in rows:
+            age = _age(entry.oldest_created_at) if entry.oldest_created_at else "?"
+            oldest = f"#{entry.oldest_number}" if entry.oldest_number is not None else "?"
+            count = counted[stage].rjust(count_w)
+            log(f"  {stage.ljust(stage_w)}  {count}  oldest {age} ({oldest})")
+
+    if skipped:
+        log(f"\n{len(skipped)} repo(s) skipped ({', '.join(skipped)})")
+    log(
+        "\nage = oldest issue's age, not time-in-stage — an issue that just "
+        "entered a stage can look stuck when it isn't"
+    )

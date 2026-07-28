@@ -44,7 +44,10 @@ than 8 hours, closes duplicates, answers verifiable questions, caps selection
 at 3 issues per run, and stamps `triage:done` — a label the local lane never
 writes or reads (see the comment at `src/agent_ops/workflows/triage.py:17-19`,
 which exists precisely so the local lane keeps triaging issues the CI lane
-marked done but left bucketless).
+marked done but left bucketless). `agent status --pipeline` counts how many
+open issues carry each of these stage labels, fleet-wide, and how long the
+oldest one in each stage has sat there (issue #227) — the thing this table
+of labels doesn't show on its own.
 
 **implement.** Local `run_implement` (`src/agent_ops/workflows/implement.py:228`)
 works in an isolated git worktree, runs a plan stage, then a gate loop that
