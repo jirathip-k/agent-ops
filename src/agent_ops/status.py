@@ -545,26 +545,33 @@ def own_repo_startup_failures(repo: str, limit: int = FAILURE_LIMIT) -> list[dic
     return [r for r in runs if r.get("path") not in disabled]
 
 
+def _open_prs(repo: str) -> list[dict[str, Any]]:
+    """Open PRs for `repo`, newest first — the same listing `fleet_status` prints,
+    factored out so the TUI's fleet sweep can read it too without a second
+    `gh pr list` call shape to keep in sync."""
+    return json.loads(
+        run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                "20",
+                "--json",
+                "number,title,baseRefName,headRefName",
+            ],
+        ).stdout
+    )
+
+
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """One screen: every registered repo's open PRs and issue buckets."""
     for repo in config.repos:
-        prs = json.loads(
-            run(
-                [
-                    "gh",
-                    "pr",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "open",
-                    "--limit",
-                    "20",
-                    "--json",
-                    "number,title,baseRefName,headRefName",
-                ],
-            ).stdout
-        )
+        prs = _open_prs(repo)
         issues = json.loads(
             run(
                 [

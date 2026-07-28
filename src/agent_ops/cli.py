@@ -54,7 +54,9 @@ from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS, TRIAGE_DONE_LA
 app = typer.Typer(
     name="agent",
     help="agent-ops: orchestrate agentic SDLC workflows across your repos.",
-    no_args_is_help=True,
+    # Bare `agent` opens the pipeline TUI (see the callback below) rather than
+    # printing help — `no_args_is_help` would pre-empt that callback.
+    no_args_is_help=False,
 )
 worktree_app = typer.Typer(help="Manage per-task worktrees.", no_args_is_help=True)
 app.add_typer(worktree_app, name="worktree")
@@ -62,6 +64,20 @@ app.add_typer(worktree_app, name="worktree")
 ProjectOpt = Annotated[
     Path, typer.Option("--project", "-C", help="Project repo root (default: cwd)")
 ]
+
+
+@app.callback(invoke_without_command=True)
+def _main(ctx: typer.Context) -> None:
+    """agent-ops: orchestrate agentic SDLC workflows across your repos.
+
+    Run with no command to open the pipeline TUI (issue #232) — the one
+    screen for pipeline/runs/PRs, with dispatch and resume, and every
+    keybinding showing the command it runs.
+    """
+    if ctx.invoked_subcommand is None:
+        from agent_ops.tui import run_tui
+
+        run_tui(Path("."))
 
 
 def _err(message: str) -> None:
@@ -1397,6 +1413,15 @@ def runs(
     except (CommandError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+
+
+@app.command()
+def tui(project: ProjectOpt = Path(".")) -> None:
+    """Open the pipeline TUI: pipeline/runs/PRs/waiting-on-you on one screen,
+    with dispatch and resume — bare `agent` opens the same thing."""
+    from agent_ops.tui import run_tui
+
+    run_tui(project.resolve())
 
 
 @app.command()

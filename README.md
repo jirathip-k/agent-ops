@@ -46,6 +46,8 @@ as by hand; `approved-for-agent` remains human-only.
 ## Use it
 
 ```sh
+agent                          # pipeline TUI: one screen for status/runs/PRs, dispatch+resume,
+                                # every keybinding shows the command it runs (also: `agent tui`)
 agent scout                    # mine TODOs/deferred threads/gaps → file backlog issues (≤3)
 agent triage                   # classify untriaged issues: agent-ready / needs-human / backlog
 agent groom                    # re-validate open issues, promote workable ones, apply spec/plan-requested
