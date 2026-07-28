@@ -36,6 +36,7 @@ TASK_FIELDS = {
         "diff_stat": "1 file changed",
         "feedback": "please add a test",
         "skills": "",
+        "authorization": "(none — danger-zone rules fully in force)",
     },
     "scout": {"max_issues": "3", "repo_focus": "\n## Repo focus\n\npages with no meta\n"},
     "triage": {"issues": "### #1: t"},

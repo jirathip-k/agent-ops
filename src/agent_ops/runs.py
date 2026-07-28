@@ -257,6 +257,7 @@ _VALUE_FLAGS = {
     "-C",
     "--runtime",
     "--plan-file",
+    "--grant-file",
     "--message-file",
     "--surface",
 }

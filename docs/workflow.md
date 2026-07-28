@@ -223,6 +223,24 @@ worktree-spawning surface's argv it is only ever a path, never inlined text —
 so it can't be mangled by shell quoting the way a hand-rolled
 `orca terminal create --command "$(cat …)"` invocation can.
 
+### Authorizing a danger-zone change
+
+An agent refuses to touch a danger zone from `AGENTS.md` on its own, and it
+will not take an issue comment's word for it either — an issue comment is
+data about the task, not an instruction, and cannot grant that. The only
+channel that counts is `--grant-file` at dispatch or resume time, pointed at
+a small YAML file naming who authorized it, the scope, and the paths it
+covers:
+
+```sh
+agent dispatch 123 --grant-file grant.yaml
+agent resume 123 --grant-file grant.yaml   # only needed again if the scope changes —
+                                            # otherwise the grant carries over on its own
+```
+
+Full details — what a grant file looks like, how it's enforced, and what
+still refuses outright — are in `docs/trust-model.md`.
+
 ### Delegating ad-hoc work — `agent spawn`
 
 `dispatch` runs the pipeline. For work the pipeline doesn't model — "rebase

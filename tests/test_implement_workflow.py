@@ -1,10 +1,13 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from agent_ops import github, orca, worktree
+from agent_ops import github, grants, orca, runs, worktree
 from agent_ops.config import ProjectConfig
+from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.utils import run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import (
     _format_comments,
@@ -12,6 +15,17 @@ from agent_ops.workflows.implement import (
     make_plan,
     run_implement,
 )
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+    run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path)
+    run(["git", "config", "user.name", "test"], cwd=tmp_path)
+    (tmp_path / "README.md").write_text("hello\n")
+    run(["git", "add", "."], cwd=tmp_path)
+    run(["git", "commit", "-m", "init"], cwd=tmp_path)
+    return tmp_path
 
 
 def test_gate_allowed_tools_covers_each_command() -> None:
@@ -360,3 +374,426 @@ def test_card_reporter_sticks_to_the_fallback_once_it_falls_back(
     reporter.note("PR opened")
 
     assert targets == [Path("/wt"), Path("/repo"), Path("/repo")]
+
+
+# --- danger-zone grants (issue #200) ---------------------------------------
+
+
+def _grant(**overrides: object) -> grants.Grant:
+    payload: dict[str, object] = {
+        "issue": 7,
+        "granted_by": "jirathip-k",
+        "scope": "the two --description string literals and nothing else",
+        "paths": ["pyproject.toml"],
+    }
+    payload.update(overrides)
+    return grants.Grant.model_validate(payload)
+
+
+def test_resolve_grant_from_a_flag_persists_it_for_later_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grant_file = tmp_path / "grant.yaml"
+    grant_file.write_text(
+        "issue: 7\ngranted_by: jirathip-k\nscope: test scope\npaths: [pyproject.toml]\n"
+    )
+
+    resolved, carried_over = implement_module._resolve_grant(
+        tmp_path, 7, grant_file, log=lambda _: None
+    )
+
+    assert resolved is not None
+    assert resolved.granted_by == "jirathip-k"
+    assert grants.load_persisted(tmp_path, 7) == resolved
+    assert carried_over is False  # supplied this invocation, not read off disk
+
+
+def test_resolve_grant_falls_back_to_a_persisted_grant_with_no_flag(tmp_path: Path) -> None:
+    grants.persist(tmp_path, _grant())
+
+    resolved, carried_over = implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None)
+
+    assert resolved == _grant()
+    assert carried_over is True
+
+
+def test_resolve_grant_returns_none_with_no_flag_and_nothing_persisted(tmp_path: Path) -> None:
+    resolved, carried_over = implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None)
+    assert resolved is None
+    assert carried_over is False
+
+
+def test_resolve_grant_flag_overrides_an_earlier_persisted_grant(tmp_path: Path) -> None:
+    grants.persist(tmp_path, _grant(scope="the old scope"))
+    grant_file = tmp_path / "new.yaml"
+    grant_file.write_text(
+        "issue: 7\ngranted_by: someone-else\nscope: the new scope\npaths: [pyproject.toml]\n"
+    )
+
+    resolved, carried_over = implement_module._resolve_grant(
+        tmp_path, 7, grant_file, log=lambda _: None
+    )
+
+    assert resolved is not None
+    assert resolved.scope == "the new scope"
+    assert grants.load_persisted(tmp_path, 7).scope == "the new scope"  # type: ignore[union-attr]
+    assert carried_over is False  # a fresh flag, even though something was persisted before
+
+
+def test_render_authorization_default_text_with_no_grant() -> None:
+    assert implement_module._render_authorization(None) == (
+        "(none — danger-zone rules fully in force)"
+    )
+
+
+def test_render_authorization_names_grantor_scope_and_paths() -> None:
+    text = implement_module._render_authorization(_grant())
+
+    assert "jirathip-k" in text
+    assert "the two --description string literals and nothing else" in text
+    assert "pyproject.toml" in text
+
+
+def test_authorization_pr_section_names_grantor_scope_and_paths() -> None:
+    text = implement_module._authorization_pr_section(_grant(), carried_over=False)
+
+    assert text.startswith("\n\n## Authorization")
+    assert "jirathip-k" in text
+    assert "the two --description string literals and nothing else" in text
+    assert "pyproject.toml" in text
+    assert "supplied via `--grant-file` this invocation" in text
+
+
+def test_authorization_pr_section_marks_a_carried_over_grant_distinctly() -> None:
+    """Issue #200 follow-up: a grant read off `.agent-runs/` without a fresh
+    `--grant-file` this invocation must not read identically to one a human
+    just typed — the persisted copy is forgeable by a compromised implementer
+    from an earlier cycle (docs/trust-model.md)."""
+    fresh = implement_module._authorization_pr_section(_grant(), carried_over=False)
+    stale = implement_module._authorization_pr_section(_grant(), carried_over=True)
+
+    assert "carried over" in stale
+    assert stale != fresh
+
+
+def test_check_grant_scope_is_a_noop_with_no_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No grant → no new check at all — a grantless run must behave exactly
+    as it did before this existed, even against a would-be-blocked change."""
+
+    def fail_changed_paths(*a: object, **k: object) -> list[str]:
+        raise AssertionError("must not inspect the tree at all when there is no grant")
+
+    monkeypatch.setattr(implement_module.worktree, "changed_paths", fail_changed_paths)
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
+    proceed = implement_module._check_grant_scope(
+        ProjectConfig(), tmp_path, 7, tmp_path / "wt", None, card=card, log=lambda _: None
+    )
+
+    assert proceed is True
+
+
+def test_check_grant_scope_passes_when_every_blocked_change_is_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        implement_module.worktree, "changed_paths", lambda wt_path: ["pyproject.toml"]
+    )
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+
+    proceed = implement_module._check_grant_scope(
+        ProjectConfig(), tmp_path, 7, tmp_path / "wt", _grant(), card=card, log=lambda _: None
+    )
+
+    assert proceed is True
+
+
+def test_check_grant_scope_fails_loudly_on_an_uncovered_blocked_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        implement_module.worktree,
+        "changed_paths",
+        lambda wt_path: [".github/workflows/ci.yml"],
+    )
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+    logged: list[str] = []
+
+    proceed = implement_module._check_grant_scope(
+        ProjectConfig(), tmp_path, 7, tmp_path / "wt", _grant(), card=card, log=logged.append
+    )
+
+    assert proceed is False
+    assert any(".github/workflows/ci.yml" in line for line in logged)
+    recorded = runs.read_outcome(tmp_path, 7)
+    assert recorded is not None
+    assert recorded.state == "failed"
+    assert ".github/workflows/ci.yml" in (recorded.reason or "")
+
+
+def test_review_and_maybe_halt_stops_the_run_when_the_grant_is_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the caller: a granted run that reaches outside its
+    scope must never get to self-review or a commit."""
+    monkeypatch.setattr(
+        implement_module.worktree,
+        "changed_paths",
+        lambda wt_path: [".github/workflows/ci.yml"],
+    )
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    (tmp_path / "wt").mkdir()
+    monkeypatch.setattr(
+        implement_module,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="changed"),
+    )
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review must not run once the grant is exceeded")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
+
+    card = implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        tmp_path,
+        7,
+        tmp_path / "wt",
+        "did some work",
+        card=card,
+        runtime_name=None,
+        grant=_grant(),
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+
+
+def _stub_finish_run_git_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, stdout="1 file changed")
+
+    # worktree.commit shells out through worktree.run (not implement.run), so
+    # both need the same stub — see tests/test_resume.py's identical helper.
+    monkeypatch.setattr(implement_module, "run", fake_run)
+    monkeypatch.setattr(implement_module.worktree, "run", fake_run)
+
+
+def test_finish_run_adds_the_authorization_section_when_granted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, object] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/76"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+
+    ok = implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(7, tmp_path),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        grant=_grant(),
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    body = captured["body"]
+    assert isinstance(body, str)
+    assert "## Authorization" in body
+    assert "jirathip-k" in body
+    assert "supplied via `--grant-file` this invocation" in body  # default: not carried over
+
+
+def test_finish_run_marks_a_carried_over_grant_distinctly_in_the_pr_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #200 follow-up: `_finish_run` must thread `grant_carried_over`
+    through to the PR body, not just default it away — a human merging the PR
+    needs to see whether this invocation's dispatcher typed the grant or the
+    run merely read it off `.agent-runs/`."""
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, object] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/76"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+
+    implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(7, tmp_path),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        grant=_grant(),
+        grant_carried_over=True,
+        log=lambda _: None,
+    )
+
+    body = captured["body"]
+    assert isinstance(body, str)
+    assert "carried over from a persisted grant" in body
+
+
+def test_finish_run_omits_the_authorization_section_with_no_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, object] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/76"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+
+    implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(7, tmp_path),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert "## Authorization" not in captured["body"]  # type: ignore[operator]
+
+
+def test_finish_run_clears_a_persisted_grant_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    grants.persist(tmp_path, _grant())
+    assert grants.persist_path(tmp_path, 7).exists()
+
+    ok = implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(7, tmp_path),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=False,
+        keep_worktree=False,
+        grant=_grant(),
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    assert not grants.persist_path(tmp_path, 7).exists()
+
+
+def test_run_implement_fails_loudly_when_the_diff_exceeds_the_granted_scope(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(
+        implement_module,
+        "role_request",
+        lambda *a, **k: (object(), RunRequest(prompt="p", cwd=repo)),
+    )
+
+    def fake_loop(runtime, request, config, cwd, on_event=None):
+        (Path(cwd) / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+        return implement_module.LoopOutcome(True, 1, RunResult(ok=True, text="done"), [])
+
+    monkeypatch.setattr(implement_module, "run_task_loop", fake_loop)
+
+    def fail_self_review(*a: object, **k: object) -> None:
+        raise AssertionError("self-review must not run once the grant is exceeded")
+
+    monkeypatch.setattr(implement_module, "_self_review", fail_self_review)
+
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text(
+        "issue: 30\ngranted_by: jirathip-k\nscope: something narrower\n"
+        "paths: [docs/README.md]\n"  # deliberately does not cover pyproject.toml
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 30, plan_file=plan_file, grant_file=grant_file, log=lambda _: None)
+
+    assert ok is False
+    recorded = runs.read_outcome(repo, 30)
+    assert recorded is not None
+    assert recorded.state == "failed"
+    assert "pyproject.toml" in (recorded.reason or "")
+    assert (repo / ".worktrees" / "issue-30").is_dir()  # kept for inspection
+
+
+def test_run_implement_with_grant_records_authorization_and_scope_in_the_prompt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    captured: dict[str, str] = {}
+
+    def fake_role_request(config, role_name, prompt, cwd, **kwargs):
+        captured["prompt"] = prompt
+        return object(), RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(implement_module, "role_request", fake_role_request)
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text(
+        "issue: 31\ngranted_by: jirathip-k\nscope: the described scope only\n"
+        "paths: [pyproject.toml]\n"
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    run_implement(repo, 31, plan_file=plan_file, grant_file=grant_file, log=lambda _: None)
+
+    assert "the described scope only" in captured["prompt"]
+    assert "jirathip-k" in captured["prompt"]
