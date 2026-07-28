@@ -375,6 +375,15 @@ summaries and `needs-human` labels once a day; that's your ops inbox. It
 skips issues that already have an open PR, the symmetric half of the local
 lane's guard above, so the two lanes never fix the same issue twice.
 
+Every groom run also checks the repo it is grooming for `startup_failure`
+runs against that repo's own currently-enabled workflows — the same signal
+`agent status --failures` surfaces, but arriving in the ops inbox above
+(a `needs-human` issue) instead of requiring someone to type the command
+(#217). Inside `agent groom` this runs ahead of the "nothing to groom" early
+return, so a quiet issue queue doesn't skip it — though the CI job's own idle
+guard still skips invoking `agent groom` at all when a repo has zero open
+issues, which this does not change.
+
 The CI-lane implementer has two escalation channels, and they are not
 interchangeable. `ESCALATE:` halts the run: the plan proved unworkable or a
 gate couldn't be verified, and it lands as a `needs-human` label in the ops
@@ -426,10 +435,14 @@ This repo is public; the names of the repos it manages are not. The split:
   `agent status --pipelines` shows which reusable CI lanes each registered
   repo has wired up, read live from its workflow files via the GitHub API,
   and `agent status --failures` sweeps those repos for recent failed runs.
-  Both read cross-repo under your local `gh` auth, which is why they are
-  local commands and not a scheduled Action: an Action running here has
-  neither the registry nor a credential that can read another repo's runs
-  (issue #95).
+  `agent status --pipeline` answers a different question — not lane
+  *coverage* but what is stuck *in* a lane: per repo, how many open issues
+  sit in each pipeline stage (`untriaged`, `agent-ready`,
+  `spec-requested`, `agent:claimed`, ...) and the age of the oldest one
+  (issue #227). All three read cross-repo under your local `gh` auth, which
+  is why they are local commands and not a scheduled Action: an Action
+  running here has neither the registry nor a credential that can read
+  another repo's runs (issue #95).
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 

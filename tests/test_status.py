@@ -1,23 +1,30 @@
 import json
 import subprocess
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from agent_ops import registry, status, utils
+from agent_ops.claims import CLAIM_LABEL
 from agent_ops.cli import app
 from agent_ops.registry import RegistryConfig
 from agent_ops.status import (
+    BUCKETS,
+    GATE_STAGES,
     LaneInfo,
+    StageEntry,
     _branch,
     _cell,
     _short_runner,
     _tag,
     bucket_counts,
     detect_lanes,
+    stage_counts,
 )
+from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, TRIAGE_DONE_LABEL
 
 runner = CliRunner()
 
@@ -50,6 +57,74 @@ def test_bucket_counts_empty() -> None:
         "backlog": 0,
         "untriaged": 0,
     }
+
+
+# --- stage_counts / pipeline stage list --------------------------------------
+
+
+def test_stage_precedence_stays_in_sync_with_the_lanes_own_label_lists() -> None:
+    # Drift guard (#150 shape): the pipeline stage list must be derived from
+    # the same constants the lanes read and write, not a second hand-typed list.
+    assert set(BUCKETS) == BUCKET_LABELS
+    assert set(GATE_STAGES) == set(GATE_LABELS)
+    assert CLAIM_LABEL in status.STAGE_PRECEDENCE
+    assert TRIAGE_DONE_LABEL in status.STAGE_PRECEDENCE
+
+
+def _pipeline_issue(number: int, created: str, *labels: str) -> dict[str, Any]:
+    return {"number": number, "createdAt": created, "labels": [{"name": name} for name in labels]}
+
+
+def test_stage_counts_empty() -> None:
+    counts = stage_counts([])
+    assert all(entry == StageEntry(0, None, None) for entry in counts.values())
+    assert set(counts) == {*status.STAGE_PRECEDENCE, "untriaged"}
+
+
+def test_stage_counts_multi_label_issue_counts_once_at_the_furthest_stage() -> None:
+    issues = [
+        # agent-ready + claimed: in-flight work, not two items.
+        _pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready", CLAIM_LABEL),
+        # backlog + spec-requested: further along than plain backlog.
+        _pipeline_issue(2, "2026-07-21T00:00:00Z", "backlog", "spec-requested"),
+        # agent-ready + plan-requested: further along than plain agent-ready.
+        _pipeline_issue(3, "2026-07-22T00:00:00Z", "agent-ready", "plan-requested"),
+        _pipeline_issue(4, "2026-07-23T00:00:00Z", TRIAGE_DONE_LABEL),
+        _pipeline_issue(5, "2026-07-24T00:00:00Z"),  # no relevant label at all
+    ]
+
+    counts = stage_counts(issues)
+
+    assert counts[CLAIM_LABEL].count == 1
+    assert counts["plan-requested"].count == 1
+    assert counts["spec-requested"].count == 1
+    assert counts["agent-ready"].count == 0  # both agent-ready issues outrank to a gate/claim
+    assert counts["backlog"].count == 0
+    assert counts[TRIAGE_DONE_LABEL].count == 1
+    assert counts["untriaged"].count == 1
+    assert sum(entry.count for entry in counts.values()) == len(issues)
+
+
+def test_stage_counts_oldest_issue_sets_the_stages_age_and_number() -> None:
+    issues = [
+        _pipeline_issue(10, "2026-07-22T00:00:00Z", "agent-ready"),
+        _pipeline_issue(5, "2026-07-18T00:00:00Z", "agent-ready"),
+        _pipeline_issue(9, "2026-07-20T00:00:00Z", "agent-ready"),
+    ]
+
+    entry = stage_counts(issues)["agent-ready"]
+
+    assert entry.count == 3
+    assert entry.oldest_created_at == "2026-07-18T00:00:00Z"
+    assert entry.oldest_number == 5
+
+
+def test_age_formats_days_hours_minutes_and_under_a_minute() -> None:
+    now = datetime(2026, 7, 28, 12, 0, 0, tzinfo=UTC)
+    assert status._age("2026-07-24T12:00:00Z", now=now) == "4d"
+    assert status._age("2026-07-28T09:00:00Z", now=now) == "3h"
+    assert status._age("2026-07-28T11:48:00Z", now=now) == "12m"
+    assert status._age("2026-07-28T11:59:30Z", now=now) == "<1m"
 
 
 def _stub(
@@ -548,6 +623,240 @@ def test_branch_elides_only_when_it_would_push_the_url_out() -> None:
     assert elided.startswith("jirathip-k/") and elided.endswith("more")
 
 
+# --- pipeline_status -----------------------------------------------------
+
+
+def _issues_by_repo(mapping: dict[str, Proc]) -> FakeRun:
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        return mapping[cmd[cmd.index("--repo") + 1]]
+
+    return fake
+
+
+def test_pipeline_status_empty_registry_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreachable(cmd: list[str], **kwargs: Any) -> Proc:
+        raise AssertionError("no repos registered — gh must not be called")
+
+    monkeypatch.setattr(status, "run", unreachable)
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=[]), log=lines.append)
+
+    assert len(lines) == 1
+    assert "no repos registered" in lines[0]
+
+
+def test_pipeline_status_empty_repo_says_no_open_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc("[]")}))
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/a\033[0m — 0 open issue(s)" in text
+    assert "no open issues" in text
+
+
+def test_pipeline_status_multi_label_issue_counts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    issues = [
+        _pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready", CLAIM_LABEL),
+        _pipeline_issue(2, "2026-07-21T00:00:00Z", "backlog"),
+    ]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    stage_lines = {line.split()[0]: line for line in lines if line.startswith("  ")}
+    assert stage_lines[CLAIM_LABEL].split()[1] == "1"
+    assert stage_lines["backlog"].split()[1] == "1"
+    assert "agent-ready" not in stage_lines  # outranked by the claim label, not double-counted
+
+
+def test_pipeline_status_skips_a_repo_that_404s_and_finishes_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _issues_by_repo(
+            {
+                "o/gone": _proc(
+                    returncode=1,
+                    stderr="failed to list issues: HTTP 404: Not Found (...)\n",
+                ),
+                "o/b": _proc(
+                    json.dumps([_pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready")])
+                ),
+            }
+        ),
+    )
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/gone", "o/b"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/gone\033[0m — skipped: failed to list issues: HTTP 404: Not Found" in text
+    # The sweep continued past the unreadable repo.
+    assert "o/b\033[0m — 1 open issue(s)" in text
+    assert "1 repo(s) skipped (o/gone)" in text
+
+
+def test_pipeline_status_flags_a_truncated_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    limit = status.PIPELINE_ISSUE_LIMIT
+    issues = [_pipeline_issue(i, "2026-07-20T00:00:00Z", "agent-ready") for i in range(limit)]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "listing truncated" in text
+    assert f"≥{limit}" in text
+
+
+def test_pipeline_status_below_the_limit_has_no_truncation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [_pipeline_issue(1, "2026-07-20T00:00:00Z", "agent-ready")]
+    monkeypatch.setattr(status, "run", _issues_by_repo({"o/a": _proc(json.dumps(issues))}))
+    lines: list[str] = []
+
+    status.pipeline_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "truncated" not in text
+    assert "≥" not in text
+
+
+# --- own_repo_startup_failures ------------------------------------------------
+
+
+def _api_run(fixtures: dict[str, Proc]) -> FakeRun:
+    """A `run()` stand-in for the two `gh api` calls the check makes,
+    dispatched on which REST path the command hits."""
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        path = cmd[2]
+        if path.endswith("/actions/runs"):
+            return fixtures["runs"]
+        if path.endswith("/actions/workflows"):
+            return fixtures["workflows"]
+        raise AssertionError(f"unexpected gh api path: {path}")
+
+    return fake
+
+
+def _workflow_run(path: str, conclusion: str = "startup_failure") -> dict[str, Any]:
+    return {"path": path, "conclusion": conclusion, "name": path}
+
+
+def _workflow(path: str, state: str = "active") -> dict[str, Any]:
+    return {"path": path, "state": state}
+
+
+def test_own_repo_startup_failures_reports_an_active_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(json.dumps([_workflow_run(".github/workflows/evolve.yml")])),
+                "workflows": _proc(json.dumps([_workflow(".github/workflows/evolve.yml")])),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_excludes_a_deliberately_disabled_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(
+                    json.dumps(
+                        [
+                            _workflow_run(".github/workflows/evolve.yml"),
+                            _workflow_run(".github/workflows/old-lane.yml"),
+                        ]
+                    )
+                ),
+                "workflows": _proc(
+                    json.dumps(
+                        [
+                            _workflow(".github/workflows/evolve.yml", state="active"),
+                            _workflow(".github/workflows/old-lane.yml", state="disabled_manually"),
+                        ]
+                    )
+                ),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    # Only the still-enabled workflow is reported — the disabled one failing
+    # is expected, and reporting it would just teach a human to ignore this.
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_empty_when_no_startup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run({"runs": _proc("[]"), "workflows": _proc(json.dumps([_workflow("x.yml")]))}),
+    )
+
+    assert status.own_repo_startup_failures("o/a") == []
+
+
+def test_own_repo_startup_failures_degrades_to_reporting_everything_when_workflow_list_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `gh api .../actions/workflows` failure must not silently hide a real
+    startup failure behind a swallowed exception — it degrades to treating
+    every workflow as active rather than suppressing the alert."""
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {
+                "runs": _proc(json.dumps([_workflow_run(".github/workflows/evolve.yml")])),
+                "workflows": _proc(returncode=1, stderr="HTTP 403: no scope"),
+            }
+        ),
+    )
+
+    result = status.own_repo_startup_failures("o/a")
+
+    assert [r["path"] for r in result] == [".github/workflows/evolve.yml"]
+
+
+def test_own_repo_startup_failures_empty_when_the_runs_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _api_run(
+            {"runs": _proc(returncode=1, stderr="HTTP 404: Not Found"), "workflows": _proc("[]")}
+        ),
+    )
+
+    assert status.own_repo_startup_failures("o/a") == []
+
+
 # --- CLI wiring --------------------------------------------------------------
 
 
@@ -562,6 +871,22 @@ def test_status_failures_flag_runs_the_sweep(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_status_rejects_failures_with_pipelines() -> None:
     result = runner.invoke(app, ["status", "--failures", "--pipelines"])
+
+    assert result.exit_code == 1
+    assert "one at a time" in result.stderr
+
+
+def test_status_pipeline_flag_runs_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "load_registry", lambda: RegistryConfig(repos=[]))
+
+    result = runner.invoke(app, ["status", "--pipeline"])
+
+    assert result.exit_code == 0
+    assert "no repos registered" in result.output
+
+
+def test_status_rejects_pipeline_with_pipelines() -> None:
+    result = runner.invoke(app, ["status", "--pipeline", "--pipelines"])
 
     assert result.exit_code == 1
     assert "one at a time" in result.stderr

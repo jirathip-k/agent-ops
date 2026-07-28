@@ -19,6 +19,11 @@ from agent_ops.workflows.implement import role_request
 # bugs bucketless — those must still be triaged here, or the queue starves.
 BUCKET_LABELS = {"agent-ready", "needs-human", "backlog"}
 
+# The CI lane's "processed but not yet bucketed" marker (see the comment
+# above). Named here, not just inline where it's used, so `agent status
+# --pipeline` can list it as a pipeline stage without retyping the string.
+TRIAGE_DONE_LABEL = "triage:done"
+
 LABEL_COLORS: dict[str, Label] = {
     "agent-ready": Label("1d76db", "Groomed and safe for an agent to implement"),
     "needs-human": Label("d93f0b", "Triage could not classify this without a person"),
