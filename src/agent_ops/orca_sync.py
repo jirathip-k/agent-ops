@@ -21,6 +21,7 @@ from typing import Any
 
 from agent_ops import orca, worktree
 from agent_ops.config import load_project_config
+from agent_ops.github import check_state
 from agent_ops.registry import RegistryConfig
 from agent_ops.utils import CommandError, run
 from agent_ops.workflows.implement import task_identifiers
@@ -30,11 +31,6 @@ READY_LABEL = "agent-ready"
 # Branches the agent lanes push: `fix/issue-N` targets the working branch,
 # `hotfix/issue-N` targets the stable one (README branch model).
 _AGENT_BRANCH_RE = re.compile(r"^(fix|hotfix)/issue-(\d+)$")
-
-# statusCheckRollup verdicts. Everything unlisted (SUCCESS, NEUTRAL, SKIPPED,
-# ...) counts as passing: a viewer must not cry wolf over a skipped check.
-_FAILING = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
-_PENDING = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED"}
 
 _PR_FIELDS = "number,title,url,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup"
 
@@ -65,36 +61,6 @@ class Lane:
         fight the clone's own checkout for no review benefit.
         """
         return self.branch is not None and self.card_name is not None
-
-
-def check_state(rollup: object) -> str:
-    """Collapse a PR's statusCheckRollup into failing / pending / passing / none.
-
-    Handles both shapes gh returns: CheckRun entries (`status` + `conclusion`)
-    and commit StatusContext entries (`state`). Worst verdict wins, with
-    failing ahead of pending — a red check is the thing worth surfacing even
-    while other checks still run.
-    """
-    if not isinstance(rollup, list) or not rollup:
-        return "none"
-    states = {_entry_state(entry) for entry in rollup}
-    for verdict in ("failing", "pending"):
-        if verdict in states:
-            return verdict
-    return "passing"
-
-
-def _entry_state(entry: object) -> str:
-    if not isinstance(entry, dict):
-        return "passing"
-    status = str(entry.get("status") or "").upper()
-    # A running CheckRun has no conclusion yet; a StatusContext has only state.
-    verdict = str(entry.get("conclusion") or entry.get("state") or "").upper()
-    if status in _PENDING or verdict in _PENDING:
-        return "pending"
-    if verdict in _FAILING:
-        return "failing"
-    return "passing"
 
 
 def _pr_lane(repo: str, pr: dict[str, Any], stable_branch: str, working_branch: str) -> Lane | None:

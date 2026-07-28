@@ -37,6 +37,7 @@ TASK_FIELDS = {
         "feedback": "please add a test",
         "skills": "",
         "authorization": "(none — danger-zone rules fully in force)",
+        "ci_status": "",
     },
     "scout": {"max_issues": "3", "repo_focus": "\n## Repo focus\n\npages with no meta\n"},
     "triage": {"issues": "### #1: t"},

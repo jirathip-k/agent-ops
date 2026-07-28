@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops.utils import CommandError, run
+from agent_ops.utils import CommandError, run, tail
 
 # What a PR URL has to look like to be stored in a field called `pr_url`.
 # Host-agnostic on purpose (GitHub Enterprise, a proxy), but it must be a URL
@@ -17,6 +17,165 @@ _PR_URL_RE = re.compile(r"^https?://\S+/pull/\d+/?$")
 _REMOTE_RE = re.compile(
     r"^(?:git@[^:]+:|(?:ssh|git|https?)://[^/]+/)(?P<slug>[^/]+/.+?)(?:\.git)?$"
 )
+
+# statusCheckRollup verdicts. Everything unlisted (SUCCESS, NEUTRAL, SKIPPED,
+# ...) counts as passing: a viewer must not cry wolf over a skipped check.
+# Lives here (rather than only in orca_sync, its original home) so
+# `observed_ci` below can share the same collapsing logic a resumed run needs.
+_FAILING = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
+_PENDING = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED"}
+
+
+def check_state(rollup: object) -> str:
+    """Collapse a PR's statusCheckRollup into failing / pending / passing / none.
+
+    Handles both shapes gh returns: CheckRun entries (`status` + `conclusion`)
+    and commit StatusContext entries (`state`). Worst verdict wins, with
+    failing ahead of pending — a red check is the thing worth surfacing even
+    while other checks still run.
+    """
+    if not isinstance(rollup, list) or not rollup:
+        return "none"
+    states = {_entry_state(entry) for entry in rollup}
+    for verdict in ("failing", "pending"):
+        if verdict in states:
+            return verdict
+    return "passing"
+
+
+def _entry_state(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return "passing"
+    status = str(entry.get("status") or "").upper()
+    # A running CheckRun has no conclusion yet; a StatusContext has only state.
+    verdict = str(entry.get("conclusion") or entry.get("state") or "").upper()
+    if status in _PENDING or verdict in _PENDING:
+        return "pending"
+    if verdict in _FAILING:
+        return "failing"
+    return "passing"
+
+
+@dataclass(frozen=True)
+class FailingCheck:
+    name: str
+    workflow: str
+    url: str
+
+
+@dataclass(frozen=True)
+class ObservedCi:
+    """What a resumed run can see of its own PR's CI, in one `gh` round trip.
+
+    `state` is one of `"failing" | "pending" | "passing" | "none" | "no-pr" |
+    "unknown"` — `"no-pr"` means there is nothing open on this branch (or it
+    closed/merged), `"unknown"` means `gh` could not answer at all. Only
+    `"failing"` ever carries `failing`/`log_excerpt`; every other state is a
+    plain status with no detail to show.
+    """
+
+    state: str
+    pr_number: int | None = None
+    pr_url: str | None = None
+    failing: tuple[FailingCheck, ...] = ()
+    log_excerpt: str | None = None
+
+
+_NO_PR_RE = re.compile(r"no pull requests found", re.IGNORECASE)
+_JOB_URL_RE = re.compile(r"/actions/runs/\d+/job/(\d+)")
+_LOG_TAIL_LINES = 100
+_LOG_CHAR_CAP = 8000
+_MAX_LOG_JOBS = 2
+
+
+def observed_ci(branch: str, cwd: Path) -> ObservedCi:
+    """The open PR for `branch`'s CI state, as `gh` reports it right now.
+
+    A resumed run otherwise verifies only what it can reach — the worktree
+    plus the local gates — so a CI-only failure (a matrix quirk, actionlint,
+    a startup failure) that a human's feedback describes is invisible to it,
+    and a correct local pass reports an empty diff that looks like a mistake
+    (#236). This is the one call that closes that gap, so it must never turn
+    a resume into a crash: any `gh` failure, spawn failure, or unparseable
+    response degrades to `state="unknown"` rather than raising.
+    """
+    proc = run(
+        ["gh", "pr", "view", branch, "--json", "number,url,state,statusCheckRollup"],
+        cwd=cwd,
+        check=False,
+    )
+    if proc.returncode != 0:
+        if _NO_PR_RE.search(proc.stderr) or _NO_PR_RE.search(proc.stdout):
+            return ObservedCi(state="no-pr")
+        return ObservedCi(state="unknown")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return ObservedCi(state="unknown")
+    if not isinstance(data, dict) or str(data.get("state") or "").upper() != "OPEN":
+        return ObservedCi(state="no-pr")
+
+    pr_number = data.get("number")
+    pr_url = data.get("url")
+    rollup = data.get("statusCheckRollup")
+    state = check_state(rollup)
+    if state != "failing":
+        return ObservedCi(state=state, pr_number=pr_number, pr_url=pr_url)
+
+    failing = tuple(
+        FailingCheck(
+            name=str(entry.get("name") or "(unnamed check)"),
+            workflow=str(entry.get("workflowName") or ""),
+            url=str(entry.get("detailsUrl") or ""),
+        )
+        for entry in (rollup or [])
+        if isinstance(entry, dict) and _entry_state(entry) == "failing"
+    )
+    log_excerpt = _failed_job_log(failing, cwd)
+    return ObservedCi(
+        state="failing",
+        pr_number=pr_number,
+        pr_url=pr_url,
+        failing=failing,
+        log_excerpt=log_excerpt,
+    )
+
+
+def _failed_job_log(checks: Sequence[FailingCheck], cwd: Path) -> str | None:
+    """Best-effort tail of the first couple of failing jobs' logs, or None.
+
+    Quiet by design, like `observed_ci` itself: a check whose URL carries no
+    `/job/<id>` (a StatusContext, an external check), a `gh run view` that
+    fails (rate limit, expired log), or nothing failing at all just means a
+    thinner or absent excerpt for this resume — never a crash. Capped to at
+    most `_MAX_LOG_JOBS` jobs and `_LOG_CHAR_CAP` characters total so this
+    cannot blow up the resume prompt.
+    """
+    job_ids: list[str] = []
+    seen: set[str] = set()
+    for check in checks:
+        match = _JOB_URL_RE.search(check.url)
+        if match is None:
+            continue
+        job_id = match.group(1)
+        if job_id in seen:
+            continue
+        seen.add(job_id)
+        job_ids.append(job_id)
+        if len(job_ids) == _MAX_LOG_JOBS:
+            break
+    if not job_ids:
+        return None
+
+    excerpts: list[str] = []
+    for job_id in job_ids:
+        proc = run(["gh", "run", "view", "--job", job_id, "--log-failed"], cwd=cwd, check=False)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            continue
+        excerpts.append(tail(proc.stdout, _LOG_TAIL_LINES))
+    if not excerpts:
+        return None
+    return "\n\n".join(excerpts)[-_LOG_CHAR_CAP:]
 
 
 def remote_slug(cwd: Path) -> str | None:

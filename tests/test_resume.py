@@ -9,8 +9,10 @@ import pytest
 from typer.testing import CliRunner
 
 from agent_ops import github, grants, messages, orca, runs, surfaces, worktree
+from agent_ops import loop as loop_module
 from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
+from agent_ops.gates import GateResult
 from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import RunRequest, RunResult
 from agent_ops.utils import CommandError, run
@@ -1916,3 +1918,267 @@ def test_resume_cli_forwards_grant_file_to_the_dispatch_surface(
     assert result.exit_code == 0
     ((_, command, _, _),) = fake.calls
     assert "--grant-file" in command
+
+
+# --- observed CI on resume (#236) ------------------------------------------
+#
+# A resumed run otherwise verifies only what it can reach — the worktree plus
+# the local gates — so a CI-only failure a human's feedback describes (a
+# matrix quirk, actionlint, a startup failure) was invisible to it, and a
+# correct local pass looked exactly like a wrong one: an empty diff. These
+# cover the one new fetch that closes that gap, and the two things that must
+# never change: `run_implement` never makes it, and a retry never repeats it.
+
+
+def _observed_ci_failing(**overrides: Any) -> github.ObservedCi:
+    fields: dict[str, Any] = {
+        "state": "failing",
+        "pr_number": 99,
+        "pr_url": "https://github.com/o/r/pull/99",
+        "failing": (
+            github.FailingCheck(
+                name="actionlint", workflow="CI", url="https://github.com/o/r/pull/99/checks/1"
+            ),
+        ),
+        "log_excerpt": None,
+    }
+    fields.update(overrides)
+    return github.ObservedCi(**fields)
+
+
+def test_run_resume_attaches_failing_ci_to_the_prompt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-50", "fix/issue-50", "main")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(
+        implement_module.github,
+        "observed_ci",
+        lambda branch, cwd: _observed_ci_failing(log_excerpt="AssertionError: boom"),
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    run_resume(repo, 50, message="please fix it")
+
+    prompt = captured["prompt"]
+    assert "Observed CI failures on PR #99" in prompt
+    assert "untrusted data" in prompt.lower()
+    assert "actionlint" in prompt
+    assert "https://github.com/o/r/pull/99/checks/1" in prompt
+    assert "AssertionError: boom" in prompt
+    assert "```" in prompt
+
+
+def test_run_resume_omits_the_log_fence_when_there_is_no_excerpt(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-52", "fix/issue-52", "main")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(
+        implement_module.github, "observed_ci", lambda branch, cwd: _observed_ci_failing()
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    run_resume(repo, 52, message="please fix it")
+
+    prompt = captured["prompt"]
+    assert "Observed CI failures on PR #99" in prompt
+    assert "Failed job log" not in prompt
+
+
+@pytest.mark.parametrize("state", ["no-pr", "unknown", "passing", "pending", "none"])
+def test_run_resume_omits_ci_section_when_nothing_to_show(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """Only `state == "failing"` earns a section — everything else must read
+    exactly as the prompt did before #236 (bare placeholder, empty)."""
+    worktree.create(repo, ".worktrees", "issue-51", "fix/issue-51", "main")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(
+        implement_module.github, "observed_ci", lambda branch, cwd: github.ObservedCi(state=state)
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    run_resume(repo, 51, message="please fix it")
+
+    assert "Observed CI failures" not in captured["prompt"]
+
+
+def test_run_implement_never_calls_observed_ci(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run_implement` has no PR yet to observe — CI visibility is resume-only."""
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+
+    def boom(branch: str, cwd: Path) -> github.ObservedCi:
+        raise AssertionError("run_implement must never fetch observed CI")
+
+    monkeypatch.setattr(implement_module.github, "observed_ci", boom)
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 3, RunResult(ok=False, text="nope"), []),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+
+    ok = run_implement(repo, 60, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False  # gate failure — this test only cares that observed_ci was never touched
+
+
+def test_empty_diff_on_resume_with_failing_ci_names_the_checks_in_the_reason(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume's empty-diff `failed` reason must say the PR's own CI was
+    failing and shown to the agent — a correct empty diff (CI is red for a
+    reason this loop can't fix locally) reads differently from #199's plain
+    unproductive-attempt case."""
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    sends = _sent(monkeypatch)
+    ci = _observed_ci_failing()
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        60,
+        repo / "wt",
+        "everything already matches",
+        card=card,
+        runtime_name=None,
+        ci=ci,
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    reason = sends[0]["reason"] or ""
+    assert "PR #99" in reason
+    assert "actionlint" in reason
+    assert "failing" in reason
+
+
+def test_empty_diff_on_resume_with_unobservable_ci_says_so_in_the_reason(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_diff_check_needed(monkeypatch)
+    _empty_diff(monkeypatch)
+    monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "comment_on_issue", lambda *a, **k: None)
+    sends = _sent(monkeypatch)
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+    proceed = implement_module._review_and_maybe_halt(
+        ProjectConfig(),
+        repo,
+        61,
+        repo / "wt",
+        "everything already matches",
+        card=card,
+        runtime_name=None,
+        ci=github.ObservedCi(state="unknown"),
+        log=lambda _: None,
+    )
+
+    assert proceed is False
+    reason = sends[0]["reason"] or ""
+    assert "could not be observed" in reason
+
+
+def test_empty_diff_via_run_implement_reason_is_unchanged_by_the_ci_feature(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_implement` never threads a `ci`, so its empty-diff reason must read
+    exactly as it did before #236 — no CI clause of any kind."""
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request({}))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(True, 1, RunResult(ok=True, text="nothing to change"), []),
+    )
+    plan_file = repo / "plan.md"
+    plan_file.write_text("approved plan")
+    sends = _sent(monkeypatch)
+
+    ok = run_implement(repo, 62, plan_file=plan_file, log=lambda _: None)
+
+    assert ok is False
+    reason = sends[0]["reason"] or ""
+    assert reason == (
+        "implementer finished with an empty diff and no ESCALATE — final message: "
+        f"nothing to change — worktree kept at {repo / '.worktrees' / 'issue-62'}"
+    )
+
+
+def test_resume_retries_do_not_refetch_observed_ci(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`observed_ci` is fetched once in `_run_resume`, before `run_task_loop`
+    runs — a gate failure that makes the loop retry internally must not
+    refetch it per attempt (#236)."""
+    worktree.create(repo, ".worktrees", "issue-70", "fix/issue-70", "main")
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    monkeypatch.setattr(
+        implement_module,
+        "load_project_config",
+        lambda root: ProjectConfig.model_validate(
+            {"loop": {"max_attempts": 2, "self_review": False}}
+        ),
+    )
+    calls: list[str] = []
+
+    def counted_observed_ci(branch: str, cwd: Path) -> github.ObservedCi:
+        calls.append(branch)
+        return github.ObservedCi(state="none")
+
+    monkeypatch.setattr(implement_module.github, "observed_ci", counted_observed_ci)
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: Any
+    ) -> tuple[object, RunRequest]:
+        return _fake_runtime, RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(implement_module, "role_request", fake_role_request)
+
+    gate_calls = {"n": 0}
+
+    def fake_run_gates(config: object, cwd: Path) -> list[GateResult]:
+        gate_calls["n"] += 1
+        if gate_calls["n"] == 1:
+            return [GateResult("tests", "pytest", False, "boom")]
+        return []
+
+    monkeypatch.setattr(loop_module, "run_gates", fake_run_gates)
+    monkeypatch.setattr(
+        loop_module,
+        "run_with_fallback",
+        lambda runtime, request, on_event=None: RunResult(ok=True, text="ok"),
+    )
+
+    run_resume(repo, 70, message="please fix it")
+
+    assert calls == ["fix/issue-70"]
+    assert gate_calls["n"] == 2  # the retry really happened — not a trivially-true count
