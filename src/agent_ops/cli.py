@@ -133,12 +133,21 @@ def _lane_copy_command(lane: str, root: Path) -> str:
     return f"  cp {stub} {dest}"
 
 
-def _warn_unserviced_labels(root: Path) -> None:
+def _warn_unserviced_labels(root: Path, *, labels_synced: bool) -> None:
     """Warn when this repo's label vocabulary has no deployed CI lane to act
     on it (issue #237/#229/#230): `init` syncs the full onboarding label set
     unconditionally, but deploying the lane caller workflows is a separate,
     easy-to-skip manual step — leaving a repo with the vocabulary of an
     automated repo and none of the machinery.
+
+    `labels_synced` says whether *this run* actually wrote labels to GitHub
+    (only true at the one call site right after a successful
+    `github.sync_labels`). The other call sites (`--print-labels`, no git
+    root, no `origin`, a failed sync) already told the operator on the same
+    screen that nothing was synced this run — asserting "labels exist" right
+    below that would contradict it, so those paths get wording that only
+    claims what this repo's label vocabulary implies, not that this run
+    synced anything.
 
     Warn-only, by design: this never changes `init`'s exit code and never
     blocks the label sync/print above it, so a repo that hasn't wired a lane
@@ -164,10 +173,18 @@ def _warn_unserviced_labels(root: Path) -> None:
 
     if not lanes:
         all_lanes = sorted({lane for consumers in STAGE_CONSUMERS.values() for lane in consumers})
-        typer.echo(
-            "\n! labels exist, but no lane workflows are deployed in this checkout — nothing "
-            "will act on agent-ready/spec-requested/plan-requested until a stub is copied:"
-        )
+        if labels_synced:
+            typer.echo(
+                "\n! labels exist, but no lane workflows are deployed in this checkout — "
+                "nothing will act on agent-ready/spec-requested/plan-requested until a stub "
+                "is copied:"
+            )
+        else:
+            typer.echo(
+                "\n! this repo's label vocabulary implies lane workflows that aren't deployed "
+                "in this checkout — nothing will act on agent-ready/spec-requested/"
+                "plan-requested until a stub is copied:"
+            )
         for lane in all_lanes:
             typer.echo(_lane_copy_command(lane, root))
         typer.echo("  (edit each stub's owner placeholder before using it)")
@@ -1149,7 +1166,7 @@ def init(
     if print_labels:
         typer.echo("\nlabels the lanes use — run once per repo:")
         _print_label_commands()
-        _warn_unserviced_labels(root)
+        _warn_unserviced_labels(root, labels_synced=False)
         return
 
     # Git discovers a repo by walking UP from cwd, so `agent init --project
@@ -1166,7 +1183,7 @@ def init(
             "--print-labels:"
         )
         _print_label_commands()
-        _warn_unserviced_labels(root)
+        _warn_unserviced_labels(root, labels_synced=False)
         return
 
     slug = github.remote_slug(root)
@@ -1176,7 +1193,7 @@ def init(
             "or with --print-labels:"
         )
         _print_label_commands()
-        _warn_unserviced_labels(root)
+        _warn_unserviced_labels(root, labels_synced=False)
         return
 
     try:
@@ -1193,7 +1210,7 @@ def init(
         _err(f"\ncould not sync labels: {exc}")
         typer.echo("labels were not synced — run these once you can:")
         _print_label_commands()
-        _warn_unserviced_labels(root)
+        _warn_unserviced_labels(root, labels_synced=False)
         return
 
     typer.echo()
@@ -1206,7 +1223,7 @@ def init(
             _err(f"label {name} failed: {reason}")
     if not (sync.created or sync.updated or sync.failed):
         typer.echo(f"labels: all {len(sync.unchanged)} already match")
-    _warn_unserviced_labels(root)
+    _warn_unserviced_labels(root, labels_synced=True)
 
 
 @app.command()

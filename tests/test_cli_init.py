@@ -73,6 +73,28 @@ def test_init_print_labels_prints_without_touching_github(
     assert "--description" in result.output
 
 
+def test_init_print_labels_no_lanes_warns_without_claiming_labels_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--print-labels` never syncs anything, so its no-lanes-deployed warning
+    must not assert "labels exist" (regression: this call site was saying so
+    even though nothing was synced this run) — it should instead describe the
+    label vocabulary lane workflows are expected to consume."""
+    _init_repo_with_remote(tmp_path)
+
+    def fail_sync(project_root: Path, labels: dict, *, repo: str | None = None) -> github.LabelSync:
+        raise AssertionError("sync_labels must not run under --print-labels")
+
+    monkeypatch.setattr(cli_github, "sync_labels", fail_sync)
+
+    result = runner.invoke(app, ["init", "--project", str(tmp_path), "--print-labels"])
+
+    assert result.exit_code == 0
+    assert "labels exist" not in result.output
+    assert "label vocabulary" in result.output
+    assert "cp " in result.output
+
+
 def test_init_syncs_labels_and_reports_what_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
