@@ -234,6 +234,12 @@ def implement(
         Path | None,
         typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
     ] = None,
+    grant_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--grant-file", help="Scoped danger-zone authorization (see docs/trust-model.md)"
+        ),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Implement even if an open PR already references it")
     ] = False,
@@ -247,6 +253,7 @@ def implement(
             open_pr=not no_pr,
             keep_worktree=keep_worktree,
             plan_file=plan_file,
+            grant_file=grant_file,
             force=force,
         )
     except (CommandError, FileExistsError, RuntimeError, FileNotFoundError) as exc:
@@ -265,6 +272,12 @@ def dispatch(
         Path | None,
         typer.Option("--plan-file", help="Use this approved plan instead of running the planner"),
     ] = None,
+    grant_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--grant-file", help="Scoped danger-zone authorization (see docs/trust-model.md)"
+        ),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Dispatch even if an open PR already references it")
     ] = False,
@@ -278,6 +291,8 @@ def dispatch(
         # Absolute: the surface may spawn the command from the worktree rather
         # than the caller's cwd, and a relative plan path would resolve wrong.
         command.extend(["--plan-file", str(plan_file.resolve())])
+    if grant_file:
+        command.extend(["--grant-file", str(grant_file.resolve())])
     if force:
         command.append("--force")
 
@@ -288,6 +303,8 @@ def dispatch(
         # dispatch had already created one, leaving it behind to clean up.
         if plan_file and not plan_file.is_file():
             raise CommandError(f"plan file not found: {plan_file}")
+        if grant_file and not grant_file.is_file():
+            raise CommandError(f"grant file not found: {grant_file}")
         if not force:
             existing = github.open_prs_for_issue(issue, cwd=root)
             if existing:
@@ -587,6 +604,12 @@ def resume(
     runtime: Annotated[str | None, typer.Option(help="Override runtime")] = None,
     no_pr: Annotated[bool, typer.Option("--no-pr", help="Skip push + PR creation")] = False,
     keep_worktree: Annotated[bool, typer.Option(help="Keep worktree after success")] = False,
+    grant_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--grant-file", help="Scoped danger-zone authorization (see docs/trust-model.md)"
+        ),
+    ] = None,
     surface: Annotated[
         str,
         typer.Option(help="Where to run: auto | orca | background | inline"),
@@ -607,6 +630,7 @@ def resume(
                 runtime_name=runtime,
                 open_pr=not no_pr,
                 keep_worktree=keep_worktree,
+                grant_file=grant_file,
             )
         except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
             _err(str(exc))
@@ -623,6 +647,7 @@ def resume(
             runtime_name=runtime,
             open_pr=not no_pr,
             keep_worktree=keep_worktree,
+            grant_file=grant_file,
         )
     except (CommandError, FileNotFoundError, RuntimeError, ValueError) as exc:
         _err(str(exc))

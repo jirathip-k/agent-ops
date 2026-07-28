@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_ops import claims, github, messages, orca, runs, surfaces, worktree
+from agent_ops import claims, github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.loop import LoopOutcome, run_task_loop
@@ -45,6 +45,59 @@ def _ad_hoc_message_path(project_root: Path, issue_number: int) -> Path:
     replay the note instead of the review it was meant to address.
     """
     return project_root / ".agent-runs" / f"issue-{issue_number}-resume-message.md"
+
+
+def _resolve_grant(
+    project_root: Path,
+    issue_number: int,
+    grant_file: Path | None,
+    *,
+    log: Callable[[str], None],
+) -> grants.Grant | None:
+    """This cycle's danger-zone authorization: `--grant-file`, else whatever an
+    earlier cycle on this issue persisted (issue #200).
+
+    An explicit `--grant-file` is persisted immediately, overwriting anything
+    from before, so it survives every `agent resume` on this issue without
+    having to be repeated — the file is the only channel a grant has once the
+    worktree exists. `_finish_run` is what clears it, once the run it
+    authorized actually lands.
+    """
+    if grant_file is not None:
+        grant = grants.load(grant_file, issue=issue_number)
+        grants.persist(project_root, grant)
+        log(f"authorization loaded: {grant.granted_by} — {grant.scope}")
+        return grant
+    grant = grants.load_persisted(project_root, issue_number)
+    if grant is not None:
+        log(f"authorization carried over from an earlier cycle: {grant.granted_by} — {grant.scope}")
+    return grant
+
+
+def _render_authorization(grant: grants.Grant | None) -> str:
+    """The `{authorization}` field for the implement/resume prompts."""
+    if grant is None:
+        return "(none — danger-zone rules fully in force)"
+    paths = "\n".join(f"- `{p}`" for p in grant.paths)
+    expiry = f"\nExpires: {grant.expires}" if grant.expires is not None else ""
+    return (
+        f"Granted by **{grant.granted_by}**, for this issue only.{expiry}\n\n"
+        f"Scope: {grant.scope}\n\n"
+        f"Only these paths are exempted from the danger-zone rule below — stay strictly "
+        f"inside them:\n{paths}"
+    )
+
+
+def _authorization_pr_section(grant: grants.Grant) -> str:
+    """The `## Authorization` block `_finish_run` appends to a granted run's PR body."""
+    paths = "\n".join(f"- `{p}`" for p in grant.paths)
+    expiry = f"\n- Expires: {grant.expires}" if grant.expires is not None else ""
+    return (
+        "\n\n## Authorization\n\n"
+        f"- Granted by: **{grant.granted_by}**{expiry}\n"
+        f"- Scope: {grant.scope}\n"
+        f"- Paths:\n{paths}\n"
+    )
 
 
 def _existing_worktree(
@@ -291,6 +344,7 @@ def run_implement(
     open_pr: bool = True,
     keep_worktree: bool = False,
     plan_file: Path | None = None,
+    grant_file: Path | None = None,
     force: bool = False,
     log: Callable[[str], None] = flush_print,
 ) -> bool:
@@ -318,6 +372,7 @@ def run_implement(
             open_pr=open_pr,
             keep_worktree=keep_worktree,
             plan_file=plan_file,
+            grant_file=grant_file,
             force=force,
             log=log,
         )
@@ -334,6 +389,7 @@ def _run_implement(
     open_pr: bool = True,
     keep_worktree: bool = False,
     plan_file: Path | None = None,
+    grant_file: Path | None = None,
     force: bool = False,
     log: Callable[[str], None] = flush_print,
 ) -> bool:
@@ -402,6 +458,8 @@ def _run_implement(
         plan = plan_result.text
         log(f"plan ready ({len(plan.splitlines())} lines, {model_note(plan_request, plan_result)})")
 
+    grant = _resolve_grant(project_root, issue_number, grant_file, log=log)
+
     prompt = render_task(
         "implement",
         issue_number=str(issue["number"]),
@@ -411,6 +469,7 @@ def _run_implement(
         branch=branch,
         plan=plan,
         skills=load_skills(config.skills, project_root),
+        authorization=_render_authorization(grant),
     )
     runtime, request = role_request(
         config, "implementer", prompt, wt_path, runtime_override=runtime_name
@@ -448,6 +507,7 @@ def _run_implement(
         implementer_text,
         card=card,
         runtime_name=runtime_name,
+        grant=grant,
         log=log,
     ):
         return False
@@ -466,6 +526,7 @@ def _run_implement(
         card=card,
         open_pr=open_pr,
         keep_worktree=keep_worktree,
+        grant=grant,
         log=log,
     )
 
@@ -485,6 +546,7 @@ def _finish_run(
     card: _CardReporter,
     open_pr: bool,
     keep_worktree: bool,
+    grant: grants.Grant | None = None,
     log: Callable[[str], None],
 ) -> bool:
     """Commit, push, open the PR (maybe auto-merge), and clean up the worktree.
@@ -514,6 +576,8 @@ def _finish_run(
                 f"\n\n> **Model fallback:** the configured model `{request.model}` was "
                 f"unavailable, so this was implemented by `{used_model}` instead."
             )
+        if grant is not None:
+            body += _authorization_pr_section(grant)
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         pr_url = url
         log(f"opened PR: {url}")
@@ -540,6 +604,7 @@ def _finish_run(
     # the worktree removal, so a failure there can't strand them.
     _feedback_path(project_root, issue_number).unlink(missing_ok=True)
     _ad_hoc_message_path(project_root, issue_number).unlink(missing_ok=True)
+    grants.persist_path(project_root, issue_number).unlink(missing_ok=True)
     if not keep_worktree:
         worktree.remove(project_root, config.worktree_dir, task_id, force=True)
         log("worktree removed (branch kept)")
@@ -584,6 +649,7 @@ def run_resume(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
+    grant_file: Path | None = None,
     log: Callable[[str], None] = flush_print,
 ) -> bool:
     """Resume the implementer role in a worktree a prior run halted on (e.g. self-review).
@@ -607,6 +673,7 @@ def run_resume(
             runtime_name=runtime_name,
             open_pr=open_pr,
             keep_worktree=keep_worktree,
+            grant_file=grant_file,
             log=log,
         )
     finally:
@@ -623,6 +690,7 @@ def _run_resume(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
+    grant_file: Path | None = None,
     log: Callable[[str], None] = flush_print,
 ) -> bool:
     """`run_resume`'s body, minus the claim bookkeeping that wraps it."""
@@ -641,6 +709,7 @@ def _run_resume(
 
     issue = github.get_issue(issue_number, cwd=project_root)
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
+    grant = _resolve_grant(project_root, issue_number, grant_file, log=log)
 
     prompt = render_task(
         "resume",
@@ -652,6 +721,7 @@ def _run_resume(
         diff_stat=diff_stat,
         feedback=feedback,
         skills=load_skills(config.skills, project_root),
+        authorization=_render_authorization(grant),
     )
     runtime, request = role_request(
         config, "implementer", prompt, wt_path, runtime_override=runtime_name
@@ -695,6 +765,7 @@ def _run_resume(
         implementer_text,
         card=card,
         runtime_name=runtime_name,
+        grant=grant,
         log=log,
     ):
         return False
@@ -713,6 +784,7 @@ def _run_resume(
         card=card,
         open_pr=open_pr,
         keep_worktree=keep_worktree,
+        grant=grant,
         log=log,
     )
     return ok
@@ -726,6 +798,7 @@ def resume_command(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
+    grant_file: Path | None = None,
 ) -> list[str]:
     """Argv that re-runs this resume inline, for spawning onto a surface.
 
@@ -748,6 +821,10 @@ def resume_command(
         command.append("--no-pr")
     if keep_worktree:
         command.append("--keep-worktree")
+    if grant_file:
+        # Absolute, same as `--plan-file` in `cli.dispatch`: the surface may
+        # spawn from the worktree rather than the caller's cwd.
+        command += ["--grant-file", str(grant_file)]
     return command + ["--project", str(project_root)]
 
 
@@ -761,6 +838,7 @@ def dispatch_resume(
     runtime_name: str | None = None,
     open_pr: bool = True,
     keep_worktree: bool = False,
+    grant_file: Path | None = None,
     log: Callable[[str], None] = flush_print,
 ) -> surfaces.Spawned:
     """Resolve the existing task worktree and spawn `agent resume` attached to it.
@@ -790,6 +868,11 @@ def dispatch_resume(
                 f"or check {feedback_path}"
             )
 
+    if grant_file is not None:
+        grant_file = grant_file.resolve()
+        if not grant_file.is_file():
+            raise CommandError(f"grant file not found: {grant_file}")
+
     chosen = surfaces.pick(surface_name)
     command = resume_command(
         project_root,
@@ -798,6 +881,7 @@ def dispatch_resume(
         runtime_name=runtime_name,
         open_pr=open_pr,
         keep_worktree=keep_worktree,
+        grant_file=grant_file,
     )
     spawned = chosen.spawn(
         f"agent-resume-issue-{issue_number}", command, project_root, attach_path=wt_path
@@ -991,6 +1075,41 @@ def _refuse_if_stale_base(
     return False
 
 
+def _check_grant_scope(
+    config: ProjectConfig,
+    project_root: Path,
+    issue_number: int,
+    wt_path: Path,
+    grant: grants.Grant | None,
+    *,
+    card: _CardReporter,
+    log: Callable[[str], None],
+) -> bool:
+    """Refuse when a granted run's changes reach outside what the grant covers (issue #200).
+
+    A no-op when there is no grant: a grantless run is governed entirely by
+    the implementer prompt's standing danger-zone refusal, unchanged by this
+    check — this only ever narrows what an *authorized* run may touch, it
+    never adds a new restriction to the default path.
+    """
+    if grant is None:
+        return True
+    changed = worktree.changed_paths(wt_path)
+    violations = grants.scope_violations(changed, grant, config.merge.blocked_paths)
+    if not violations:
+        return True
+    offenders = ", ".join(violations)
+    message = (
+        f"changes reach outside the granted scope ({grant.scope!r}): {offenders} — "
+        f"worktree kept at {wt_path}"
+    )
+    log(f"refusing: {message}")
+    card.note(f"#{issue_number}: {message}")
+    runs.write_outcome(project_root, issue_number, state="failed", reason=message, log=log)
+    messages.send_outcome(project_root, issue_number, state="failed", reason=message, log=log)
+    return False
+
+
 def _truncated_first_line(text: str, limit: int = 200) -> str:
     """The first non-empty line of `text`, trimmed to `limit` characters.
 
@@ -1120,6 +1239,7 @@ def _review_and_maybe_halt(
     *,
     card: _CardReporter,
     runtime_name: str | None,
+    grant: grants.Grant | None = None,
     log: Callable[[str], None],
 ) -> bool:
     """Run self-review if enabled; on REQUEST CHANGES, record the halt. True means proceed.
@@ -1133,6 +1253,10 @@ def _review_and_maybe_halt(
         return False
     if _handle_empty_diff(
         project_root, issue_number, wt_path, implementer_text, card=card, log=log
+    ):
+        return False
+    if not _check_grant_scope(
+        config, project_root, issue_number, wt_path, grant, card=card, log=log
     ):
         return False
     if not config.loop.self_review:

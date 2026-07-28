@@ -269,6 +269,42 @@ def test_dispatch_rejects_missing_plan_file_before_creating_a_worktree(
     assert fake.calls == []
 
 
+def test_dispatch_forwards_grant_file_as_absolute_path(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative --grant-file must reach implement absolutized, exactly like
+    --plan-file — the surface may spawn from the worktree, not the caller's cwd."""
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant = tmp_path / "grant.yaml"
+    grant.write_text("issue: 5\ngranted_by: x\nscope: s\npaths: [a]\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app, ["dispatch", "5", "--project", str(repo), "--grant-file", "grant.yaml"]
+    )
+
+    assert result.exit_code == 0
+    ((_, command, _, _),) = fake.calls
+    assert "--grant-file" in command
+    assert command[command.index("--grant-file") + 1] == str(grant.resolve())
+
+
+def test_dispatch_rejects_missing_grant_file_before_creating_a_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+
+    result = runner.invoke(
+        app, ["dispatch", "5", "--project", str(repo), "--grant-file", "nope.yaml"]
+    )
+
+    assert result.exit_code == 1
+    assert not (repo.resolve() / ".worktrees" / "issue-5").exists()
+    assert fake.calls == []
+
+
 def test_dispatch_records_how_to_reach_the_run(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #98: the terminal handle is a dispatched run's one stable
     identity, and it used to be formatted into prose and dropped."""

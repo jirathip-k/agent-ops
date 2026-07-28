@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import github, messages, orca, runs, surfaces, worktree
+from agent_ops import github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
 from agent_ops.loop import LoopOutcome
@@ -1760,3 +1760,123 @@ def test_dispatch_resume_never_records_the_worker_as_its_own_spawner(
     record = messages.load_spawn(repo, 9)
     assert record is not None
     assert record.spawner is None
+
+
+# --- danger-zone grants across a resume (issue #200) ------------------------
+
+
+def test_run_resume_auto_loads_a_persisted_grant_with_no_flag(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grant supplied once at dispatch must keep applying through every bare
+    `agent resume` on the same issue — it should not have to be repeated."""
+    worktree.create(repo, ".worktrees", "issue-50", "fix/issue-50", "main")
+    grants.persist(
+        repo,
+        grants.Grant(
+            issue=50, granted_by="jirathip-k", scope="carried-over scope", paths=["pyproject.toml"]
+        ),
+    )
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+
+    run_resume(repo, 50, message="anything")
+
+    assert "carried-over scope" in captured["prompt"]
+
+
+def test_run_resume_grant_file_overrides_a_persisted_grant(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-51", "fix/issue-51", "main")
+    grants.persist(
+        repo,
+        grants.Grant(issue=51, granted_by="old-grantor", scope="old scope", paths=["a"]),
+    )
+    monkeypatch.setattr(github, "get_issue", _fake_issue)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        lambda *a, **k: LoopOutcome(False, 1, None, []),
+    )
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text(
+        "issue: 51\ngranted_by: new-grantor\nscope: new scope\npaths: [pyproject.toml]\n"
+    )
+
+    run_resume(repo, 51, message="anything", grant_file=grant_file)
+
+    assert "new scope" in captured["prompt"]
+    assert "old scope" not in captured["prompt"]
+    assert grants.load_persisted(repo, 51).scope == "new scope"  # type: ignore[union-attr]
+
+
+def test_dispatch_resume_forwards_grant_file_as_an_absolute_path(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-52", "fix/issue-52", "main")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text("issue: 52\ngranted_by: x\nscope: s\npaths: [a]\n")
+
+    implement_module.dispatch_resume(
+        repo, 52, message="anything", grant_file=grant_file, log=lambda _: None
+    )
+
+    ((_, command, _, _),) = fake.calls
+    assert "--grant-file" in command
+    passed = Path(command[command.index("--grant-file") + 1])
+    assert passed.is_absolute()
+    assert passed == grant_file.resolve()
+
+
+def test_dispatch_resume_rejects_a_missing_grant_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-53", "fix/issue-53", "main")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+
+    with pytest.raises(CommandError, match="grant file not found"):
+        implement_module.dispatch_resume(
+            repo, 53, message="anything", grant_file=repo / "nope.yaml", log=lambda _: None
+        )
+
+    assert fake.calls == []
+
+
+def test_resume_cli_forwards_grant_file_to_the_dispatch_surface(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-54", "fix/issue-54", "main")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text("issue: 54\ngranted_by: x\nscope: s\npaths: [a]\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "resume",
+            "54",
+            "--project",
+            str(repo),
+            "--message",
+            "anything",
+            "--grant-file",
+            str(grant_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    ((_, command, _, _),) = fake.calls
+    assert "--grant-file" in command

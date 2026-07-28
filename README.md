@@ -60,6 +60,7 @@ agent implement 123 --no-pr    # same, but stop before push/PR (good while build
 agent claim 123                # mark an issue as being worked on by hand, so other lanes skip it
 agent resume 123               # rerun the implementer in the existing worktree
 agent resume 123 -m "..."      # ...with your feedback instead of the stored self-review
+agent dispatch 123 --grant-file grant.yaml  # scoped danger-zone authorization (docs/trust-model.md)
 agent spawn 123 -m "..."       # ad-hoc: an interactive agent in the worktree, wired to report back
 agent report 123 --state done  # ...what that agent (or its stop hook) reports on the way out
 agent review 45                # read-only review of PR #45 (add --post to comment)
@@ -216,7 +217,7 @@ config/defaults.yaml platform defaults; config/repos.yml CI-lane defaults
                      public repo)
 stubs/               workflow stubs to copy into managed repos
 docs/                architecture, ci-cd, workflow, guide, failure-modes,
-                      roadmap, adr/, office-ops suggestion
+                      trust-model, roadmap, adr/, office-ops suggestion
 docs/reference/lanes.md   which of the 8 lanes share one implementation
                       between local and CI, and which still diverge
 ```

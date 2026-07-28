@@ -48,7 +48,10 @@ repo's **Actions** tab.
    waiting for you (a trade-off, an ambiguity, a risky area). One comment
    from you usually unblocks it.
 3. **Approve blocked PRs.** PRs that touch protected things (dependencies,
-   auth, big diffs) wait for your merge instead of auto-merging.
+   auth, big diffs) wait for your merge instead of auto-merging. If an agent
+   genuinely needs to touch one of those, authorize it with `--grant-file`
+   at dispatch time — never with an issue comment, which an agent will
+   correctly refuse to treat as permission (see `docs/trust-model.md`).
 4. **Verify staging and promote.** Pull the `staging` branch, try the app,
    then merge the *promotion PR* into `main`. **This is the one action
    agents can never do.**
