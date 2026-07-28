@@ -17,7 +17,7 @@ from typing import Any
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Label, ListItem, ListView, Static
 
@@ -217,6 +217,47 @@ class IssueList(ListView):
         return int(number) if number is not None else None
 
 
+class IssueDetailPane(VerticalScroll):
+    """Body/labels/age/PR status for the selected issue (#235) — fetched
+    lazily on selection and cached by the app for the session.
+
+    `Static(markup=False)` is the inertness guarantee this pane exists to
+    provide: an issue body is untrusted content (#141/#191), and Textual
+    markup can embed actions (`@click=...`); rendering it literally is what
+    keeps it "render, never act" rather than merely "usually harmless".
+    Wrapped in `VerticalScroll` rather than reflowing the pane to fit a long
+    body — the issue is explicit that content length must not resize panes.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._body = Static(markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._body
+
+    def on_mount(self) -> None:
+        self.border_title = "detail"
+        self.show_awaiting()
+
+    def show_awaiting(self) -> None:
+        self._body.update("(select an issue)")
+
+    def show_loading(self, number: int) -> None:
+        self._body.update(f"#{number}\nloading…")
+
+    def show_detail(self, detail: data.IssueDetail) -> None:
+        if not detail.readable:
+            self._body.update(f"#{detail.number}\n⚠ could not fetch this issue")
+            return
+        labels = ", ".join(detail.labels) if detail.labels else "(none)"
+        pr = "yes" if detail.has_open_pr else "no"
+        header = (
+            f"#{detail.number}  {detail.title}\n{detail.age} old · labels: {labels} · open PR: {pr}"
+        )
+        self._body.update(f"{header}\n\n{detail.body or '(no description)'}")
+
+
 class RunsPane(ListView):
     """Local runs for the project the TUI was launched in (`agent runs`)."""
 
@@ -272,7 +313,9 @@ class CommandBar(Static):
 
     @staticmethod
     def _legend() -> str:
-        return "↑↓ move · tab pane · ←→ stage · d dispatch · r resume · o open web · q quit"
+        return (
+            "↑↓ move · tab pane · ←→ stage · d dispatch · r resume · o open web · c chat · q quit"
+        )
 
     def set_preview(
         self,
@@ -293,6 +336,7 @@ class CommandBar(Static):
                 f"d dispatch → {dcmd}{note}",
                 f"r resume   → {rcmd}{note}",
                 f"o open web → {ocmd}",
+                f"c chat     → {data.chat_preview(issue)}",
             ]
         lines.append(self._legend())
         if status_message:
@@ -300,8 +344,12 @@ class CommandBar(Static):
         self.update("\n".join(lines))
 
 
-class TuiApp(App[None]):
-    """One screen for the whole pipeline (issue #232)."""
+class TuiApp(App[Path | None]):
+    """One screen for the whole pipeline (issue #232).
+
+    Returns the chat handoff path from `run()` when `c` (#235) wrote one and
+    exited through it; `None` for an ordinary `q` quit.
+    """
 
     CSS = """
     Screen {
@@ -322,7 +370,7 @@ class TuiApp(App[None]):
         height: auto;
         max-height: 10;
     }
-    ReposPane, StageRow, IssueList, WaitingPane, RunsPane {
+    ReposPane, StageRow, IssueList, IssueDetailPane, WaitingPane, RunsPane {
         border: round $panel;
         height: 100%;
     }
@@ -334,6 +382,9 @@ class TuiApp(App[None]):
         min-height: 5;
     }
     IssueList {
+        height: 2fr;
+    }
+    IssueDetailPane {
         height: 1fr;
     }
     CommandBar {
@@ -351,6 +402,7 @@ class TuiApp(App[None]):
         Binding("d", "dispatch", "dispatch"),
         Binding("r", "resume", "resume"),
         Binding("o", "open_web", "open web"),
+        Binding("c", "chat", "chat"),
     ]
 
     def __init__(self, project_root: Path) -> None:
@@ -362,6 +414,8 @@ class TuiApp(App[None]):
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
         self.status_message = ""
+        self.issue_detail_cache: dict[tuple[str, int], data.IssueDetail] = {}
+        self._issue_detail_inflight: set[tuple[str, int]] = set()
 
     def compose(self) -> ComposeResult:
         with Container(id="body"):
@@ -369,6 +423,7 @@ class TuiApp(App[None]):
             with Vertical(id="flow-wrap"):
                 yield StageRow(id="stagerow")
                 yield IssueList(id="issues")
+                yield IssueDetailPane(id="detail")
             yield WaitingPane(id="waiting")
             yield RunsPane(id="runs")
         yield CommandBar(id="bar")
@@ -484,7 +539,53 @@ class TuiApp(App[None]):
             repos_pane = self.query_one(ReposPane)
             if repos_pane.index is not None:
                 self._show_repo(repos_pane.index, reset_stage=True)
+        elif event.list_view.id == "issues":
+            self._show_issue_detail()
         self._refresh_bar()
+
+    def _prs_for(self, repo: str) -> list[dict[str, Any]]:
+        for fr in self.fleet:
+            if fr is not None and fr.repo == repo:
+                return fr.data.prs
+        return []
+
+    def _show_issue_detail(self) -> None:
+        """Fetch lazily on selection, cached per issue for the session (#235):
+        a cache hit renders immediately; a miss shows "loading…" and fetches
+        off the UI thread, same as every other `gh` read in this app."""
+        issue_list = self.query_one(IssueList)
+        detail_pane = self.query_one(IssueDetailPane)
+        number = issue_list.selected_number
+        repo = issue_list.repo
+        if number is None or repo is None:
+            detail_pane.show_awaiting()
+            return
+        key = (repo, number)
+        cached = self.issue_detail_cache.get(key)
+        if cached is not None:
+            detail_pane.show_detail(cached)
+            return
+        detail_pane.show_loading(number)
+        if key in self._issue_detail_inflight:
+            return
+        self._issue_detail_inflight.add(key)
+        prs = self._prs_for(repo)
+        self.run_worker(partial(self._fetch_issue_detail, key, prs), thread=True)
+
+    def _fetch_issue_detail(self, key: tuple[str, int], prs: list[dict[str, Any]]) -> None:
+        repo, number = key
+        detail = data.load_issue_detail(repo, number, prs)
+        self.call_from_thread(self._apply_issue_detail, key, detail)
+
+    def _apply_issue_detail(self, key: tuple[str, int], detail: data.IssueDetail) -> None:
+        self._issue_detail_inflight.discard(key)
+        self.issue_detail_cache[key] = detail
+        issue_list = self.query_one(IssueList)
+        # The selection may have moved on while the fetch was in flight —
+        # cache the result regardless, but only render it if it's still what
+        # the user is looking at.
+        if (issue_list.repo, issue_list.selected_number) == key:
+            self.query_one(IssueDetailPane).show_detail(detail)
 
     def _current_selection(self) -> tuple[int | None, str | None]:
         """(issue, repo) — from whichever pane last moved: issues or runs."""
@@ -532,6 +633,32 @@ class TuiApp(App[None]):
             self._set_status("no issue selected")
             return
         self._exec(data.open_web_command(repo, issue))
+
+    def action_chat(self) -> None:
+        """`c` (#235): write the handoff file and exit through it — no
+        worktree, no hosted chat, same as `d`/`r`/`o`, this shells out to
+        nothing and hands off instead."""
+        issue, repo = self._current_selection()
+        if issue is None or repo is None:
+            self._set_status("no issue selected")
+            return
+        self._set_status(f"chat: {data.chat_preview(issue)}")
+        key = (repo, issue)
+        cached = self.issue_detail_cache.get(key)
+        prs = self._prs_for(repo)
+        self.run_worker(partial(self._chat_worker, key, cached, prs), thread=True)
+
+    def _chat_worker(
+        self,
+        key: tuple[str, int],
+        cached: data.IssueDetail | None,
+        prs: list[dict[str, Any]],
+    ) -> None:
+        repo, issue = key
+        detail = cached if cached is not None else data.load_issue_detail(repo, issue, prs)
+        path = data.chat_handoff_path(self.project_root)
+        data.write_chat_handoff(path, repo, detail)
+        self.call_from_thread(self.exit, path)
 
     def _run_action(self, builder: Callable[[int], list[str]], *, require_local: bool) -> None:
         issue, repo = self._current_selection()

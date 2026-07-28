@@ -601,7 +601,11 @@ def fetch_repos[T](
 def _open_prs(repo: str) -> list[dict[str, Any]]:
     """Open PRs for `repo`, newest first — the same listing `fleet_status` prints,
     factored out so the TUI's fleet sweep can read it too without a second
-    `gh pr list` call shape to keep in sync."""
+    `gh pr list` call shape to keep in sync.
+
+    `closingIssuesReferences` rides along on this same call so the TUI's issue
+    detail pane can tell whether a PR will close the selected issue
+    (`github.pr_references_issue`) without a second listing (#235)."""
     return json.loads(
         run(
             [
@@ -615,7 +619,7 @@ def _open_prs(repo: str) -> list[dict[str, Any]]:
                 "--limit",
                 "20",
                 "--json",
-                "number,title,baseRefName,headRefName",
+                "number,title,baseRefName,headRefName,closingIssuesReferences",
             ],
         ).stdout
     )
