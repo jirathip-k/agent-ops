@@ -375,6 +375,15 @@ summaries and `needs-human` labels once a day; that's your ops inbox. It
 skips issues that already have an open PR, the symmetric half of the local
 lane's guard above, so the two lanes never fix the same issue twice.
 
+Every groom run also checks the repo it is grooming for `startup_failure`
+runs against that repo's own currently-enabled workflows — the same signal
+`agent status --failures` surfaces, but arriving in the ops inbox above
+(a `needs-human` issue) instead of requiring someone to type the command
+(#217). Inside `agent groom` this runs ahead of the "nothing to groom" early
+return, so a quiet issue queue doesn't skip it — though the CI job's own idle
+guard still skips invoking `agent groom` at all when a repo has zero open
+issues, which this does not change.
+
 The CI-lane implementer has two escalation channels, and they are not
 interchangeable. `ESCALATE:` halts the run: the plan proved unworkable or a
 gate couldn't be verified, and it lands as a `needs-human` label in the ops
