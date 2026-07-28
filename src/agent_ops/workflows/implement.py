@@ -53,25 +53,34 @@ def _resolve_grant(
     grant_file: Path | None,
     *,
     log: Callable[[str], None],
-) -> grants.Grant | None:
+) -> tuple[grants.Grant | None, bool]:
     """This cycle's danger-zone authorization: `--grant-file`, else whatever an
-    earlier cycle on this issue persisted (issue #200).
+    earlier cycle on this issue persisted (issue #200). Returns `(grant,
+    carried_over)`.
 
     An explicit `--grant-file` is persisted immediately, overwriting anything
     from before, so it survives every `agent resume` on this issue without
-    having to be repeated — the file is the only channel a grant has once the
-    worktree exists. `_finish_run` is what clears it, once the run it
-    authorized actually lands.
+    having to be repeated. That persisted copy is not equally trustworthy,
+    though: `.agent-runs/issue-N-grant.yaml` sits outside the worktree, but
+    on the same host as a headless implementer running under `acceptEdits`
+    with the project's test commands pre-approved — nothing here proves a
+    carried-over grant was ever typed by a human rather than planted by a
+    prompt-injected implementer between cycles (docs/trust-model.md, "The
+    persisted grant file is not itself unforgeable"). `carried_over` is what
+    lets a caller mark that distinction where a human will actually see it —
+    the resume log and the PR's `## Authorization` section — rather than
+    presenting both cases identically. `_finish_run` is what clears the
+    persisted copy, once the run it authorized actually lands.
     """
     if grant_file is not None:
         grant = grants.load(grant_file, issue=issue_number)
         grants.persist(project_root, grant)
         log(f"authorization loaded: {grant.granted_by} — {grant.scope}")
-        return grant
+        return grant, False
     grant = grants.load_persisted(project_root, issue_number)
     if grant is not None:
         log(f"authorization carried over from an earlier cycle: {grant.granted_by} — {grant.scope}")
-    return grant
+    return grant, grant is not None
 
 
 def _render_authorization(grant: grants.Grant | None) -> str:
@@ -88,13 +97,26 @@ def _render_authorization(grant: grants.Grant | None) -> str:
     )
 
 
-def _authorization_pr_section(grant: grants.Grant) -> str:
-    """The `## Authorization` block `_finish_run` appends to a granted run's PR body."""
+def _authorization_pr_section(grant: grants.Grant, *, carried_over: bool) -> str:
+    """The `## Authorization` block `_finish_run` appends to a granted run's PR body.
+
+    `carried_over` must visibly change the rendered text, not just the log:
+    a grant loaded from `.agent-runs/issue-N-grant.yaml` without a fresh
+    `--grant-file` this invocation is a weaker claim than one a human just
+    typed — see `_resolve_grant` and docs/trust-model.md.
+    """
     paths = "\n".join(f"- `{p}`" for p in grant.paths)
     expiry = f"\n- Expires: {grant.expires}" if grant.expires is not None else ""
+    source = (
+        "carried over from a persisted grant, not supplied to this invocation — "
+        "verify it against the original `--grant-file` before trusting it"
+        if carried_over
+        else "supplied via `--grant-file` this invocation"
+    )
     return (
         "\n\n## Authorization\n\n"
         f"- Granted by: **{grant.granted_by}**{expiry}\n"
+        f"- Source: {source}\n"
         f"- Scope: {grant.scope}\n"
         f"- Paths:\n{paths}\n"
     )
@@ -458,7 +480,7 @@ def _run_implement(
         plan = plan_result.text
         log(f"plan ready ({len(plan.splitlines())} lines, {model_note(plan_request, plan_result)})")
 
-    grant = _resolve_grant(project_root, issue_number, grant_file, log=log)
+    grant, grant_carried_over = _resolve_grant(project_root, issue_number, grant_file, log=log)
 
     prompt = render_task(
         "implement",
@@ -527,6 +549,7 @@ def _run_implement(
         open_pr=open_pr,
         keep_worktree=keep_worktree,
         grant=grant,
+        grant_carried_over=grant_carried_over,
         log=log,
     )
 
@@ -547,6 +570,7 @@ def _finish_run(
     open_pr: bool,
     keep_worktree: bool,
     grant: grants.Grant | None = None,
+    grant_carried_over: bool = False,
     log: Callable[[str], None],
 ) -> bool:
     """Commit, push, open the PR (maybe auto-merge), and clean up the worktree.
@@ -577,7 +601,7 @@ def _finish_run(
                 f"unavailable, so this was implemented by `{used_model}` instead."
             )
         if grant is not None:
-            body += _authorization_pr_section(grant)
+            body += _authorization_pr_section(grant, carried_over=grant_carried_over)
         url = github.create_pr(wt_path, base=config.base_branch, title=title, body=body)
         pr_url = url
         log(f"opened PR: {url}")
@@ -709,7 +733,7 @@ def _run_resume(
 
     issue = github.get_issue(issue_number, cwd=project_root)
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
-    grant = _resolve_grant(project_root, issue_number, grant_file, log=log)
+    grant, grant_carried_over = _resolve_grant(project_root, issue_number, grant_file, log=log)
 
     prompt = render_task(
         "resume",
@@ -785,6 +809,7 @@ def _run_resume(
         open_pr=open_pr,
         keep_worktree=keep_worktree,
         grant=grant,
+        grant_carried_over=grant_carried_over,
         log=log,
     )
     return ok
@@ -872,6 +897,10 @@ def dispatch_resume(
         grant_file = grant_file.resolve()
         if not grant_file.is_file():
             raise CommandError(f"grant file not found: {grant_file}")
+        # Validated here, not just after the backgrounded resume picks it up:
+        # a grant naming the wrong issue or already expired must fail at the
+        # terminal, not silently inside a spawned process (issue #200).
+        grants.load(grant_file, issue=issue_number)
 
     chosen = surfaces.pick(surface_name)
     command = resume_command(

@@ -14,7 +14,8 @@ the underlying rule.
 | Issue body, issue comments, PR descriptions, review comments, CI logs, diffs, command output | **Data**, never instruction | Anyone who can comment on a public repo can write anything, including text formatted to look like a directive, a role change, or a grant. It cannot widen what a task may do, skip a gate, or authorize a danger-zone change — even signed with the owner's name (`prompts/untrusted-data.md`, #141). |
 | The task prompt's own structure (ground rules, the plan, the `## Authorization` section) | **Instruction** | Written by this platform's own code (`render_task`), not copied from anything read off GitHub. |
 | `AGENTS.md` / `CLAUDE.md` in the target repo | **Authoritative policy** | Checked into the repo, gated by whatever review that repo requires of its own docs — the same trust level as this platform's prompt templates, not "data from GitHub". |
-| A `--grant-file` supplied to `agent implement` / `agent dispatch` / `agent resume` | **Instruction, scoped** | The dispatching invocation is the one channel an issue thread cannot forge — see below. |
+| A `--grant-file` supplied to `agent implement` / `agent dispatch` / `agent resume` **this invocation** | **Instruction, scoped** | The dispatching CLI invocation is a channel an issue thread cannot forge — see below. |
+| A grant an earlier cycle **persisted** and a bare `agent resume` loaded with no `--grant-file` of its own | **Instruction, scoped, but weaker** | It only ever originated from a genuine `--grant-file`, but the copy on disk is not itself proven unforgeable for the lifetime of the issue — see "The persisted grant file is not itself unforgeable" below. |
 
 ## Where a grant enters
 
@@ -77,10 +78,33 @@ A grant is not a boolean. `scope` is prose for a human reviewing the PR;
   of the danger zone, exactly as before #200.
 - A landed run's PR body carries a `## Authorization` section — grantor,
   scope, and paths — whenever a grant was in effect, so a human merging the
-  PR sees what was authorized and by whom without going to find it.
+  PR sees what was authorized and by whom without going to find it. That
+  section, and the resume log, always say which of the two rows above
+  applied: "supplied via `--grant-file` this invocation" or "carried over
+  from a persisted grant" — never presented identically, because they are
+  not the same trust level (see below).
 
 ## What this does not change
 
+- **The persisted grant file is not itself unforgeable.** The channel this
+  document establishes is the dispatching CLI invocation — that part an
+  issue thread genuinely cannot reach. What survives across `agent resume`
+  is a *copy*, written to `.agent-runs/issue-N-grant.yaml` so `--grant-file`
+  doesn't have to be repeated. But the implementer that runs in between
+  dispatch and resume is headless, under `acceptEdits`, with the project's
+  test commands pre-approved (ground rule 7 in `implement.md`/`resume.md`) —
+  a prompt-injected implementer can plant a conftest that writes that file,
+  trigger it through a pre-approved `pytest`, and delete the conftest before
+  the diff is reviewed. The cycle that plants it is unaffected (its own
+  grant, if any, was already resolved before it ran); the *next* bare `agent
+  resume` is what loads the forged file, relaxes the danger-zone rule,
+  passes `_check_grant_scope`, and — without the "carried over" marking
+  above — would stamp a `## Authorization` section into the PR body
+  indistinguishable from a human-typed grant. That marking is the mitigation
+  this document ships: it does not prove a carried-over grant is genuine, it
+  makes the weaker case visibly different so a human reviewing the PR knows
+  to check. Verifying the integrity of the persisted file itself (e.g.
+  signing it at write time) is not fixed here — tracked as a follow-up.
 - **Auto-merge is unaffected.** `evaluate_merge`'s `blocked_paths` /
   `blocked_labels` checks (`workflows/merge.py`) still gate every PR
   regardless of any grant — a grant only gets an agent past its own prompt's

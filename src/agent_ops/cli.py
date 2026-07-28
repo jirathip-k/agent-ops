@@ -12,6 +12,7 @@ from agent_ops import (
     __version__,
     claims,
     github,
+    grants,
     messages,
     prompts,
     registry,
@@ -303,8 +304,13 @@ def dispatch(
         # dispatch had already created one, leaving it behind to clean up.
         if plan_file and not plan_file.is_file():
             raise CommandError(f"plan file not found: {plan_file}")
-        if grant_file and not grant_file.is_file():
-            raise CommandError(f"grant file not found: {grant_file}")
+        if grant_file:
+            if not grant_file.is_file():
+                raise CommandError(f"grant file not found: {grant_file}")
+            # Validated here, not just after the backgrounded run picks it up:
+            # a grant naming the wrong issue or already expired must fail at
+            # the terminal, not silently inside a spawned process (issue #200).
+            grants.load(grant_file, issue=issue)
         if not force:
             existing = github.open_prs_for_issue(issue, cwd=root)
             if existing:

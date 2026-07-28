@@ -1854,6 +1854,42 @@ def test_dispatch_resume_rejects_a_missing_grant_file(
     assert fake.calls == []
 
 
+def test_dispatch_resume_rejects_a_grant_file_for_the_wrong_issue(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grant naming the wrong issue must fail at the terminal, not inside
+    the backgrounded resume it would otherwise reach (issue #200)."""
+    worktree.create(repo, ".worktrees", "issue-55", "fix/issue-55", "main")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text("issue: 99\ngranted_by: x\nscope: s\npaths: [a]\n")
+
+    with pytest.raises(CommandError, match="#99"):
+        implement_module.dispatch_resume(
+            repo, 55, message="anything", grant_file=grant_file, log=lambda _: None
+        )
+
+    assert fake.calls == []
+
+
+def test_dispatch_resume_rejects_an_expired_grant_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree.create(repo, ".worktrees", "issue-56", "fix/issue-56", "main")
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant_file = repo / "grant.yaml"
+    grant_file.write_text("issue: 56\ngranted_by: x\nscope: s\npaths: [a]\nexpires: 2000-01-01\n")
+
+    with pytest.raises(CommandError, match="expired"):
+        implement_module.dispatch_resume(
+            repo, 56, message="anything", grant_file=grant_file, log=lambda _: None
+        )
+
+    assert fake.calls == []
+
+
 def test_resume_cli_forwards_grant_file_to_the_dispatch_surface(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

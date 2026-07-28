@@ -398,23 +398,29 @@ def test_resolve_grant_from_a_flag_persists_it_for_later_cycles(
         "issue: 7\ngranted_by: jirathip-k\nscope: test scope\npaths: [pyproject.toml]\n"
     )
 
-    resolved = implement_module._resolve_grant(tmp_path, 7, grant_file, log=lambda _: None)
+    resolved, carried_over = implement_module._resolve_grant(
+        tmp_path, 7, grant_file, log=lambda _: None
+    )
 
     assert resolved is not None
     assert resolved.granted_by == "jirathip-k"
     assert grants.load_persisted(tmp_path, 7) == resolved
+    assert carried_over is False  # supplied this invocation, not read off disk
 
 
 def test_resolve_grant_falls_back_to_a_persisted_grant_with_no_flag(tmp_path: Path) -> None:
     grants.persist(tmp_path, _grant())
 
-    resolved = implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None)
+    resolved, carried_over = implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None)
 
     assert resolved == _grant()
+    assert carried_over is True
 
 
 def test_resolve_grant_returns_none_with_no_flag_and_nothing_persisted(tmp_path: Path) -> None:
-    assert implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None) is None
+    resolved, carried_over = implement_module._resolve_grant(tmp_path, 7, None, log=lambda _: None)
+    assert resolved is None
+    assert carried_over is False
 
 
 def test_resolve_grant_flag_overrides_an_earlier_persisted_grant(tmp_path: Path) -> None:
@@ -424,11 +430,14 @@ def test_resolve_grant_flag_overrides_an_earlier_persisted_grant(tmp_path: Path)
         "issue: 7\ngranted_by: someone-else\nscope: the new scope\npaths: [pyproject.toml]\n"
     )
 
-    resolved = implement_module._resolve_grant(tmp_path, 7, grant_file, log=lambda _: None)
+    resolved, carried_over = implement_module._resolve_grant(
+        tmp_path, 7, grant_file, log=lambda _: None
+    )
 
     assert resolved is not None
     assert resolved.scope == "the new scope"
     assert grants.load_persisted(tmp_path, 7).scope == "the new scope"  # type: ignore[union-attr]
+    assert carried_over is False  # a fresh flag, even though something was persisted before
 
 
 def test_render_authorization_default_text_with_no_grant() -> None:
@@ -446,12 +455,25 @@ def test_render_authorization_names_grantor_scope_and_paths() -> None:
 
 
 def test_authorization_pr_section_names_grantor_scope_and_paths() -> None:
-    text = implement_module._authorization_pr_section(_grant())
+    text = implement_module._authorization_pr_section(_grant(), carried_over=False)
 
     assert text.startswith("\n\n## Authorization")
     assert "jirathip-k" in text
     assert "the two --description string literals and nothing else" in text
     assert "pyproject.toml" in text
+    assert "supplied via `--grant-file` this invocation" in text
+
+
+def test_authorization_pr_section_marks_a_carried_over_grant_distinctly() -> None:
+    """Issue #200 follow-up: a grant read off `.agent-runs/` without a fresh
+    `--grant-file` this invocation must not read identically to one a human
+    just typed — the persisted copy is forgeable by a compromised implementer
+    from an earlier cycle (docs/trust-model.md)."""
+    fresh = implement_module._authorization_pr_section(_grant(), carried_over=False)
+    stale = implement_module._authorization_pr_section(_grant(), carried_over=True)
+
+    assert "carried over" in stale
+    assert stale != fresh
 
 
 def test_check_grant_scope_is_a_noop_with_no_grant(
@@ -552,11 +574,14 @@ def test_review_and_maybe_halt_stops_the_run_when_the_grant_is_exceeded(
 
 def _stub_finish_run_git_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(implement_module.orca, "report", lambda *a, **k: None)
-    monkeypatch.setattr(
-        implement_module,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1 file changed"),
-    )
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, stdout="1 file changed")
+
+    # worktree.commit shells out through worktree.run (not implement.run), so
+    # both need the same stub — see tests/test_resume.py's identical helper.
+    monkeypatch.setattr(implement_module, "run", fake_run)
+    monkeypatch.setattr(implement_module.worktree, "run", fake_run)
 
 
 def test_finish_run_adds_the_authorization_section_when_granted(
@@ -595,6 +620,48 @@ def test_finish_run_adds_the_authorization_section_when_granted(
     assert isinstance(body, str)
     assert "## Authorization" in body
     assert "jirathip-k" in body
+    assert "supplied via `--grant-file` this invocation" in body  # default: not carried over
+
+
+def test_finish_run_marks_a_carried_over_grant_distinctly_in_the_pr_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #200 follow-up: `_finish_run` must thread `grant_carried_over`
+    through to the PR body, not just default it away — a human merging the PR
+    needs to see whether this invocation's dispatcher typed the grant or the
+    run merely read it off `.agent-runs/`."""
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, object] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/76"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+
+    implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(7, tmp_path),
+        7,
+        "issue-7",
+        "fix/issue-7",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        grant=_grant(),
+        grant_carried_over=True,
+        log=lambda _: None,
+    )
+
+    body = captured["body"]
+    assert isinstance(body, str)
+    assert "carried over from a persisted grant" in body
 
 
 def test_finish_run_omits_the_authorization_section_with_no_grant(

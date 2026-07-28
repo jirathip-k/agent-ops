@@ -305,6 +305,43 @@ def test_dispatch_rejects_missing_grant_file_before_creating_a_worktree(
     assert fake.calls == []
 
 
+def test_dispatch_rejects_a_grant_file_for_the_wrong_issue_before_creating_a_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A grant naming the wrong issue must fail at the terminal, not inside
+    the backgrounded run it would otherwise reach (issue #200)."""
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant = tmp_path / "grant.yaml"
+    grant.write_text("issue: 99\ngranted_by: x\nscope: s\npaths: [a]\n")
+
+    result = runner.invoke(
+        app, ["dispatch", "5", "--project", str(repo), "--grant-file", str(grant)]
+    )
+
+    assert result.exit_code == 1
+    assert "#99" in result.output or "#99" in result.stderr
+    assert not (repo.resolve() / ".worktrees" / "issue-5").exists()
+    assert fake.calls == []
+
+
+def test_dispatch_rejects_an_expired_grant_file_before_creating_a_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeSurface()
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": fake)
+    grant = tmp_path / "grant.yaml"
+    grant.write_text("issue: 5\ngranted_by: x\nscope: s\npaths: [a]\nexpires: 2000-01-01\n")
+
+    result = runner.invoke(
+        app, ["dispatch", "5", "--project", str(repo), "--grant-file", str(grant)]
+    )
+
+    assert result.exit_code == 1
+    assert not (repo.resolve() / ".worktrees" / "issue-5").exists()
+    assert fake.calls == []
+
+
 def test_dispatch_records_how_to_reach_the_run(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #98: the terminal handle is a dispatched run's one stable
     identity, and it used to be formatted into prose and dropped."""

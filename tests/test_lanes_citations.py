@@ -74,8 +74,8 @@ def test_evolve_pipeline_citation_matches_workflow() -> None:
 
 
 def test_distill_cli_citation_matches_cli() -> None:
-    assert "src/agent_ops/cli.py:943" in LANES
-    assert "def distill(" in CLI_LINES[943 - 1]
+    assert "src/agent_ops/cli.py:949" in LANES
+    assert "def distill(" in CLI_LINES[949 - 1]
 
 
 def test_distill_run_citation_matches_workflow() -> None:
