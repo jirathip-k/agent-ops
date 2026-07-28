@@ -1064,10 +1064,11 @@ def init(
         # The files on disk above are correct either way — that's the whole
         # argument for not failing `init` here too. `gh` not being logged in,
         # a network blip, a non-GitHub origin, or `gh` not being installed at
-        # all (this same `CommandError`, converted by `utils.run` under
-        # `check=True`) all land here; fall back to the same paste-able
-        # commands as --print-labels rather than leaving the operator with
-        # nothing but an error.
+        # all (`utils.run(check=False)` returns a synthetic returncode-127
+        # process for that last one, which `sync_labels`' own returncode
+        # check turns into this same `CommandError`) all land here; fall
+        # back to the same paste-able commands as --print-labels rather than
+        # leaving the operator with nothing but an error.
         _err(f"\ncould not sync labels: {exc}")
         typer.echo("labels were not synced — run these once you can:")
         _print_label_commands()

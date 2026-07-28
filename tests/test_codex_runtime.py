@@ -203,7 +203,10 @@ def test_run_wall_clock_timeout_is_a_normal_failed_result(
     surface as an ordinary failed RunResult, not an escaped exception.
 
     `check=False` never raises (agent-ops#154) — a timeout comes back as a
-    synthetic `CompletedProcess` with `TIMEOUT_RETURNCODE` instead.
+    synthetic `CompletedProcess` with `TIMEOUT_RETURNCODE` instead. For Codex
+    the prompt is argv, so the text must be the compact `wall_clock_timeout_result`
+    message, not the rendered prompt `utils.run` folds into its stderr
+    (agent-ops#108, agent-ops#193).
     """
     from agent_ops.utils import TIMEOUT_RETURNCODE
 
@@ -218,12 +221,14 @@ def test_run_wall_clock_timeout_is_a_normal_failed_result(
         )
 
     monkeypatch.setattr(codex_mod, "run", fake_run)
-    request = RunRequest(prompt="p", cwd=Path("."), run_timeout_seconds=42.0)
+    prompt = "SECRET RENDERED TASK PROMPT\n" * 3
+    request = RunRequest(prompt=prompt, cwd=Path("."), run_timeout_seconds=42.0)
 
     result = CodexRuntime().run(request)
 
     assert result.ok is False
-    assert "42" in result.text
+    assert result.text == "did not finish within 42s"
+    assert prompt not in result.text
     assert classify_failure(result) is FailureKind.AGENT_FAILURE
 
 
