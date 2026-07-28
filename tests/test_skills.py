@@ -107,3 +107,99 @@ def test_empty_names_returns_empty_string(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
 
     assert load_skills([], project_root=None) == ""
+
+
+def test_traversal_name_rejected_even_when_target_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Secret lives as a sibling of the platform skills dir, at
+    # <tmp_path>/secret.md — reachable via "../secret" if traversal worked.
+    secret = tmp_path / "secret.md"
+    secret.write_text("top secret contents")
+
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    with pytest.raises(ValueError, match="../secret"):
+        load_skills(["../secret"], project_root=None)
+
+
+def test_traversal_name_rejected_escaping_project_skills_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Secret lives two levels above project/.agent/skills/, reachable via
+    # "../../secret" if traversal worked.
+    secret = tmp_path / "secret.md"
+    secret.write_text("top secret contents")
+
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    with pytest.raises(ValueError, match="../../secret"):
+        load_skills(["../../secret"], project_root=project_root)
+
+
+@pytest.mark.parametrize("name", ["sub/skill", "sub\\skill"])
+def test_separator_names_rejected(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    with pytest.raises(ValueError):
+        load_skills([name], project_root=None)
+
+
+def test_absolute_name_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    with pytest.raises(ValueError):
+        load_skills(["/etc/passwd"], project_root=None)
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", ".hidden"])
+def test_degenerate_names_rejected(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    with pytest.raises(ValueError):
+        load_skills([name], project_root=None)
+
+
+def test_invalid_name_error_has_no_filesystem_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    platform_dir = tmp_path / "platform-skills"
+    platform_dir.mkdir()
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    with pytest.raises(ValueError) as exc_info:
+        load_skills(["../../etc/passwd"], project_root=None)
+    message = str(exc_info.value)
+    assert "../../etc/passwd" in message
+    assert str(platform_dir) not in message
+
+
+def test_hyphen_and_underscore_names_still_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    platform_dir = tmp_path / "platform-skills"
+    _write_platform_skill(platform_dir, "my-skill", "hyphen text")
+    _write_platform_skill(platform_dir, "my_skill", "underscore text")
+    monkeypatch.setattr(skills, "PLATFORM_SKILLS", platform_dir)
+
+    result = load_skills(["my-skill", "my_skill"], project_root=None)
+
+    assert "hyphen text" in result
+    assert "underscore text" in result
