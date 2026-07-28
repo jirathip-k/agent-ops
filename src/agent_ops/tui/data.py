@@ -10,6 +10,7 @@ there first, not a second way to compute it here (the #150 shape).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,14 +114,44 @@ def _needs_lane_check(issues: list[dict[str, Any]]) -> bool:
     )
 
 
-def load_fleet(config: RegistryConfig) -> list[FleetRepo]:
-    """Every registered repo's data, one `gh` sweep — the fleet-wide read the
-    Repos pane, the flow detail pane and the waiting-on-you row all share."""
+def _load_one(repo: str) -> FleetRepo:
+    repo_data = load_repo(repo)
+    lanes = lanes_for(repo) if repo_data.readable and _needs_lane_check(repo_data.issues) else None
+    return FleetRepo(repo, repo_data, lanes)
+
+
+def load_fleet(
+    config: RegistryConfig,
+    *,
+    on_repo: Callable[[int, FleetRepo], None] | None = None,
+) -> list[FleetRepo]:
+    """Every registered repo's data, fetched concurrently — the fleet-wide
+    read the Repos pane, the flow detail pane and the waiting-on-you row all
+    share.
+
+    Concurrency lives in `status.fetch_repos`, not here — a serial sweep
+    across seven repos measured at 47s (#232's post-review fix); a second
+    concurrent-fetch path in the TUI would be the #150 shape this module's own
+    docstring already rules out. `on_repo`, when given, fires as each repo's
+    own fetch finishes — in completion order, paired with that repo's fixed
+    index in `config.repos` — so the TUI can paint a row the moment it is
+    ready without waiting for the slowest repo in the fleet, while the row's
+    on-screen position stays exactly where the repo list says it belongs.
+    """
+    index_by_repo = {repo: i for i, repo in enumerate(config.repos)}
+
+    def _on_result(repo: str, result: FleetRepo | CommandError) -> None:
+        if on_repo is not None and not isinstance(result, CommandError):
+            on_repo(index_by_repo[repo], result)
+
+    results = status.fetch_repos(config.repos, _load_one, on_result=_on_result)
     fleet: list[FleetRepo] = []
-    for repo in config.repos:
-        data = load_repo(repo)
-        lanes = lanes_for(repo) if data.readable and _needs_lane_check(data.issues) else None
-        fleet.append(FleetRepo(repo, data, lanes))
+    for _repo, result in results:
+        # `_load_one` never raises — `load_repo`/`lanes_for` already catch
+        # CommandError and degrade to `readable=False`/`lanes=None` — so this
+        # is a type narrowing, not a real failure path.
+        assert isinstance(result, FleetRepo)
+        fleet.append(result)
     return fleet
 
 

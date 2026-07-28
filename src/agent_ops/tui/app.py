@@ -50,24 +50,44 @@ def _select_first(list_view: ListView) -> None:
 
 
 class ReposPane(ListView):
-    """Fleet repo list — always-visible ⚠ marker for an unserviced stage (#229)."""
+    """Fleet repo list — always-visible ⚠ marker for an unserviced stage (#229).
+
+    Rows render incrementally (#232's post-review fix): the fleet sweep is
+    concurrent now, so repos finish in whatever order `gh` answers, not
+    registry order. `show_loading` lays out every row up front so a repo not
+    yet fetched shows `loading…` at its fixed position; `update_row` then
+    fills one row in place without touching the others or the list's
+    selection — `clear()` resets `ListView.index`, which would post a spurious
+    `Highlighted` and reset whatever stage the user has navigated to on the
+    row they're actually looking at, every time an unrelated repo arrives.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.rows: list[data.RepoSummary] = []
+        self.repo_names: list[str] = []
+        self.rows: list[data.RepoSummary | None] = []
 
     def on_mount(self) -> None:
         self.border_title = "Repos"
 
-    def set_rows(self, rows: list[data.RepoSummary]) -> None:
-        self.rows = rows
+    def show_loading(self, repos: list[str]) -> None:
+        self.repo_names = list(repos)
+        self.rows = [None] * len(repos)
         self.clear()
-        if not rows:
+        if not repos:
             self.append(ListItem(Label("(no repos registered)")))
             return
-        for row in rows:
-            self.append(ListItem(Label(self._line(row))))
+        for repo in repos:
+            self.append(ListItem(Label(f"{repo}  loading…")))
         _select_first(self)
+
+    def update_row(self, index: int, row: data.RepoSummary) -> None:
+        if not (0 <= index < len(self.rows)):
+            return
+        self.rows[index] = row
+        items = list(self.children)
+        if index < len(items):
+            items[index].query_one(Label).update(self._line(row))
 
     @staticmethod
     def _line(row: data.RepoSummary) -> str:
@@ -120,6 +140,12 @@ class StageRow(Static):
         if reset_stage or not detail.stages:
             self.stage_index = next((i for i, s in enumerate(detail.stages) if s.count), 0)
         self.render_detail()
+
+    def set_awaiting(self, repo: str) -> None:
+        """The selected repo's own fetch hasn't finished yet — distinct from
+        no repo being selected at all."""
+        self.detail = None
+        self.update(f"{repo}\nloading…")
 
     def render_detail(self) -> None:
         d = self.detail
@@ -218,7 +244,10 @@ class WaitingPane(Static):
         self.border_title = "waiting on you"
         self.update("loading…")
 
-    def set_summary(self, w: data.WaitingOnYou) -> None:
+    def show_loading(self, total: int) -> None:
+        self.update(f"loading… 0/{total} repos" if total else "loading…")
+
+    def set_summary(self, w: data.WaitingOnYou, *, loaded: int, total: int) -> None:
         lines = [
             f"{w.needs_human}  needs-human",
             f"{w.open_prs}  open PRs",
@@ -227,6 +256,8 @@ class WaitingPane(Static):
         ]
         if w.unreadable_repos:
             lines.append(f"⚠ unreadable: {', '.join(w.unreadable_repos)}")
+        if loaded < total:
+            lines.append(f"(loading {loaded}/{total} repos…)")
         self.update("\n".join(lines))
 
 
@@ -321,7 +352,8 @@ class TuiApp(App[None]):
         super().__init__()
         self.project_root = project_root
         self.local_slug = github.remote_slug(project_root)
-        self.fleet: list[data.FleetRepo] = []
+        self.config = registry.RegistryConfig()
+        self.fleet: list[data.FleetRepo | None] = []
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
         self.status_message = ""
@@ -338,6 +370,16 @@ class TuiApp(App[None]):
 
     def on_mount(self) -> None:
         self._apply_layout(self.size.width)
+        try:
+            self.config = registry.load_registry()
+        except FileNotFoundError as exc:
+            self._show_load_error(str(exc))
+            return
+        self.fleet = [None] * len(self.config.repos)
+        repos_pane = self.query_one(ReposPane)
+        repos_pane.show_loading(self.config.repos)
+        self.query_one(WaitingPane).show_loading(len(self.config.repos))
+        repos_pane.focus()
         self.run_worker(self._load, thread=True, exclusive=True)
 
     def on_resize(self, event: events.Resize) -> None:
@@ -348,32 +390,62 @@ class TuiApp(App[None]):
         body.set_class(width < NARROW_WIDTH, "narrow")
 
     # --- data loading (blocking gh/git calls run off the UI thread) -----------
+    #
+    # The fleet sweep is concurrent (status.fetch_repos) and paints each repo's
+    # row as its own fetch completes, rather than blanking the screen until
+    # every repo answers — a `agent status --pipeline` sweep measured at 47s
+    # against seven repos otherwise sat on "loading…" long enough to look
+    # broken (#232's post-review fix). Local runs are fetched first, before
+    # the fleet, since they're a single fast local read and both the Runs pane
+    # and the waiting-on-you row can use them immediately.
 
     def _load(self) -> None:
-        try:
-            config = registry.load_registry()
-        except FileNotFoundError as exc:
-            self.call_from_thread(self._show_load_error, str(exc))
-            return
-        fleet = data.load_fleet(config)
         local_rows, _trustworthy = data.local_runs(self.project_root)
-        self.call_from_thread(self._apply_load, fleet, local_rows)
+        self.call_from_thread(self._apply_local_runs, local_rows)
+        fleet = data.load_fleet(self.config, on_repo=self._on_repo_loaded)
+        self.call_from_thread(self._finish_load, fleet)
 
     def _show_load_error(self, message: str) -> None:
         self.load_error = message
         self.query_one(WaitingPane).update(f"⚠ {message}")
 
-    def _apply_load(self, fleet: list[data.FleetRepo], local_rows: list[runs.Run]) -> None:
-        self.fleet = fleet
-        self.local_run_rows = local_rows
+    def _apply_local_runs(self, rows: list[runs.Run]) -> None:
+        self.local_run_rows = rows
+        self.query_one(RunsPane).set_rows(rows)
+        self._refresh_waiting_pane()
+
+    def _on_repo_loaded(self, index: int, fr: data.FleetRepo) -> None:
+        """Called from the sweep's worker thread as each repo's own fetch
+        finishes — `call_from_thread` hands the update to the UI thread and
+        blocks until it's applied."""
+        self.call_from_thread(self._apply_repo, index, fr)
+
+    def _apply_repo(self, index: int, fr: data.FleetRepo) -> None:
+        if not (0 <= index < len(self.fleet)):
+            return
+        self.fleet[index] = fr
+        self.query_one(ReposPane).update_row(index, data.repo_summary(fr))
+        self._refresh_waiting_pane()
         repos_pane = self.query_one(ReposPane)
-        repos_pane.set_rows([data.repo_summary(fr) for fr in fleet])
-        self.query_one(WaitingPane).set_summary(data.waiting_on_you(fleet, local_rows))
-        self.query_one(RunsPane).set_rows(local_rows)
-        if fleet:
-            self._show_repo(0, reset_stage=True)
+        if repos_pane.index == index:
+            self._show_repo(index, reset_stage=True)
+            self._refresh_bar()
+
+    def _finish_load(self, fleet: list[data.FleetRepo]) -> None:
+        # Only relevant when `load_fleet` didn't stream results (e.g. a test
+        # double that returns the whole list at once): apply whatever `_apply_repo`
+        # hasn't already painted. In the real concurrent path every entry is
+        # already filled by the time this runs.
+        for i, fr in enumerate(fleet):
+            if self.fleet[i] is None:
+                self._apply_repo(i, fr)
+        self._refresh_waiting_pane()
         self._refresh_bar()
-        repos_pane.focus()
+
+    def _refresh_waiting_pane(self) -> None:
+        loaded = [fr for fr in self.fleet if fr is not None]
+        w = data.waiting_on_you(loaded, self.local_run_rows)
+        self.query_one(WaitingPane).set_summary(w, loaded=len(loaded), total=len(self.fleet))
 
     # --- selection plumbing ----------------------------------------------------
 
@@ -381,9 +453,13 @@ class TuiApp(App[None]):
         if not (0 <= index < len(self.fleet)):
             return
         fr = self.fleet[index]
+        stage_row = self.query_one(StageRow)
+        if fr is None:
+            stage_row.set_awaiting(self.config.repos[index])
+            self._refresh_issue_list()
+            return
         running = any(r.state == "running" for r in self.local_run_rows)
         detail = data.repo_detail(fr, is_local=fr.repo == self.local_slug, local_running=running)
-        stage_row = self.query_one(StageRow)
         stage_row.set_detail(detail, reset_stage=reset_stage)
         self._refresh_issue_list()
 

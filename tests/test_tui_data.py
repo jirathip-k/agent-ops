@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -98,6 +100,57 @@ def test_load_fleet_unreadable_repo_never_asks_for_lanes(monkeypatch: pytest.Mon
     monkeypatch.setattr(data, "lanes_for", unreachable)
     fleet = data.load_fleet(RegistryConfig(repos=["o/a"]))
     assert fleet[0] == data.FleetRepo("o/a", data.RepoData("o/a", readable=False), None)
+
+
+def test_load_fleet_fetches_repos_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A serial `for repo in config.repos` loop could never have more than one
+    # `_pipeline_issues` call in flight at once — the 47s-against-seven-repos
+    # regression this fix closes (#232).
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fetch(repo: str) -> list[Any]:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return []
+
+    monkeypatch.setattr(status, "_pipeline_issues", fetch)
+    monkeypatch.setattr(status, "_open_prs", lambda repo: [])
+
+    data.load_fleet(RegistryConfig(repos=["o/a", "o/b", "o/c"]))
+
+    assert max_active > 1
+
+
+def test_load_fleet_on_repo_reports_each_repos_fixed_registry_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # o/a is deliberately the slow one, so it answers last — `on_repo` must
+    # still pair it with index 0, its fixed position in the registry, not the
+    # order its own fetch happened to complete in.
+    def fetch(repo: str) -> list[Any]:
+        if repo == "o/a":
+            time.sleep(0.05)
+        return []
+
+    monkeypatch.setattr(status, "_pipeline_issues", fetch)
+    monkeypatch.setattr(status, "_open_prs", lambda repo: [])
+
+    seen: dict[int, str] = {}
+
+    def on_repo(index: int, fr: data.FleetRepo) -> None:
+        seen[index] = fr.repo
+
+    fleet = data.load_fleet(RegistryConfig(repos=["o/a", "o/b", "o/c"]), on_repo=on_repo)
+
+    assert seen == {0: "o/a", 1: "o/b", 2: "o/c"}
+    assert [fr.repo for fr in fleet] == ["o/a", "o/b", "o/c"]
 
 
 # --- lanes_for ---------------------------------------------------------------

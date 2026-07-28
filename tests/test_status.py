@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +26,7 @@ from agent_ops.status import (
     detect_lanes,
     stage_counts,
 )
+from agent_ops.utils import CommandError
 from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, TRIAGE_DONE_LABEL
 
 runner = CliRunner()
@@ -285,6 +288,100 @@ def test_cell_appends_star_for_cron_scheduled_lanes() -> None:
     assert _cell(_lane(cron="0 6 * * *")) == "gh*"
     assert _cell(_lane(runner="blacksmith-2vcpu-ubuntu-2404")) == "bs-2vcpu"
     assert _cell(_lane()) == "gh"
+
+
+# --- fetch_repos --------------------------------------------------------------
+#
+# The shared concurrency primitive behind `fleet_status`, `pipeline_status`
+# and the TUI's fleet load (#232's post-review fix: a serial sweep measured at
+# 47s against seven repos).
+
+
+def test_fetch_repos_runs_concurrently_not_one_repo_at_a_time() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fetch(repo: str) -> str:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return repo
+
+    results = status.fetch_repos(["o/a", "o/b", "o/c"], fetch)
+
+    # A serial loop could never have more than one fetch in flight at once.
+    assert max_active > 1
+    assert results == [("o/a", "o/a"), ("o/b", "o/b"), ("o/c", "o/c")]
+
+
+def test_fetch_repos_bounds_concurrency_to_max_workers() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fetch(repo: str) -> None:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+
+    status.fetch_repos([f"o/{i}" for i in range(10)], fetch, max_workers=2)
+
+    # A 30-repo fleet must not fork 30 concurrent `gh` processes.
+    assert max_active <= 2
+
+
+def test_fetch_repos_returns_in_repos_order_regardless_of_completion_order() -> None:
+    # o/a is deliberately the slowest — the returned order must still follow
+    # `repos`, not whichever repo's fetch happened to finish first.
+    def fetch(repo: str) -> str:
+        if repo == "o/a":
+            time.sleep(0.05)
+        return repo
+
+    results = status.fetch_repos(["o/a", "o/b", "o/c"], fetch)
+
+    assert [repo for repo, _ in results] == ["o/a", "o/b", "o/c"]
+
+
+def test_fetch_repos_isolates_one_repos_failure_from_the_rest() -> None:
+    def fetch(repo: str) -> str:
+        if repo == "o/bad":
+            raise CommandError("boom")
+        return repo
+
+    results = dict(status.fetch_repos(["o/good1", "o/bad", "o/good2"], fetch))
+
+    assert results["o/good1"] == "o/good1"
+    assert results["o/good2"] == "o/good2"
+    assert isinstance(results["o/bad"], CommandError)
+    assert str(results["o/bad"]) == "boom"
+
+
+def test_fetch_repos_on_result_fires_once_per_repo() -> None:
+    seen: dict[str, str | CommandError] = {}
+
+    def record(repo: str, result: str | CommandError) -> None:
+        seen[repo] = result
+
+    status.fetch_repos(["o/a", "o/b"], lambda repo: repo.upper(), on_result=record)
+
+    assert seen == {"o/a": "O/A", "o/b": "O/B"}
+
+
+def test_fetch_repos_empty_repos_returns_empty_without_calling_fetch() -> None:
+    def unreachable(repo: str) -> str:
+        raise AssertionError("fetch must not be called for an empty repo list")
+
+    assert status.fetch_repos([], unreachable) == []
 
 
 # --- fleet_failures ----------------------------------------------------------
@@ -621,6 +718,89 @@ def test_branch_elides_only_when_it_would_push_the_url_out() -> None:
     assert len(elided) == status.BRANCH_WIDTH
     # Both ends survive: the lane prefix and the issue suffix are what identify it.
     assert elided.startswith("jirathip-k/") and elided.endswith("more")
+
+
+# --- fleet_status --------------------------------------------------------------
+
+
+def _fleet_run(
+    prs_by_repo: dict[str, list[dict[str, Any]]],
+    issues_by_repo: dict[str, list[dict[str, Any]] | CommandError],
+) -> FakeRun:
+    """A `run()` stand-in for the two calls `fleet_status` makes per repo:
+    `gh pr list` and `gh issue list`, dispatched on `cmd[1]`."""
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        repo = cmd[cmd.index("--repo") + 1]
+        if cmd[1] == "pr":
+            return _proc(json.dumps(prs_by_repo.get(repo, [])))
+        payload = issues_by_repo[repo]
+        if isinstance(payload, CommandError):
+            raise payload
+        return _proc(json.dumps(payload))
+
+    return fake
+
+
+def test_fleet_status_lists_prs_and_issue_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _fleet_run(
+            prs_by_repo={
+                "o/a": [{"number": 3, "title": "x", "baseRefName": "main", "headRefName": "fix/x"}]
+            },
+            issues_by_repo={"o/a": [_issue("agent-ready")]},
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_status(RegistryConfig(repos=["o/a"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/a\033[0m — 1 open issue(s): 1 agent-ready" in text
+    assert "PR #3 → main" in text
+
+
+def test_fleet_status_skips_a_repo_that_404s_and_finishes_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status,
+        "run",
+        _fleet_run(
+            prs_by_repo={"o/b": []},
+            issues_by_repo={
+                "o/gone": CommandError("HTTP 404: Not Found"),
+                "o/b": [],
+            },
+        ),
+    )
+    lines: list[str] = []
+
+    status.fleet_status(RegistryConfig(repos=["o/gone", "o/b"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert "o/gone\033[0m — skipped: HTTP 404: Not Found" in text
+    # The sweep continued past the unreadable repo.
+    assert "o/b\033[0m — 0 open issue(s)" in text
+
+
+def test_fleet_status_output_order_matches_registry_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    # o/a is deliberately the slow one; the printed order must still follow
+    # the registry, not whichever repo's `gh` calls happened to return first.
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        if cmd[cmd.index("--repo") + 1] == "o/a":
+            time.sleep(0.05)
+        return _proc("[]")
+
+    monkeypatch.setattr(status, "run", fake)
+    lines: list[str] = []
+
+    status.fleet_status(RegistryConfig(repos=["o/a", "o/b", "o/c"]), log=lines.append)
+
+    text = "\n".join(lines)
+    assert text.index("o/a\033[0m") < text.index("o/b\033[0m") < text.index("o/c\033[0m")
 
 
 # --- pipeline_status -----------------------------------------------------

@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -545,6 +546,58 @@ def own_repo_startup_failures(repo: str, limit: int = FAILURE_LIMIT) -> list[dic
     return [r for r in runs if r.get("path") not in disabled]
 
 
+# Bound on `gh` processes a fleet sweep opens at once. High enough that a
+# sweep's total time is roughly its slowest single repo rather than the sum of
+# all of them (`agent status --pipeline` measured at 47s against seven repos
+# fetched one at a time — #232); low enough that a 30-repo fleet doesn't fork
+# 30 concurrent `gh` processes.
+MAX_CONCURRENT_REPOS = 8
+
+
+def fetch_repos[T](
+    repos: Sequence[str],
+    fetch: Callable[[str], T],
+    *,
+    on_result: Callable[[str, T | CommandError], None] | None = None,
+    max_workers: int = MAX_CONCURRENT_REPOS,
+) -> list[tuple[str, T | CommandError]]:
+    """Run `fetch(repo)` for every repo concurrently, bounded to `max_workers`
+    in flight at once, and return the results in `repos`' own order.
+
+    The per-repo sweeps this backs (`fleet_status`, `pipeline_status`, the
+    TUI's fleet load) were fetching one repo at a time; the fetches are
+    independent, so they run concurrently here, once, so every caller
+    benefits instead of the TUI growing a second way to gather the same data
+    (the #150 shape).
+
+    Returning in `repos`' order rather than completion order keeps output
+    deterministic: two sweeps of an unchanged fleet must print identically,
+    which a plain `as_completed` iteration would not guarantee. A
+    `CommandError` raised by `fetch` is caught here and returned in place of a
+    result rather than propagated, isolating one repo's failure from the rest
+    of the sweep — the same contract callers already relied on for a serial
+    loop. `on_result`, when given, fires once per repo as soon as its own
+    fetch finishes — in completion order, not list order — so a caller like
+    the TUI can paint a row the moment it is ready instead of waiting for the
+    slowest repo in the fleet.
+    """
+    if not repos:
+        return []
+    results: dict[str, T | CommandError] = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(repos))) as pool:
+        future_to_repo = {pool.submit(fetch, repo): repo for repo in repos}
+        for future in as_completed(future_to_repo):
+            repo = future_to_repo[future]
+            try:
+                result: T | CommandError = future.result()
+            except CommandError as exc:
+                result = exc
+            results[repo] = result
+            if on_result is not None:
+                on_result(repo, result)
+    return [(repo, results[repo]) for repo in repos]
+
+
 def _open_prs(repo: str) -> list[dict[str, Any]]:
     """Open PRs for `repo`, newest first — the same listing `fleet_status` prints,
     factored out so the TUI's fleet sweep can read it too without a second
@@ -568,27 +621,37 @@ def _open_prs(repo: str) -> list[dict[str, Any]]:
     )
 
 
+def _repo_prs_and_issues(repo: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The two listings `fleet_status` renders per repo, fetched as one unit
+    so `fetch_repos` parallelises and fails them together per repo."""
+    prs = _open_prs(repo)
+    issues = json.loads(
+        run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                "200",
+                "--json",
+                "labels",
+            ],
+        ).stdout
+    )
+    return prs, issues
+
+
 def fleet_status(config: RegistryConfig, log: Callable[[str], None] = print) -> None:
     """One screen: every registered repo's open PRs and issue buckets."""
-    for repo in config.repos:
-        prs = _open_prs(repo)
-        issues = json.loads(
-            run(
-                [
-                    "gh",
-                    "issue",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "open",
-                    "--limit",
-                    "200",
-                    "--json",
-                    "labels",
-                ],
-            ).stdout
-        )
+    for repo, result in fetch_repos(config.repos, _repo_prs_and_issues):
+        if isinstance(result, CommandError):
+            log(f"\033[1m{repo}\033[0m — skipped: {result}")
+            continue
+        prs, issues = result
         counts = bucket_counts(issues)
         log(
             f"\n\033[1m{repo}\033[0m — {len(issues)} open issue(s): "
@@ -653,13 +716,12 @@ def pipeline_status(config: RegistryConfig, log: Callable[[str], None] = print) 
         return
 
     skipped: list[str] = []
-    for repo in config.repos:
-        try:
-            issues = _pipeline_issues(repo)
-        except CommandError as exc:
+    for repo, issues_or_error in fetch_repos(config.repos, _pipeline_issues):
+        if isinstance(issues_or_error, CommandError):
             skipped.append(repo)
-            log(f"\033[1m{repo}\033[0m — skipped: {exc}")
+            log(f"\033[1m{repo}\033[0m — skipped: {issues_or_error}")
             continue
+        issues = issues_or_error
 
         truncated = len(issues) == PIPELINE_ISSUE_LIMIT
         rows = [(stage, entry) for stage, entry in stage_counts(issues).items() if entry.count]
