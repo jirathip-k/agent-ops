@@ -720,6 +720,26 @@ def test_branch_elides_only_when_it_would_push_the_url_out() -> None:
     assert elided.startswith("jirathip-k/") and elided.endswith("more")
 
 
+def test_open_prs_requests_closing_issues_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The TUI's issue detail pane (#235) derives PR status from this same
+    listing via `github.pr_references_issue`, which needs this field — a
+    second `gh pr list` call shape would be the #150 gap this module's
+    docstring rules out."""
+    captured: dict[str, list[str]] = {}
+
+    def fake(cmd: list[str], **kwargs: Any) -> Proc:
+        captured["cmd"] = cmd
+        return _proc("[]")
+
+    monkeypatch.setattr(status, "run", fake)
+
+    status._open_prs("o/a")
+
+    json_index = captured["cmd"].index("--json")
+    fields = captured["cmd"][json_index + 1].split(",")
+    assert "closingIssuesReferences" in fields
+
+
 # --- fleet_status --------------------------------------------------------------
 
 

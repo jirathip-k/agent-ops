@@ -68,6 +68,29 @@ def get_issue(number: int, cwd: Path) -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
+def issue_view(repo: str, number: int) -> dict[str, Any]:
+    """One issue's detail, for a repo that may not be the local checkout.
+
+    `--repo` is spelled out rather than relying on a `cwd`'s remote, the same
+    reasoning as `open_web_command` (`tui/data.py`): the TUI's selected issue
+    can belong to any fleet repo, not just the one it was launched in — so
+    this needs no `cwd` at all.
+    """
+    proc = run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,title,body,labels,createdAt",
+        ],
+    )
+    return json.loads(proc.stdout)
+
+
 def create_pr(
     cwd: Path,
     *,

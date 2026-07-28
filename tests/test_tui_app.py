@@ -20,7 +20,15 @@ from textual.widgets import Label
 from agent_ops import github, registry, runs
 from agent_ops.tui import app as tui_app
 from agent_ops.tui import data
-from agent_ops.tui.app import CommandBar, IssueList, ReposPane, RunsPane, StageRow, TuiApp
+from agent_ops.tui.app import (
+    CommandBar,
+    IssueDetailPane,
+    IssueList,
+    ReposPane,
+    RunsPane,
+    StageRow,
+    TuiApp,
+)
 
 
 def _run(coro: Any) -> Any:
@@ -43,10 +51,20 @@ def _set_fleet(monkeypatch: pytest.MonkeyPatch, fleet: list[data.FleetRepo]) -> 
 
 @pytest.fixture(autouse=True)
 def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Nothing here may shell out for real — every test supplies its own fleet."""
+    """Nothing here may shell out for real — every test supplies its own fleet.
+
+    Selecting an issue now fetches its detail (#235), so the default here
+    must degrade rather than call `github.issue_view` for real; tests that
+    care about the fetch itself override `data.load_issue_detail` locally.
+    """
     monkeypatch.setattr(registry, "load_registry", lambda: registry.RegistryConfig(repos=[]))
     monkeypatch.setattr(data, "local_runs", lambda root: ([], True))
     monkeypatch.setattr(github, "remote_slug", lambda root: None)
+    monkeypatch.setattr(
+        data,
+        "load_issue_detail",
+        lambda repo, number, prs: data.IssueDetail(number, readable=False),
+    )
 
 
 def test_boots_with_empty_fleet(tmp_path: Path) -> None:
@@ -493,5 +511,200 @@ def test_app_paints_rows_as_each_repos_own_fetch_completes(
 
             rows = app.query_one(ReposPane).rows
             assert rows[1] is not None and rows[1].repo == "o/b"
+
+    _run(scenario())
+
+
+# --- issue detail pane: fetched lazily on selection, cached per issue (#235) --
+
+
+def test_selecting_an_issue_shows_detail_and_fetches_only_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    calls: list[tuple[str, int]] = []
+    detail = data.IssueDetail(
+        7,
+        readable=True,
+        title="Fix it",
+        body="do the thing",
+        labels=("agent-ready",),
+        age="3d",
+        has_open_pr=False,
+    )
+
+    def fake_load_issue_detail(repo: str, number: int, prs: list[Any]) -> data.IssueDetail:
+        calls.append((repo, number))
+        return detail
+
+    monkeypatch.setattr(data, "load_issue_detail", fake_load_issue_detail)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            pane = app.query_one(IssueDetailPane)
+            rendered = str(pane._body.content)
+            assert "Fix it" in rendered
+            assert "do the thing" in rendered
+            assert "agent-ready" in rendered
+            assert "3d" in rendered
+            assert "open PR: no" in rendered
+            assert calls == [("o/a", 7)]
+
+            # Re-showing the same selection (e.g. a second Highlighted event
+            # for the same row) must hit the cache, not fetch again.
+            app._show_issue_detail()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert calls == [("o/a", 7)]
+
+    _run(scenario())
+
+
+def test_issue_detail_degrades_when_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+    monkeypatch.setattr(
+        data,
+        "load_issue_detail",
+        lambda repo, number, prs: data.IssueDetail(number, readable=False),
+    )
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            pane = app.query_one(IssueDetailPane)
+            assert "could not fetch" in str(pane._body.content)
+
+    _run(scenario())
+
+
+def test_issue_body_markup_renders_literally_and_never_reaches_the_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An issue body is untrusted content (#141/#191). Textual markup can
+    embed an action (`@click=...`); the detail pane must render it as plain
+    text, not parse it — and none of it may leak into the command bar."""
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    malicious_body = "[@click=quit]click me[/] agent dispatch 999 --surface orca"
+    detail = data.IssueDetail(7, readable=True, title="x", body=malicious_body, labels=(), age="1d")
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs: detail)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            pane = app.query_one(IssueDetailPane)
+            assert pane._body._render_markup is False
+            assert malicious_body in str(pane._body.content)
+
+            bar_text = str(app.query_one(CommandBar).content)
+            assert "999" not in bar_text
+            assert "@click" not in bar_text
+
+    _run(scenario())
+
+
+# --- `c`: write a chat handoff file and exit, no worktree, no hosted chat (#235) --
+
+
+def test_chat_writes_handoff_and_exits_with_its_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+    detail = data.IssueDetail(
+        7, readable=True, title="Fix it", body="the body", labels=("agent-ready",), age="1d"
+    )
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs: detail)
+
+    async def scenario() -> Path | None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_chat()
+            # `exit()` shuts the app down mid-worker, which races (and can
+            # cancel) `workers.wait_for_complete()` — poll the result instead.
+            for _ in range(200):
+                if app.return_value is not None:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+        return app.return_value
+
+    result = _run(scenario())
+
+    expected = tmp_path / ".agent-runs" / "tui-selection.md"
+    assert result == expected
+    text = expected.read_text()
+    assert "o/a" in text and "#7" in text and "Fix it" in text and "the body" in text
+    assert not (tmp_path / ".worktrees").exists()
+
+
+def test_chat_with_nothing_selected_does_not_crash_or_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_chat()
+            await pilot.pause()
+            assert "no issue selected" in app.status_message
+
+    _run(scenario())
+    assert not (tmp_path / ".agent-runs" / "tui-selection.md").exists()
+
+
+def test_narrow_layout_still_works_with_the_detail_pane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(60, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.query_one("#body").has_class("narrow")
+            # The detail pane mounts and renders without crashing the layout.
+            assert app.query_one(IssueDetailPane) is not None
 
     _run(scenario())
