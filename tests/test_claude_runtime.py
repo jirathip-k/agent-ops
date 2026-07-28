@@ -276,7 +276,9 @@ def test_non_streaming_wall_clock_timeout_is_a_normal_failed_result(
     surface as an ordinary failed RunResult, not an escaped exception.
 
     `check=False` never raises (agent-ops#154) — a timeout comes back as a
-    synthetic `CompletedProcess` with `TIMEOUT_RETURNCODE` instead.
+    synthetic `CompletedProcess` with `TIMEOUT_RETURNCODE` instead. The prompt
+    travels via stdin here rather than argv, but the text must still be the
+    compact `wall_clock_timeout_result` message (agent-ops#108, agent-ops#193).
     """
     from agent_ops.utils import TIMEOUT_RETURNCODE
 
@@ -289,12 +291,14 @@ def test_non_streaming_wall_clock_timeout_is_a_normal_failed_result(
         )
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
-    request = RunRequest(prompt="p", cwd=Path("."), stream=False, run_timeout_seconds=42.0)
+    prompt = "SECRET RENDERED TASK PROMPT\n" * 3
+    request = RunRequest(prompt=prompt, cwd=Path("."), stream=False, run_timeout_seconds=42.0)
 
     result = ClaudeCodeRuntime().run(request)
 
     assert result.ok is False
-    assert "42" in result.text
+    assert result.text == "did not finish within 42s"
+    assert prompt not in result.text
     assert classify_failure(result) is FailureKind.AGENT_FAILURE
 
 
