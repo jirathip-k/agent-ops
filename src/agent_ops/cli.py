@@ -49,7 +49,7 @@ from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_merge_check, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES, ReviewOutcome
 from agent_ops.workflows.spawn import REPORT_STATES
-from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
+from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS, TRIAGE_DONE_LABEL
 
 app = typer.Typer(
     name="agent",
@@ -82,7 +82,7 @@ ONBOARDING_LABELS: dict[str, Label] = {
         "1d76db", "Human go-ahead for an enhancement/idea to enter the normal lane"
     ),
     "blocked": Label("b60205", "Skipped by every lane until a human clears the blocker"),
-    "triage:done": Label("ededed", "The CI triage lane has already classified this issue"),
+    TRIAGE_DONE_LABEL: Label("ededed", "The CI triage lane has already classified this issue"),
     "ready-to-merge": Label("0e8a16", "Passed every gate; held for merge (report-only mode)"),
     "hotfix-ready": Label("d93f0b", "Hotfix passed PASS+APPROVE; held for maintainer review"),
     "hotfix-backmerge": Label("5319e7", "Back-merge PR carrying a hotfix from stable to base"),
@@ -1300,6 +1300,16 @@ def status(
             help="Show per-repo CI lane coverage (triage/groom/...) instead of PRs and issues",
         ),
     ] = False,
+    pipeline: Annotated[
+        bool,
+        typer.Option(
+            "--pipeline",
+            help=(
+                "Show what is stuck in each pipeline stage (untriaged, agent-ready, "
+                "spec-requested, ...) and the age of the oldest item, per repo"
+            ),
+        ),
+    ] = False,
     failures: Annotated[
         bool,
         typer.Option(
@@ -1316,12 +1326,13 @@ def status(
     ] = False,
 ) -> None:
     """Fleet overview: open PRs and issue buckets for every registered repo."""
-    from agent_ops.status import fleet_failures, fleet_status, pipeline_coverage
+    from agent_ops.status import fleet_failures, fleet_status, pipeline_coverage, pipeline_status
 
     chosen = [
         flag
         for flag, on in (
             ("--pipelines", pipelines),
+            ("--pipeline", pipeline),
             ("--failures", failures),
             ("--sync-orca", sync_orca),
         )
@@ -1334,6 +1345,8 @@ def status(
         config = registry.load_registry()
         if pipelines:
             pipeline_coverage(config)
+        elif pipeline:
+            pipeline_status(config)
         elif failures:
             fleet_failures(config)
         elif sync_orca:

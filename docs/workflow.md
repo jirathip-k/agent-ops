@@ -426,10 +426,14 @@ This repo is public; the names of the repos it manages are not. The split:
   `agent status --pipelines` shows which reusable CI lanes each registered
   repo has wired up, read live from its workflow files via the GitHub API,
   and `agent status --failures` sweeps those repos for recent failed runs.
-  Both read cross-repo under your local `gh` auth, which is why they are
-  local commands and not a scheduled Action: an Action running here has
-  neither the registry nor a credential that can read another repo's runs
-  (issue #95).
+  `agent status --pipeline` answers a different question — not lane
+  *coverage* but what is stuck *in* a lane: per repo, how many open issues
+  sit in each pipeline stage (`untriaged`, `agent-ready`,
+  `spec-requested`, `agent:claimed`, ...) and the age of the oldest one
+  (issue #227). All three read cross-repo under your local `gh` auth, which
+  is why they are local commands and not a scheduled Action: an Action
+  running here has neither the registry nor a credential that can read
+  another repo's runs (issue #95).
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 
