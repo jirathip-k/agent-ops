@@ -296,7 +296,7 @@ def run_distill(project_root: Path, *, log: Callable[[str], None] = print) -> li
             raise RuntimeError(f"distill modified protected section(s): {', '.join(violated)}")
 
         run(["git", "add", _AGENTS_FILE], cwd=wt_path)
-        run(["git", "commit", "-m", f"docs: distill {_AGENTS_FILE}"], cwd=wt_path)
+        worktree.commit(wt_path, f"docs: distill {_AGENTS_FILE}")
         run(["git", "push", "-u", "origin", branch], cwd=wt_path, timeout=SLOW_GIT_TIMEOUT_S)
         body = "### Pruned\n\n" + "\n".join(
             f"- **{c.section}** — {c.cut} ({c.reason})" for c in cuts

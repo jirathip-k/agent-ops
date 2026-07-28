@@ -220,8 +220,9 @@ class _FakeRuntime:
 
 
 class _FakeProc:
-    def __init__(self, stdout: str) -> None:
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
         self.stdout = stdout
+        self.returncode = returncode
 
 
 def _project(tmp_path: Path, *, min_lines: int = 1) -> tuple[Path, Path]:

@@ -728,7 +728,7 @@ def run_evolve(
 
         run(["git", "checkout", "-b", branch], cwd=wt)
         run(["git", "add", allowed], cwd=wt)
-        run(["git", "commit", "-m", f"prompts: evolve {lane}", "--", allowed], cwd=wt)
+        worktree.commit(wt, f"prompts: evolve {lane}", paths=[allowed])
         run(["git", "push", "-u", "origin", branch], cwd=wt, timeout=SLOW_GIT_TIMEOUT_S)
 
         body = _pr_body(verdict, baseline_block=render_baseline(b), notes=notes)

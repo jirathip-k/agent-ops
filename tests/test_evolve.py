@@ -912,8 +912,9 @@ class _FakeEvolveRuntime:
 
 
 class _FakeEvolveProc:
-    def __init__(self, stdout: str = "") -> None:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
         self.stdout = stdout
+        self.returncode = returncode
 
 
 def _stub_run_evolve(

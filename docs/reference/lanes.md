@@ -198,3 +198,19 @@ whether the file *should* be shortened. A schedule can be added later once a
 few dispatched runs have been watched; a pruned section a human wrote cannot
 be restored by removing one. See #198 before adding a `schedule:` to either
 `distill-pipeline.yml` or its stub.
+
+## Footnote: CI-lane commit identity ([#203](https://github.com/jirathip-k/agent-ops/issues/203))
+
+`distill` and `evolve` are the first CLI-lane pipelines to commit to a
+branch — GitHub-hosted runners configure neither `user.name` nor
+`user.email`, so a plain `git commit` there fails only after the run has
+already paid for checkout, setup, and a full agent session. The fix lives in
+code, not YAML: `worktree.commit` (`src/agent_ops/worktree.py`) falls back to
+a `github-actions[bot]` identity only when git has none configured anywhere
+(global, system, repo, or env) — a local `agent distill` / `agent evolve`
+still commits as the developer. `implement.py`'s `_finish_run` uses the same
+helper. A `git commit` shelled out anywhere else fails
+`tests/test_commit_identity_drift.py`. The `git config --global` steps
+already in `distill-pipeline.yml` and `evolve-pipeline.yml` are redundant
+with this fallback but kept — removing them is a workflow-YAML edit outside
+this fix's scope.
