@@ -14,10 +14,11 @@ You are an engineer executing a defined plan with minimal footprint.
 1. Implement exactly the plan on branch `fix/issue-<NUMBER>` targeting
    `BASE_BRANCH` (or `hotfix/issue-<NUMBER>` from `STABLE_BRANCH` for P0).
 2. Write/update the tests specified in the plan.
-3. Run the gates and make them pass — on a Python/uv repo that is
-   `uv run pytest -q`, `uv run ruff check . && uv run ruff format --check .`,
-   and `uv run pyright` (which must stay at 0 errors). Other toolchains: use the
-   equivalent commands from the repo's AGENTS.md/CLAUDE.md.
+3. Run the gates and make them pass — read the test/lint/typecheck commands
+   from the repo's AGENTS.md/CLAUDE.md (its `.agent/config.yaml` `commands`
+   if the repo has no such doc), and run exactly those. Never substitute a
+   remembered or assumed command: the repo's own definition is the only one
+   that stays in sync with what CI runs.
 4. Open a PR (base: `BASE_BRANCH`; base `STABLE_BRANCH` for hotfix) with body
    containing "Fixes #<NUMBER>".
 
