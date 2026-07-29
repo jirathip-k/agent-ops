@@ -175,7 +175,13 @@ class StageRow(Static):
                 label = f"[reverse]{label}[/reverse]"
             parts.append(label)
         flow = " → ".join(parts)
-        lines = [header, flow, f"PRs open: {d.pr_count}"]
+        if not d.prs_readable:
+            pr_line = "PRs open: ?"
+        elif d.prs_truncated:
+            pr_line = f"PRs open: ≥{d.pr_count}"
+        else:
+            pr_line = f"PRs open: {d.pr_count}"
+        lines = [header, flow, pr_line]
         if d.callout:
             lines.append(f"▲ {d.callout}")
         self.update("\n".join(lines))
@@ -251,7 +257,7 @@ class IssueDetailPane(VerticalScroll):
             self._body.update(f"#{detail.number}\n⚠ could not fetch this issue")
             return
         labels = ", ".join(detail.labels) if detail.labels else "(none)"
-        pr = "yes" if detail.has_open_pr else "no"
+        pr = "?" if detail.has_open_pr is None else "yes" if detail.has_open_pr else "no"
         header = (
             f"#{detail.number}  {detail.title}\n{detail.age} old · labels: {labels} · open PR: {pr}"
         )
@@ -294,9 +300,10 @@ class WaitingPane(Static):
         self.update(f"loading… 0/{total} repos" if total else "loading…")
 
     def set_summary(self, w: data.WaitingOnYou, *, loaded: int, total: int) -> None:
+        open_prs = f"≥{w.open_prs}" if w.open_prs_incomplete else str(w.open_prs)
         lines = [
             f"{w.needs_human}  needs-human",
-            f"{w.open_prs}  open PRs",
+            f"{open_prs}  open PRs",
             f"{w.halted_runs}  halted runs",
             f"{w.unserviced_repos}  unserviced ⚠",
         ]
@@ -543,11 +550,15 @@ class TuiApp(App[Path | None]):
             self._show_issue_detail()
         self._refresh_bar()
 
-    def _prs_for(self, repo: str) -> list[dict[str, Any]]:
+    def _prs_for(self, repo: str) -> tuple[list[dict[str, Any]], bool]:
+        """`repo`'s already-fetched PR listing, plus whether it is complete
+        enough to trust a non-match as "no open PR" rather than "unknown"
+        (#243) — a failed or `OPEN_PR_LIMIT`-truncated listing, or a fleet
+        repo whose own fetch hasn't finished yet, is not complete."""
         for fr in self.fleet:
             if fr is not None and fr.repo == repo:
-                return fr.data.prs
-        return []
+                return fr.data.prs, fr.data.prs_readable and not fr.data.prs_truncated
+        return [], False
 
     def _show_issue_detail(self) -> None:
         """Fetch lazily on selection, cached per issue for the session (#235):
@@ -569,12 +580,14 @@ class TuiApp(App[Path | None]):
         if key in self._issue_detail_inflight:
             return
         self._issue_detail_inflight.add(key)
-        prs = self._prs_for(repo)
-        self.run_worker(partial(self._fetch_issue_detail, key, prs), thread=True)
+        prs, prs_complete = self._prs_for(repo)
+        self.run_worker(partial(self._fetch_issue_detail, key, prs, prs_complete), thread=True)
 
-    def _fetch_issue_detail(self, key: tuple[str, int], prs: list[dict[str, Any]]) -> None:
+    def _fetch_issue_detail(
+        self, key: tuple[str, int], prs: list[dict[str, Any]], prs_complete: bool
+    ) -> None:
         repo, number = key
-        detail = data.load_issue_detail(repo, number, prs)
+        detail = data.load_issue_detail(repo, number, prs, prs_complete=prs_complete)
         self.call_from_thread(self._apply_issue_detail, key, detail)
 
     def _apply_issue_detail(self, key: tuple[str, int], detail: data.IssueDetail) -> None:
@@ -645,17 +658,22 @@ class TuiApp(App[Path | None]):
         self._set_status(f"chat: {data.chat_preview(issue)}")
         key = (repo, issue)
         cached = self.issue_detail_cache.get(key)
-        prs = self._prs_for(repo)
-        self.run_worker(partial(self._chat_worker, key, cached, prs), thread=True)
+        prs, prs_complete = self._prs_for(repo)
+        self.run_worker(partial(self._chat_worker, key, cached, prs, prs_complete), thread=True)
 
     def _chat_worker(
         self,
         key: tuple[str, int],
         cached: data.IssueDetail | None,
         prs: list[dict[str, Any]],
+        prs_complete: bool,
     ) -> None:
         repo, issue = key
-        detail = cached if cached is not None else data.load_issue_detail(repo, issue, prs)
+        detail = (
+            cached
+            if cached is not None
+            else data.load_issue_detail(repo, issue, prs, prs_complete=prs_complete)
+        )
         path = data.chat_handoff_path(self.project_root)
         data.write_chat_handoff(path, repo, detail)
         self.call_from_thread(self.exit, path)
