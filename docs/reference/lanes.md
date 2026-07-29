@@ -184,7 +184,7 @@ CI-prompt divergence risk; `promote` never had one.
 ## Footnote: a tenth lane, dispatch-only by decision
 
 `distill` also runs on both surfaces through one code path: local `agent
-distill` (`src/agent_ops/cli.py:1053`, `distill`) → `run_distill`
+distill` (`src/agent_ops/cli.py:1054`, `distill`) → `run_distill`
 (`src/agent_ops/workflows/distill.py:168`), and CI's
 `uv run agent distill` (`.github/workflows/distill-pipeline.yml:132`) via
 `stubs/managed-repo-distill.yml`. It is not in the table above for the same
