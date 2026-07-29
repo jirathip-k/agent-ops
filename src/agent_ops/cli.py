@@ -54,7 +54,9 @@ from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS, TRIAGE_DONE_LA
 app = typer.Typer(
     name="agent",
     help="agent-ops: orchestrate agentic SDLC workflows across your repos.",
-    no_args_is_help=True,
+    # Bare `agent` opens the pipeline TUI (see the callback below) rather than
+    # printing help — `no_args_is_help` would pre-empt that callback.
+    no_args_is_help=False,
 )
 worktree_app = typer.Typer(help="Manage per-task worktrees.", no_args_is_help=True)
 app.add_typer(worktree_app, name="worktree")
@@ -62,6 +64,22 @@ app.add_typer(worktree_app, name="worktree")
 ProjectOpt = Annotated[
     Path, typer.Option("--project", "-C", help="Project repo root (default: cwd)")
 ]
+
+
+@app.callback(invoke_without_command=True)
+def _main(ctx: typer.Context) -> None:
+    """agent-ops: orchestrate agentic SDLC workflows across your repos.
+
+    Run with no command to open the pipeline TUI (issue #232) — the one
+    screen for pipeline/runs/PRs, with dispatch and resume, and every
+    keybinding showing the command it runs.
+    """
+    if ctx.invoked_subcommand is None:
+        from agent_ops.tui import run_tui
+
+        path = run_tui(Path("."))
+        if path is not None:
+            typer.echo(str(path))
 
 
 def _err(message: str) -> None:
@@ -137,6 +155,15 @@ def _report_caller_drift(root: Path) -> None:
     results = stubs.caller_drift(root)
     if not results:
         return  # no agent-ops lanes wired up at all — nothing to compare
+
+    # An unreadable .github/workflows fails every known lane identically — one
+    # line beats one identical "skipped" line per lane. A single lane already
+    # gets its own "! <lane> drift check skipped: ..." line below, so only
+    # collapse when there's more than one to dedupe.
+    distinct_errors = {drift.error for drift in results}
+    if len(results) > 1 and len(distinct_errors) == 1 and None not in distinct_errors:
+        typer.echo(f"! CI caller drift check skipped: {results[0].error}")
+        return
 
     problems: list[str] = []
     for drift in results:
@@ -1397,6 +1424,17 @@ def runs(
     except (CommandError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+
+
+@app.command()
+def tui(project: ProjectOpt = Path(".")) -> None:
+    """Open the pipeline TUI: pipeline/runs/PRs/waiting-on-you on one screen,
+    with dispatch and resume — bare `agent` opens the same thing."""
+    from agent_ops.tui import run_tui
+
+    path = run_tui(project.resolve())
+    if path is not None:
+        typer.echo(str(path))
 
 
 @app.command()

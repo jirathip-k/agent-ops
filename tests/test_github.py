@@ -22,6 +22,24 @@ def test_get_issue_requests_comments(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "comments" in captured["cmd"][json_index + 1].split(",")
 
 
+def test_issue_view_pins_the_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"number": 42}))
+
+    monkeypatch.setattr(github, "run", fake_run)
+    result = github.issue_view("o/a", 42)
+
+    assert "--repo" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--repo") + 1] == "o/a"
+    json_index = captured["cmd"].index("--json")
+    fields = captured["cmd"][json_index + 1].split(",")
+    assert {"number", "title", "body", "labels", "createdAt"} <= set(fields)
+    assert result == {"number": 42}
+
+
 def test_pr_references_issue_matches_branch_name() -> None:
     pr = {"headRefName": "fix/issue-132", "title": "unrelated", "body": None}
     assert github.pr_references_issue(pr, 132)
