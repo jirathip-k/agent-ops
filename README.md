@@ -78,6 +78,11 @@ agent status --sync-orca       # mirror active agent lanes onto Orca cards (read
 agent runtimes                 # claude_code / codex availability
 ```
 
+The pipeline TUI opens in the Catppuccin Macchiato theme by default; set
+`tui.theme` in `.agent/config.yaml` to any of Textual's built-in themes (also
+switchable live via its command palette, `ctrl+p` → "theme") — an unknown
+name fails at startup with the valid list.
+
 Stages fan out across roles via model tiers: **planner** and **reviewer**
 run the `smart` tier (currently `fable`) in read-only mode; **implementer**
 runs the `fast` tier (currently `sonnet`) with write access. A tier names a

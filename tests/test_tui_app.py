@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.widgets import Label
 
 from agent_ops import github, registry, runs, status
@@ -28,6 +29,7 @@ from agent_ops.tui.app import (
     RunsPane,
     StageRow,
     TuiApp,
+    WaitingPane,
 )
 
 # The real `load_issue_detail`, captured before the autouse `_no_real_gh`
@@ -904,5 +906,155 @@ def test_narrow_layout_still_works_with_the_detail_pane(
             assert app.query_one("#body").has_class("narrow")
             # The detail pane mounts and renders without crashing the layout.
             assert app.query_one(IssueDetailPane) is not None
+
+    _run(scenario())
+
+
+# --- theming (issue #248): Catppuccin default, configurable, focus/colour ------
+
+
+def test_theme_defaults_to_catppuccin_macchiato(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)):
+            await app.workers.wait_for_complete()
+            assert app.theme == "catppuccin-macchiato"
+
+    _run(scenario())
+
+
+def test_theme_kwarg_selects_a_different_built_in_theme(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = TuiApp(tmp_path, theme="nord")
+        async with app.run_test(size=(80, 24)):
+            await app.workers.wait_for_complete()
+            assert app.theme == "nord"
+
+    _run(scenario())
+
+
+def test_focused_pane_border_is_distinguishable_from_an_unfocused_sibling(
+    tmp_path: Path,
+) -> None:
+    """The double/round edge is the non-colour channel (#248): it must differ
+    even with colour stripped, so this asserts on the border edge type, not
+    just the border colour."""
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            repos_pane = app.query_one(ReposPane)
+            runs_pane = app.query_one(RunsPane)
+            assert repos_pane.has_focus
+            assert not runs_pane.has_focus
+            focused_edge, _ = repos_pane.styles.border_top
+            unfocused_edge, _ = runs_pane.styles.border_top
+            assert focused_edge != unfocused_edge
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert not repos_pane.has_focus
+            new_edge, _ = repos_pane.styles.border_top
+            assert new_edge == unfocused_edge
+
+    _run(scenario())
+
+
+def test_waiting_pane_colours_nonzero_counts_but_keeps_the_text_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(1, "2026-01-01T00:00:00Z", "needs-human")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)):
+            await app.workers.wait_for_complete()
+            pane = app.query_one(WaitingPane)
+            rendered = cast(Content, pane.render())
+            text = str(rendered)
+            # The colour-stripped channel: the count and label stay legible
+            # on their own.
+            assert "1  needs-human" in text
+            assert any(span.style == "$warning" for span in rendered.spans)
+
+    _run(scenario())
+
+
+def test_waiting_pane_colours_zero_counts_as_success_when_all_clear(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=[], prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)):
+            await app.workers.wait_for_complete()
+            pane = app.query_one(WaitingPane)
+            rendered = cast(Content, pane.render())
+            text = str(rendered)
+            assert "0  needs-human" in text
+            assert any(span.style == "$success" for span in rendered.spans)
+            assert not any(span.style == "$error" for span in rendered.spans)
+
+    _run(scenario())
+
+
+def test_stage_row_colours_an_unserviced_stage_but_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged
+    rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
+    fleet = [data.FleetRepo("o/a", rd, lanes={})]  # no lane deployed → unserviced
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            rendered = cast(Content, stage_row.render())
+            text = str(rendered)
+            # Colour-stripped channel: the ⚠ marker on the untriaged column.
+            assert "untriaged:1" in text
+            assert "⚠" in text
+            assert any(span.style == "$error" for span in rendered.spans)
+
+    _run(scenario())
+
+
+def test_issue_list_marks_needs_human_labelled_issues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready", "needs-human")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)):
+            await app.workers.wait_for_complete()
+            issue_list = app.query_one(IssueList)
+            label = issue_list.query_one(Label)
+            rendered = cast(Content, label.render())
+            text = str(rendered)
+            assert "#7" in text
+            assert "needs-human" in text
+            assert any(span.style == "$warning" for span in rendered.spans)
 
     _run(scenario())

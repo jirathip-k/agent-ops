@@ -209,6 +209,18 @@ class DistillConfig(BaseModel):
     )
 
 
+class TuiConfig(BaseModel):
+    """The pipeline TUI's own settings (issue #248).
+
+    `theme` is a bare string here, validated against `textual.theme
+    .BUILTIN_THEMES` by the TUI itself (`agent_ops.tui.run_tui`) rather than
+    here — importing `textual` from this module would pull it into every
+    command's import path, not just `agent tui`.
+    """
+
+    theme: str = "catppuccin-macchiato"
+
+
 class ScoutConfig(BaseModel):
     """What this repo wants mined, on top of scout's standard signal list.
 
@@ -251,6 +263,7 @@ class ProjectConfig(BaseModel):
     loop: LoopConfig = Field(default_factory=LoopConfig)
     skills: list[str] = Field(default_factory=list)
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
+    tui: TuiConfig = Field(default_factory=TuiConfig)
 
     def effective_runtime(self, role_name: str, runtime_override: str | None = None) -> str:
         """The runtime a role will actually run on: CLI override, role, then base."""
