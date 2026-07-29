@@ -40,6 +40,14 @@ class Commands(BaseModel):
     test: str | None = None
     lint: str | None = None
     typecheck: str | None = None
+    # Executable names the gate commands above need on PATH. The platform only
+    # *resolves* these (`command -v`) once `setup` has run — it never installs
+    # them and knows nothing about the ecosystems they come from, so the list
+    # has to name everything the gates touch, not just what the package manager
+    # would fetch (issue #246). Empty means unchecked, which is the old
+    # behaviour: a missing binary then surfaces as a gate failure a full
+    # plan+implement cycle later, looking like bad code.
+    requires: list[str] = Field(default_factory=list)
 
 
 class LoopConfig(BaseModel):

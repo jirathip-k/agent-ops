@@ -8,6 +8,16 @@ commands:
   test: null        # e.g. "uv run pytest -q" | "npm test" | "swift test"
   lint: null        # e.g. "uv run ruff check ." | "npx eslint ."
   typecheck: null   # e.g. "uv run pyright" | "npx tsc --noEmit"
+  # Executable names the gate commands above need on PATH. A run resolves each
+  # one in the worktree after `setup` and aborts before doing any work if one
+  # is missing, so the gap reads as an environment gap instead of failing a
+  # gate an hour later. agent-ops only checks — installing stays `setup`'s job.
+  #
+  # List everything the gates need, NOT just what the package manager installs:
+  # mirror every CI step that provisions a binary outside `setup` (hugo, protoc,
+  # terraform, swiftlint, pandoc, imagemagick, a database binary). Left empty,
+  # nothing is checked.
+  requires: []      # e.g. [node, npm, hugo]
 
 # runtime:
 #   name: claude_code
