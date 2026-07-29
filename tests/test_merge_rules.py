@@ -16,9 +16,11 @@ from agent_ops.utils import CommandError
 from agent_ops.workflows import merge as merge_module
 from agent_ops.workflows.merge import (
     _is_test_file,
+    batch_candidates,
     closable_issue_refs,
     evaluate_merge,
     run_merge,
+    run_merge_batch,
     run_merge_check,
 )
 
@@ -683,3 +685,284 @@ def test_violations_checked_before_run_state_is_consulted(
     assert ok is False
     assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
     assert any("labels" in c[-1] for c in calls if c[:3] == ["gh", "pr", "view"])
+
+
+# ---------- run_merge_batch: update -> wait -> merge, no GitHub merge queue (issue #272) ----------
+
+
+class _StatusFeed:
+    """Successive `mergeStateStatus` values `gh pr view --json mergeStateStatus`
+    returns for one PR across a poll loop — simulates a branch catching up
+    from BEHIND to CLEAN after `gh pr update-branch`. Exhausting the list
+    repeats the last value, the same shape a real poll settles into once the
+    branch stops moving."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        self._statuses = statuses
+        self._i = 0
+
+    def next(self) -> str:
+        value = self._statuses[min(self._i, len(self._statuses) - 1)]
+        self._i += 1
+        return value
+
+
+def _batch_pr(number: int, *, status: str = "CLEAN", labels: list[str] | None = None) -> dict:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}], labels=labels)
+    pr["state"] = "OPEN"
+    pr["title"] = f"change {number}"
+    pr["headRefName"] = f"fix/issue-{number}"
+    pr["mergeStateStatus"] = status
+    return pr
+
+
+def _stub_batch_gh(
+    monkeypatch: pytest.MonkeyPatch,
+    prs: dict[int, dict[str, Any]],
+    *,
+    poll_feeds: dict[int, _StatusFeed] | None = None,
+    required_checks: dict[int, list[dict[str, Any]]] | None = None,
+) -> list[list[str]]:
+    """Fake every `gh`/`git` call `run_merge_batch`'s pipeline makes.
+
+    `prs`: pr_number -> the dict `_fetch_pr` returns (its `mergeStateStatus`
+    is the state BEFORE any update-branch call). `poll_feeds`: pr_number ->
+    a `_StatusFeed` of `mergeStateStatus` values the post-update poll
+    (`gh pr view --json mergeStateStatus`) returns, one per call.
+    `required_checks`: pr_number -> the rows `gh pr checks --required --json`
+    returns (default: none configured, i.e. an instant "none"/clean verdict).
+    No in-flight runs by default (`discover_runs` -> `([], True)`), and never
+    a call this stub doesn't recognize — an unexpected command fails the test
+    loudly instead of silently doing the wrong thing.
+    """
+    calls: list[list[str]] = []
+    poll_feeds = poll_feeds or {}
+    required_checks = required_checks or {}
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "view"] and cmd[-1] == "mergeStateStatus":
+            n = int(cmd[3])
+            status = poll_feeds[n].next() if n in poll_feeds else prs[n]["mergeStateStatus"]
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"mergeStateStatus": status}), stderr=""
+            )
+        if cmd[:3] == ["gh", "pr", "view"]:
+            n = int(cmd[3])
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(prs[n]), stderr="")
+        if cmd[:3] == ["gh", "pr", "update-branch"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["gh", "pr", "checks"] and "--required" in cmd:
+            n = int(cmd[3])
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps(required_checks.get(n, [])), stderr=""
+            )
+        if cmd[:3] == ["gh", "pr", "checks"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(merge_module, "run", fake_run)
+    monkeypatch.setattr(merge_module, "load_project_config", lambda root: _config())
+    monkeypatch.setattr(merge_module, "discover_runs", lambda root, log: ([], True))
+    return calls
+
+
+def test_batch_three_prs_behind_then_clean_merges_sequentially(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prs = {n: _batch_pr(n, status="BEHIND") for n in (1, 2, 3)}
+    poll_feeds = {n: _StatusFeed(["CLEAN"]) for n in (1, 2, 3)}
+    calls = _stub_batch_gh(monkeypatch, prs, poll_feeds=poll_feeds)
+    monkeypatch.setattr(merge_module.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is True
+    merge_calls = [c for c in calls if c[:3] == ["gh", "pr", "merge"]]
+    assert [c[3] for c in merge_calls] == ["1", "2", "3"]
+    update_calls = [c for c in calls if c[:3] == ["gh", "pr", "update-branch"]]
+    assert [c[3] for c in update_calls] == ["1", "2", "3"]
+    # Sequential, never interleaved: PR #2's update-branch must not be issued
+    # before PR #1's own merge has already happened.
+    assert calls.index(["gh", "pr", "update-branch", "2"]) > calls.index(
+        ["gh", "pr", "merge", "1", "--squash"]
+    )
+    assert calls.index(["gh", "pr", "update-branch", "3"]) > calls.index(
+        ["gh", "pr", "merge", "2", "--squash"]
+    )
+    assert any("batch complete: merged 3" in line for line in lines)
+
+
+def test_batch_stops_before_pr1_when_run_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #265 in-flight-runs guard is inherited through the unmodified
+    `run_merge` call, not reimplemented — it must refuse before PR #1 merges,
+    exactly as a lone `agent merge 1` would."""
+    prs = {n: _batch_pr(n) for n in (1, 2, 3)}
+    calls = _stub_batch_gh(monkeypatch, prs)
+    monkeypatch.setattr(
+        merge_module, "discover_runs", lambda root, log: ([Run(217, "running", "pid 1")], True)
+    )
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert any("217" in line for line in lines)
+    assert any("not attempted" in line and "#2" in line and "#3" in line for line in lines)
+
+
+def test_batch_stops_on_dirty_pr_without_force_push_or_conflict_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prs = {
+        1: _batch_pr(1, status="CLEAN"),
+        2: _batch_pr(2, status="DIRTY"),
+        3: _batch_pr(3, status="CLEAN"),
+    }
+    calls = _stub_batch_gh(monkeypatch, prs)
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    assert any(c[:3] == ["gh", "pr", "merge"] and c[3] == "1" for c in calls)
+    assert not any(c[:3] == ["gh", "pr", "merge"] and c[3] in ("2", "3") for c in calls)
+    # DIRTY refuses immediately: no update-branch call, and never anything
+    # that could resolve a conflict or rewrite history under it.
+    assert not any(c[:3] == ["gh", "pr", "update-branch"] for c in calls)
+    assert not any("--force" in c or "-f" in c for c in calls)
+    assert not any(c[0] == "git" and c[1] != "push" for c in calls)
+    assert any("DIRTY" in line for line in lines)
+    assert any("not attempted" in line and "#3" in line for line in lines)
+
+
+def test_batch_stops_when_required_checks_fail_after_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prs = {
+        1: _batch_pr(1, status="CLEAN"),
+        2: _batch_pr(2, status="BEHIND"),
+        3: _batch_pr(3, status="CLEAN"),
+    }
+    poll_feeds = {2: _StatusFeed(["CLEAN"])}
+    required_checks = {2: [{"name": "ci/test", "bucket": "fail", "link": "https://x"}]}
+    calls = _stub_batch_gh(monkeypatch, prs, poll_feeds=poll_feeds, required_checks=required_checks)
+    monkeypatch.setattr(merge_module.time, "sleep", lambda s: None)
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    assert any(c[:3] == ["gh", "pr", "merge"] and c[3] == "1" for c in calls)
+    assert not any(c[:3] == ["gh", "pr", "merge"] and c[3] in ("2", "3") for c in calls)
+    assert any("failing" in line.lower() for line in lines)
+    assert any("not attempted" in line and "#3" in line for line in lines)
+
+
+def test_wait_for_required_checks_times_out_without_hanging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checks stay pending forever: the wait must give up at `timeout_s`
+    rather than hang — proven here with a mocked clock, never a real sleep."""
+    _stub_batch_gh(
+        monkeypatch,
+        {1: _batch_pr(1)},
+        required_checks={1: [{"name": "ci/test", "bucket": "pending", "link": "https://x"}]},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(merge_module.time, "sleep", lambda s: sleeps.append(s))
+    clock = iter([0.0, 0.0, 5.0, 12.0])
+    monkeypatch.setattr(merge_module.time, "monotonic", lambda: next(clock, 12.0))
+
+    verdict = merge_module._wait_for_required_checks(
+        tmp_path, 1, timeout_s=10.0, interval_s=5.0, log=lambda _msg: None
+    )
+
+    assert verdict == "timeout"
+    assert len(sleeps) >= 1
+
+
+def test_batch_stops_on_blocked_label_via_run_merges_unchanged_violations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `evaluate_merge` violation (blocked label) on PR #2 stops the batch
+    through `run_merge`'s own existing violation check — nothing new here."""
+    prs = {
+        1: _batch_pr(1),
+        2: _batch_pr(2, labels=["human-merge-only"]),
+        3: _batch_pr(3),
+    }
+    calls = _stub_batch_gh(monkeypatch, prs)
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    assert any(c[:3] == ["gh", "pr", "merge"] and c[3] == "1" for c in calls)
+    assert not any(c[:3] == ["gh", "pr", "merge"] and c[3] in ("2", "3") for c in calls)
+    assert any("blocked label" in line for line in lines)
+    assert any("not attempted" in line and "#3" in line for line in lines)
+
+
+def test_batch_candidates_excludes_dirty_and_blocked_label_prs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--all-clean` filters the candidate set up front rather than including
+    every open PR and letting the batch stop partway through it."""
+    prs = {
+        1: _batch_pr(1),
+        2: _batch_pr(2, status="DIRTY"),
+        3: _batch_pr(3, labels=["human-merge-only"]),
+        4: _batch_pr(4),
+    }
+    monkeypatch.setattr(merge_module, "load_project_config", lambda root: _config())
+    monkeypatch.setattr(github_module, "open_pr_numbers", lambda base, cwd: [1, 2, 3, 4])
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "view"]:
+            n = int(cmd[3])
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(prs[n]), stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(merge_module, "run", fake_run)
+
+    candidates = batch_candidates(tmp_path, log=lambda _msg: None)
+
+    assert candidates == [1, 4]
+
+
+def test_batch_exception_mid_batch_leaves_earlier_merge_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exception raised while processing PR #2 must not roll back or hide
+    the `gh pr merge` call PR #1 already made — there is no rollback
+    mechanism, and this proves none was accidentally added."""
+    prs = {1: _batch_pr(1), 2: _batch_pr(2), 3: _batch_pr(3)}
+    calls = _stub_batch_gh(monkeypatch, prs)
+
+    real_fetch = merge_module._fetch_pr
+
+    def boom_on_pr2(project_root: Path, pr_number: int) -> dict[str, Any]:
+        if pr_number == 2:
+            raise CommandError("gh: rate limited")
+        return real_fetch(project_root, pr_number)
+
+    monkeypatch.setattr(merge_module, "_fetch_pr", boom_on_pr2)
+
+    with pytest.raises(CommandError):
+        run_merge_batch(tmp_path, [1, 2, 3], log=lambda _msg: None)
+
+    assert any(c[:3] == ["gh", "pr", "merge"] and c[3] == "1" for c in calls)
+    assert not any(c[:3] == ["gh", "pr", "merge"] and c[3] in ("2", "3") for c in calls)
