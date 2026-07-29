@@ -334,6 +334,17 @@ class CommandSink:
             self.failure_reason = f"invalid command: {exc}"
             return False
         argv = [text if part == "{text}" else part for part in parts]
+        if not argv:
+            # A whitespace-only (or empty) template `shlex.split`s to `[]`
+            # without raising `ValueError` — the `except` above never fires
+            # for it. An empty `argv` is just as unparseable as one `shlex`
+            # rejects outright: `utils.run([], check=False)` calls
+            # `subprocess.run([])`, which raises `IndexError` before
+            # `utils.run`'s own `except (TimeoutExpired, OSError)` handlers
+            # get a chance, breaking `send()`'s "never raise" contract. Treat
+            # it the same as the `ValueError` case instead of reaching `run`.
+            self.failure_reason = "empty command"
+            return False
         proc = run(argv, check=False)
         if proc.returncode == 0:
             self.failure_reason = None

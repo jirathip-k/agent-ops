@@ -451,6 +451,29 @@ def test_command_sink_returns_false_rather_than_raise_on_an_unparseable_template
     assert "invalid command" in sink.failure_reason
 
 
+def test_command_sink_returns_false_rather_than_raise_on_a_whitespace_only_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only template `shlex.split`s to `[]` without raising
+    `ValueError`, so the `except` above never fires for it. Left unguarded,
+    `argv` ends up `[]` and `utils.run([], check=False)` calls
+    `subprocess.run([])`, which raises `IndexError` before `utils.run`'s own
+    `except (TimeoutExpired, OSError)` handlers can catch it — breaking
+    `send()`'s "never raise" contract just as surely as an unparseable
+    template would. `CommandSink.send` must treat an empty parsed command the
+    same way: report a reason and return `False` without ever calling `run()`."""
+
+    def boom(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("must not shell out for a template that parses to an empty argv")
+
+    monkeypatch.setattr(sinks, "run", boom)
+
+    sink = sinks.CommandSink("   ")
+    assert sink.send("hi") is False
+    assert sink.failure_reason is not None
+    assert "empty" in sink.failure_reason.lower()
+
+
 def test_command_sink_failure_reason_is_stderr_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
