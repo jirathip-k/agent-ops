@@ -1380,7 +1380,8 @@ def _report_toolchain(config: ProjectConfig, root: Path) -> None:
         if any(getattr(config.commands, gate, None) for gate in config.loop.gates):
             typer.echo(
                 "! commands.requires is empty — nothing checks that `setup` provisions what "
-                "the gates need; a missing binary will surface as a gate failure mid-run"
+                "the gates need; a missing binary will abort the run mid-attempt instead of "
+                "being caught before planning even starts"
             )
         return
     try:

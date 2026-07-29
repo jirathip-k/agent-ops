@@ -50,6 +50,7 @@ def test_loop_retries_until_gates_pass(tmp_path: Path) -> None:
 
     assert outcome.ok
     assert outcome.attempts == 3
+    assert outcome.missing_gate is None
     # retry prompts carry the original task plus the gate failure report
     assert "fix the bug" in runtime.prompts[1]
     assert "Verification failures" in runtime.prompts[1]
@@ -65,6 +66,50 @@ def test_loop_gives_up_after_max_attempts(tmp_path: Path) -> None:
     assert not outcome.ok
     assert outcome.attempts == 2
     assert outcome.gate_failures and outcome.gate_failures[0].name == "test"
+    assert outcome.missing_gate is None
+
+
+def test_loop_aborts_on_missing_binary_without_consuming_more_attempts(tmp_path: Path) -> None:
+    """A gate whose binary isn't on PATH is an environment gap, not a code failure —
+    it must not be retried against the attempt budget (issue #287)."""
+    runtime = FakeRuntime(tmp_path, fail_gate_times=0)
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "definitely-not-a-real-binary-287"},
+            "loop": {"max_attempts": 3, "gates": ["test"]},
+        }
+    )
+    request = RunRequest(prompt="fix the bug", cwd=tmp_path)
+
+    outcome = run_task_loop(runtime, request, config, tmp_path)
+
+    assert outcome.ok is False
+    assert outcome.attempts == 1
+    assert outcome.missing_gate is not None
+    assert outcome.missing_gate.name == "test"
+    assert outcome.missing_gate.missing_binary == "definitely-not-a-real-binary-287"
+    assert len(runtime.prompts) == 1  # the runtime ran exactly once, no retry
+
+
+def test_loop_still_retries_normally_on_a_timeout_gate(tmp_path: Path) -> None:
+    """A gate that times out keeps meaning "failure" — it must not be confused with
+    `GateStatus.MISSING` and must still retry through the ordinary attempt budget."""
+    runtime = FakeRuntime(tmp_path, fail_gate_times=99)
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "sleep 5"},
+            "loop": {"max_attempts": 2, "gates": ["test"], "gate_timeout_seconds": 0.1},
+        }
+    )
+    request = RunRequest(prompt="fix the bug", cwd=tmp_path)
+
+    outcome = run_task_loop(runtime, request, config, tmp_path)
+
+    assert outcome.ok is False
+    assert outcome.attempts == 2
+    assert outcome.missing_gate is None
+    assert outcome.gate_failures and outcome.gate_failures[0].name == "test"
+    assert len(runtime.prompts) == 2  # both attempts really ran
 
 
 def test_failing_gates_never_swap_the_model(tmp_path: Path) -> None:

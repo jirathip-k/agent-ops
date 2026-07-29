@@ -1,19 +1,66 @@
 from __future__ import annotations
 
+import re
 import shlex
+import subprocess
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from agent_ops.config import PROJECT_CONFIG_REL, ProjectConfig
-from agent_ops.utils import run, tail
+from agent_ops.utils import SPAWN_FAILURE_RETURNCODE, run, tail
+
+# What a shell says when it couldn't exec the name it was given — dash/sh's
+# "sh: 1: <name>: not found" and bash's "<name>: command not found" (with or
+# without a leading "bash: line N: "). Anchored on this phrasing, not just the
+# returncode, so a script that deliberately `exit 127`s with no such text
+# still reads as a real failure rather than an environment gap.
+_NOT_FOUND_RE = re.compile(r"([^\s:]+):\s*(?:command\s+)?not found")
+
+
+class GateStatus(StrEnum):
+    """What happened when a gate's command was run."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    MISSING = "missing"  # the shell couldn't exec the gate's command at all
 
 
 @dataclass(frozen=True)
 class GateResult:
     name: str
     command: str
-    ok: bool
+    status: GateStatus
     output: str
+    missing_binary: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True only when the gate actually ran and passed.
+
+        Kept so call sites written before `status` existed (`if not g.ok`,
+        `g.ok` in an f-string) need no change — `MISSING` is exactly as much
+        "not ok" as `FAILED` is, it just isn't retryable the same way.
+        """
+        return self.status is GateStatus.PASSED
+
+
+def _classify(proc: subprocess.CompletedProcess[str]) -> tuple[GateStatus, str | None]:
+    """Turn a gate's completed process into a `(status, missing_binary)` pair.
+
+    `SPAWN_FAILURE_RETURNCODE` (127) is shell convention for "couldn't exec
+    this", but a script can also `exit 127` on purpose with nothing on stderr
+    about it — that must stay `FAILED`, not be mistaken for the environment
+    gap this exists to catch. `TIMEOUT_RETURNCODE` (124) and every other
+    non-zero code fall straight through to `FAILED`.
+    """
+    if proc.returncode == 0:
+        return GateStatus.PASSED, None
+    if proc.returncode == SPAWN_FAILURE_RETURNCODE:
+        match = _NOT_FOUND_RE.search(proc.stderr)
+        if match:
+            return GateStatus.MISSING, match.group(1)
+    return GateStatus.FAILED, None
 
 
 def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
@@ -27,6 +74,11 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
     that overruns `loop.gate_timeout_seconds` is reported as a failed gate
     rather than raised: a wedged test is a gate failure like any other, and the
     retry prompt should say so instead of the run dying with a traceback.
+
+    A gate whose binary is not on PATH (`sh -c '<gate>'` exiting 127 with "not
+    found" on stderr) is classified `GateStatus.MISSING` rather than `FAILED`
+    — see `_classify`. This never raises and never skips later gates, same as
+    an ordinary failure; only the caller's retry decision differs (`loop.py`).
     """
     results: list[GateResult] = []
     for name in config.loop.gates:
@@ -40,7 +92,8 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
             timeout=config.loop.gate_timeout_seconds,
         )
         output = tail(proc.stdout + "\n" + proc.stderr)
-        results.append(GateResult(name, command, proc.returncode == 0, output))
+        status, missing_binary = _classify(proc)
+        results.append(GateResult(name, command, status, output, missing_binary))
     return results
 
 
@@ -64,6 +117,24 @@ def missing_requirements(config: ProjectConfig, cwd: Path) -> list[str]:
         if proc.returncode != 0:
             missing.append(name)
     return missing
+
+
+def _fix_it_note(config: ProjectConfig, project_root: Path) -> str:
+    """The closing line both toolchain-gap messages end on: what to fix and where.
+
+    Shared between `format_missing_requirements` (preflight, before anything
+    ran) and `format_missing_gate` (mid-run, one gate that never ran) because
+    they are the same advice pointed at two different moments — duplicating
+    the wording would let the two drift the next time either one is edited.
+    """
+    setup = config.commands.setup
+    return (
+        f"`commands.requires` in {project_root / PROJECT_CONFIG_REL} declares what the gates "
+        "need on PATH; `commands.setup` "
+        + (f"(`{setup}`) is what has to provide it" if setup else "is unset and must provide it")
+        + " — mirror whatever this repo's CI does to install these outside its package "
+        "manager, then re-dispatch."
+    )
 
 
 def format_missing_requirements(
@@ -93,14 +164,32 @@ def format_missing_requirements(
     if gates_configured:
         lines.append("the gate commands that will need them:")
         lines.extend(f"  {name}: {command}" for name, command in gates_configured)
-    setup = config.commands.setup
-    lines.append(
-        f"`commands.requires` in {project_root / PROJECT_CONFIG_REL} declares what the gates "
-        "need on PATH; `commands.setup` "
-        + (f"(`{setup}`) is what has to provide it" if setup else "is unset and must provide it")
-        + " — mirror whatever this repo's CI does to install these outside its package "
-        "manager, then re-dispatch."
-    )
+    lines.append(_fix_it_note(config, project_root))
+    return "\n".join(lines)
+
+
+def format_missing_gate(config: ProjectConfig, result: GateResult, project_root: Path) -> str:
+    """The escalation text for a gate that never ran because its binary is missing.
+
+    Unlike `format_missing_requirements` (a preflight check before anything
+    ran), this fires mid-run: `result.status` is `GateStatus.MISSING`, so the
+    gate's own command hit `sh: ...: not found` after setup, planning, and at
+    least one implementer attempt already happened. Says so plainly, names
+    the one gate and its command (the specific connection
+    `format_missing_requirements` cannot make — see there), and closes on the
+    same `commands.setup` / `commands.requires` fix, so a run that got this
+    far still doesn't read as "the implementer's code failed" (issue #287,
+    the retryable counterpart to #246).
+    """
+    binary = result.missing_binary or f"(binary name not extracted; stderr tail: {result.output!r})"
+    lines = [
+        f"gate `{result.name}` did not run — `{binary}` is not on PATH: `{result.command}`",
+        "",
+        "this is an environment gap, not a code failure: the gate never produced a real "
+        "verdict, so it should not count against the implementer's attempt budget.",
+        "",
+        _fix_it_note(config, project_root),
+    ]
     return "\n".join(lines)
 
 
