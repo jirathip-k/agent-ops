@@ -12,7 +12,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,12 @@ class Run:
     issue: int
     state: str  # running | halted | stopped | done
     detail: str
+    # `claude`/`codex` pids found running in this issue's worktree that no
+    # live run (this poll's `live_runs`) accounts for — see
+    # `find_stray_processes`. Empty in the overwhelming common case; never
+    # populated by `classify` itself (see `discover_runs`), so a caller
+    # comparing a `Run` it built by hand still gets the same default.
+    orphan_pids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -344,6 +350,126 @@ def _ps_output(log: Callable[[str], None]) -> str:
         log(f"warning: `ps` failed ({proc.stderr.strip() or 'no output'}); liveness unknown")
         return ""
     return proc.stdout
+
+
+# Binary names of every runtime adapter's CLI (`ClaudeCodeRuntime`,
+# `CodexRuntime`) that `_run_streaming`-shaped code spawns as its own
+# process-group leader. Orphan detection only cares about these two — nothing
+# else `agent-ops` spawns is left ownerless the way issue #279 describes.
+_RUNTIME_BINARIES = ("claude", "codex")
+
+
+def _runtime_pids(ps_output: str) -> list[int]:
+    """pid for every live `claude`/`codex` process, from a `_ps_output` scan.
+
+    Mirrors `live_runs`'s line-parsing shape (same `pid=,etime=,args=` columns,
+    first token of `args` as the program name) but filters on the runtime
+    binary names instead of on `agent`/`agent.exe` — this is looking for the
+    CLI a runtime adapter spawned, not the `agent-ops` process that spawned it.
+    """
+    pids: list[int] = []
+    for line in ps_output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid_s, _etime, args = parts
+        if not pid_s.isdigit():
+            continue
+        tokens = args.split()
+        if not tokens:
+            continue
+        if Path(tokens[0]).name in _RUNTIME_BINARIES:
+            pids.append(int(pid_s))
+    return pids
+
+
+def _process_cwd(pid: int) -> Path | None:
+    """`pid`'s current working directory, or None when it can't be determined.
+
+    Shells out to `lsof -a -p <pid> -d cwd -Fn`, whose output ends with an
+    `n<path>` line for a live pid with a resolvable cwd fd. Degrades to None
+    on anything else — missing `lsof`, the pid having already exited, a
+    permission error, output that doesn't parse — never raises: this is a
+    best-effort probe, and `find_stray_processes` treats None as "unknown",
+    not as "no orphan here".
+    """
+    proc = run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], check=False, timeout=10.0)
+    if proc.returncode != 0:
+        return None
+    path: Path | None = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            path = Path(line[1:])
+    return path
+
+
+def find_stray_processes(
+    project_root: Path,
+    live: dict[int, tuple[int, str, str]],
+    worktree_by_issue: dict[int, Path],
+    log: Callable[[str], None] = lambda _: None,
+) -> dict[str, Any]:
+    """`claude`/`codex` processes this poll's `live` runs don't account for.
+
+    A runtime adapter's child is started as its own process-group leader
+    (`start_new_session=True`) precisely so a timed-out or crashed run can
+    signal the whole group on the way out (`terminate_and_reap`). That covers
+    every exit `_run_streaming` itself takes; it cannot cover the process
+    dying by external `SIGKILL`, which leaves the child (and anything it
+    spawned) running with no Python code left to reap it. This is the
+    detection half of that gap (issue #279): it can only make an orphan
+    *visible*, never prevent one.
+
+    Returns a dict with three keys:
+    - `"by_issue"`: `{issue: (pid, ...)}` — a stray process whose cwd is
+      inside a worktree `worktree_by_issue` maps to an issue *not* in `live`.
+      An issue that *is* in `live` is skipped: that process is the run's own
+      child, not an orphan.
+    - `"unmapped"`: `((pid, path), ...)` — a stray process whose cwd resolved
+      to somewhere inside `project_root`, but not inside any known issue
+      worktree. Likely a worktree that was deregistered or deleted out from
+      under a still-running process; reported with its raw path since there
+      is no issue to key it on.
+    - `"unknown"`: `(pid, ...)` — a stray process whose cwd could not be
+      resolved at all. Never dropped: a cwd probe failing is not evidence the
+      process isn't an orphan, only that this check can't tell either way.
+    """
+    root = project_root.resolve()
+    resolved_worktrees = {issue: path.resolve() for issue, path in worktree_by_issue.items()}
+
+    by_issue: dict[int, list[int]] = {}
+    unmapped: list[tuple[int, Path]] = []
+    unknown: list[int] = []
+
+    for pid in _runtime_pids(_ps_output(log)):
+        cwd = _process_cwd(pid)
+        if cwd is None:
+            unknown.append(pid)
+            continue
+        cwd = cwd.resolve()
+
+        matched_issue = next(
+            (
+                issue
+                for issue, wt_path in resolved_worktrees.items()
+                if cwd == wt_path or wt_path in cwd.parents
+            ),
+            None,
+        )
+        if matched_issue is not None:
+            if matched_issue in live:
+                continue  # the run's own child, not an orphan
+            by_issue.setdefault(matched_issue, []).append(pid)
+            continue
+
+        if cwd != root and root in cwd.parents:
+            unmapped.append((pid, cwd))
+
+    return {
+        "by_issue": {issue: tuple(pids) for issue, pids in by_issue.items()},
+        "unmapped": tuple(unmapped),
+        "unknown": tuple(unknown),
+    }
 
 
 def _outcome_detail(outcome: Outcome) -> str:
@@ -742,6 +868,7 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
         return [], trustworthy
 
     live = live_runs(_ps_output(log), project_root)
+    stray = find_stray_processes(project_root, live, worktree_by_issue, log)
 
     try:
         prs = github.open_prs(project_root)
@@ -795,6 +922,14 @@ def discover_runs(project_root: Path, log: Callable[[str], None] = print) -> tup
             has_spawn_record=issue in spawn_record_issues,
         )
         if found is not None:
+            # Layered onto `classify`'s result rather than threaded through it
+            # as another parameter: `classify` is the state-precedence table
+            # (running/halted/stopped/done), and an orphan pid changes none of
+            # that — a `stopped` row with a leaked process is still `stopped`,
+            # just with something extra worth a human's attention.
+            orphan_pids = stray["by_issue"].get(issue)
+            if orphan_pids:
+                found = replace(found, orphan_pids=orphan_pids)
             runs.append(found)
     runs.sort(key=lambda r: r.issue, reverse=True)
     return runs, trustworthy
@@ -813,6 +948,11 @@ def report_runs(
         return
     for r in runs:
         log(f"#{r.issue}  {r.state:<8}  {r.detail}")
+        for pid in r.orphan_pids:
+            log(
+                f"!     stray agent pid {pid} still running in this worktree — "
+                "not tracked by any live run"
+            )
 
 
 def _dedup_warnings(log: Callable[[str], None]) -> Callable[[str], None]:
