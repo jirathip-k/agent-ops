@@ -155,31 +155,39 @@ def _stub(
     )
 
 
-def _lane(runner: str | None = None, cron: str | None = None) -> LaneInfo:
-    return LaneInfo(runner=runner, cron=cron)
+def _lane(
+    runner: str | None = None, cron: str | None = None, caller_file: str = "x.yml"
+) -> LaneInfo:
+    return LaneInfo(runner=runner, cron=cron, caller_file=caller_file)
 
 
 def test_detect_lanes_cross_repo_uses_no_runner() -> None:
-    assert detect_lanes({"triage.yml": _stub("triage")}) == {"triage": _lane()}
+    assert detect_lanes({"triage.yml": _stub("triage")}) == {
+        "triage": _lane(caller_file="triage.yml")
+    }
 
 
 def test_detect_lanes_runner_passed() -> None:
     stub = _stub("triage", runner="blacksmith-2vcpu-ubuntu-2404")
     assert detect_lanes({"triage.yml": stub}) == {
-        "triage": _lane(runner="blacksmith-2vcpu-ubuntu-2404")
+        "triage": _lane(runner="blacksmith-2vcpu-ubuntu-2404", caller_file="triage.yml")
     }
 
 
 def test_detect_lanes_cron_and_runner() -> None:
     stub = _stub("triage", runner="blacksmith-2vcpu-ubuntu-2404", cron="17 * * * *")
     assert detect_lanes({"triage.yml": stub}) == {
-        "triage": _lane(runner="blacksmith-2vcpu-ubuntu-2404", cron="17 * * * *")
+        "triage": _lane(
+            runner="blacksmith-2vcpu-ubuntu-2404", cron="17 * * * *", caller_file="triage.yml"
+        )
     }
 
 
 def test_detect_lanes_dispatch_only_stub_has_no_cron() -> None:
     # _stub emits on: workflow_dispatch: when no cron is given.
-    assert detect_lanes({"spec.yml": _stub("spec")}) == {"spec": _lane(cron=None)}
+    assert detect_lanes({"spec.yml": _stub("spec")}) == {
+        "spec": _lane(cron=None, caller_file="spec.yml")
+    }
 
 
 def test_detect_lanes_cron_applies_only_to_lanes_in_that_file() -> None:
@@ -188,23 +196,28 @@ def test_detect_lanes_cron_applies_only_to_lanes_in_that_file() -> None:
         "spec.yml": _stub("spec"),
     }
     assert detect_lanes(workflows) == {
-        "triage": _lane(cron="0 * * * *"),
-        "spec": _lane(cron=None),
+        "triage": _lane(cron="0 * * * *", caller_file="triage.yml"),
+        "spec": _lane(cron=None, caller_file="spec.yml"),
     }
 
 
 def test_detect_lanes_any_owner() -> None:
-    assert detect_lanes({"groom.yml": _stub("groom", owner="someone-else")}) == {"groom": _lane()}
+    assert detect_lanes({"groom.yml": _stub("groom", owner="someone-else")}) == {
+        "groom": _lane(caller_file="groom.yml")
+    }
 
 
 def test_detect_lanes_local_uses() -> None:
     content = "jobs:\n  triage:\n    uses: ./.github/workflows/triage-pipeline.yml\n"
-    assert detect_lanes({"self.yml": content}) == {"triage": _lane()}
+    assert detect_lanes({"self.yml": content}) == {"triage": _lane(caller_file="self.yml")}
 
 
 def test_detect_lanes_filename_does_not_matter() -> None:
-    # Detection is content-based: a renamed stub still counts.
-    assert detect_lanes({"nightly-cleanup.yml": _stub("groom")}) == {"groom": _lane()}
+    # Detection is content-based: a renamed stub still counts, and the caller
+    # file name it reports is that same renamed stub, not a guessed default.
+    assert detect_lanes({"nightly-cleanup.yml": _stub("groom")}) == {
+        "groom": _lane(caller_file="nightly-cleanup.yml")
+    }
 
 
 def test_detect_lanes_multiple_lanes_one_file_share_the_cron() -> None:
@@ -224,8 +237,12 @@ def test_detect_lanes_multiple_lanes_one_file_share_the_cron() -> None:
         "      runner: blacksmith-4vcpu-ubuntu-2404\n"
     )
     assert detect_lanes({"agents.yml": content}) == {
-        "triage": _lane(runner="blacksmith-2vcpu-ubuntu-2404", cron="0 6 * * *"),
-        "groom": _lane(runner="blacksmith-4vcpu-ubuntu-2404", cron="0 6 * * *"),
+        "triage": _lane(
+            runner="blacksmith-2vcpu-ubuntu-2404", cron="0 6 * * *", caller_file="agents.yml"
+        ),
+        "groom": _lane(
+            runner="blacksmith-4vcpu-ubuntu-2404", cron="0 6 * * *", caller_file="agents.yml"
+        ),
     }
 
 
@@ -236,20 +253,22 @@ def test_detect_lanes_spec_plan_and_promote() -> None:
         "promote.yml": _stub("promote", runner="blacksmith-4vcpu-ubuntu-2404"),
     }
     assert detect_lanes(workflows) == {
-        "spec": _lane(),
-        "plan": _lane(),
-        "promote": _lane(runner="blacksmith-4vcpu-ubuntu-2404"),
+        "spec": _lane(caller_file="spec.yaml"),
+        "plan": _lane(caller_file="plan.yml"),
+        "promote": _lane(runner="blacksmith-4vcpu-ubuntu-2404", caller_file="promote.yml"),
     }
 
 
 def test_detect_lanes_scout_stub_cron_no_runner() -> None:
     stub = _stub("scout", cron="0 18 * * *")
-    assert detect_lanes({"scout.yml": stub}) == {"scout": _lane(cron="0 18 * * *")}
+    assert detect_lanes({"scout.yml": stub}) == {
+        "scout": _lane(cron="0 18 * * *", caller_file="scout.yml")
+    }
 
 
 def test_detect_lanes_yaml_extension_in_uses() -> None:
     content = "jobs:\n  t:\n    uses: o/agent-ops/.github/workflows/triage-pipeline.yaml@main\n"
-    assert detect_lanes({"t.yml": content}) == {"triage": _lane()}
+    assert detect_lanes({"t.yml": content}) == {"triage": _lane(caller_file="t.yml")}
 
 
 def test_detect_lanes_ignores_unrelated_workflows() -> None:
@@ -269,7 +288,10 @@ def test_detect_lanes_unparseable_yaml_falls_back_to_line_scan() -> None:
         "  triage:\n"
         "    uses: jirathip-k/agent-ops/.github/workflows/triage-pipeline.yml@main\n"
     )
-    assert detect_lanes({"broken.yml": content}) == {"triage": _lane()}
+    # The fallback line scan still knows which file it read the `uses:` line
+    # from, even though it gave up on runner/cron — `caller_file` must not
+    # silently drop to some default in the branch that skips YAML parsing.
+    assert detect_lanes({"broken.yml": content}) == {"triage": _lane(caller_file="broken.yml")}
 
 
 def test_detect_lanes_empty() -> None:

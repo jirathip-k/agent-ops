@@ -9,6 +9,7 @@ pytest-asyncio-style plugin — the plan authorized exactly one new dependency
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -18,7 +19,8 @@ from textual.app import App, ComposeResult
 from textual.content import Content
 from textual.widgets import Label
 
-from agent_ops import github, registry, runs, status
+from agent_ops import github, registry, runs, status, surfaces
+from agent_ops.claims import CLAIM_LABEL
 from agent_ops.tui import app as tui_app
 from agent_ops.tui import data, sinks
 from agent_ops.tui.app import (
@@ -323,6 +325,451 @@ def test_dispatch_failure_is_reported_not_raised(
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert "no worktree there" in app.status_message
+
+    _run(scenario())
+
+
+# --- `t`: trigger the lane servicing the focused stage (#253) -----------------
+#
+# `StageRow`'s own `t` binding only fires while it has focus (mirroring how
+# its left/right bindings only move the stage cursor while focused) — so most
+# of these tests explicitly `.focus()` it first, the same way
+# `test_focused_pane_border_is_distinguishable_from_an_unfocused_sibling`
+# above drives focus with `pilot.press`.
+
+
+def _lane_fleet(
+    repo: str, issues: list[dict[str, Any]], **lanes: status.LaneInfo
+) -> data.FleetRepo:
+    return data.FleetRepo(repo, data.RepoData(repo, readable=True, issues=issues, prs=[]), lanes)
+
+
+class _ProcStub:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_trigger_key_is_a_noop_when_stage_row_is_not_focused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not shell out — the binding shouldn't even fire")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # ReposPane holds focus by default (on_mount) — not StageRow.
+            assert app.query_one(ReposPane).has_focus
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is None
+            assert "trigger" not in app.status_message.lower()
+
+    _run(scenario())
+
+
+def test_trigger_no_stage_selected_does_not_crash(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert "no stage selected" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_unserviced_stage_is_a_noop_with_explanation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged, no lane deployed
+    fleet = [data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), {})]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not shell out for an unserviced stage")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            assert stage_row.selected_stage is not None
+            assert stage_row.selected_stage.key == "untriaged"
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is None
+            assert "unserviced" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_empty_stage_is_a_noop_with_explanation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    fleet = [_lane_fleet("o/a", [], triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not shell out for an empty stage")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            assert stage_row.selected_stage is not None
+            assert stage_row.selected_stage.count == 0
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is None
+            assert "empty" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_run_stage_is_a_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(1, "2026-01-01T00:00:00Z", CLAIM_LABEL)]
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not shell out for the run (agent:claimed) stage")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            assert stage_row.selected_stage is not None
+            assert stage_row.selected_stage.key == CLAIM_LABEL
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is None
+
+    _run(scenario())
+
+
+def test_trigger_agent_ready_local_choice_runs_exactly_dispatch_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Path, check: bool, timeout: float) -> Any:
+        calls.append((cmd, cwd))
+        return _ProcStub()
+
+    monkeypatch.setattr(tui_app, "run_cmd", fake_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is not None
+            assert app._pending_trigger.phase == "destination"
+            await pilot.press("1")  # local
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        assert calls == [(data.dispatch_command(7), tmp_path)]
+
+    _run(scenario())
+
+
+def test_trigger_cloud_choice_reports_queued_with_run_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Path, check: bool, timeout: float) -> Any:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "run", "list"]:
+            rows = [
+                {
+                    "url": "https://github.com/o/a/actions/runs/123",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "event": "workflow_dispatch",
+                }
+            ]
+            return _ProcStub(stdout=json.dumps(rows))
+        return _ProcStub()
+
+    monkeypatch.setattr(tui_app, "run_cmd", fake_run)
+    monkeypatch.setattr(tui_app.time, "sleep", lambda s: None)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("2")  # cloud
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        assert calls[0] == ["gh", "workflow", "run", "triage.yml", "--repo", "o/a"]
+        assert "queued" in app.status_message
+        assert "done" not in app.status_message
+        assert "https://github.com/o/a/actions/runs/123" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_cloud_choice_falls_back_when_run_is_not_yet_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    def fake_run(cmd: list[str], *, cwd: Path, check: bool, timeout: float) -> Any:
+        if cmd[:3] == ["gh", "run", "list"]:
+            return _ProcStub(stdout="[]")
+        return _ProcStub()
+
+    monkeypatch.setattr(tui_app, "run_cmd", fake_run)
+    monkeypatch.setattr(tui_app.time, "sleep", lambda s: None)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("2")  # cloud
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        assert "queued" in app.status_message
+        assert "gh run list" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_non_local_repo_only_offers_cloud_and_runs_it_directly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/local-only")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [_lane_fleet("o/elsewhere", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Path, check: bool, timeout: float) -> Any:
+        calls.append(cmd)
+        return _ProcStub(stdout="[]")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fake_run)
+    monkeypatch.setattr(tui_app.time, "sleep", lambda s: None)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        # Not the local checkout — cloud is the only viable destination, so
+        # there is nothing to ask; it must run without a destination prompt.
+        assert app._pending_trigger is None
+        assert calls[0] == ["gh", "workflow", "run", "triage.yml", "--repo", "o/elsewhere"]
+        assert "queued" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_untriaged_local_choice_streams_via_surfaces_not_run_cmd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """untriaged/backlog/spec-requested run `agent <lane>` start-to-finish (no
+    `--surface`), unlike the agent-ready/plan-requested pairings — routing
+    these through the blocking `run_cmd` `_exec` uses would tie up a worker
+    thread for the whole run with no live output, so they must go through
+    `surfaces.pick(...).spawn(...)` directly instead (#253)."""
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged
+    fleet = [_lane_fleet("o/a", issues, triage=status.LaneInfo(None, None, "triage.yml"))]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not use the blocking run_cmd path for a streamed local lane")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    spawn_calls: list[tuple[str, list[str], Path]] = []
+
+    class _FakeSurface:
+        def spawn(
+            self,
+            label: str,
+            command: list[str],
+            cwd: Path,
+            attach_path: Path | None = None,
+        ) -> surfaces.Spawned:
+            spawn_calls.append((label, command, cwd))
+            return surfaces.Spawned(where="background pid 123", surface="background", pid=123)
+
+    monkeypatch.setattr(surfaces, "pick", lambda name="auto": _FakeSurface())
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is not None
+            await pilot.press("1")  # local
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        assert spawn_calls == [("agent-triage", ["agent", "triage"], tmp_path)]
+
+    _run(scenario())
+
+
+def test_trigger_multi_consumer_stage_prompts_for_lane_and_cancel_spawns_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(status, "STAGE_CONSUMERS", {"backlog": frozenset({"groom", "triage"})})
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(3, "2026-01-01T00:00:00Z", "backlog")]
+    fleet = [
+        _lane_fleet(
+            "o/a",
+            issues,
+            groom=status.LaneInfo(None, None, "groom.yml"),
+            triage=status.LaneInfo(None, None, "triage.yml"),
+        )
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    def fail_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not shell out before a lane is chosen")
+
+    monkeypatch.setattr(tui_app, "run_cmd", fail_run)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app._pending_trigger is not None
+            assert app._pending_trigger.phase == "lane"
+            assert app._pending_trigger.lanes == ("groom", "triage")
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._pending_trigger is None
+            assert "cancelled" in app.status_message
+
+    _run(scenario())
+
+
+def test_trigger_multi_consumer_stage_choosing_a_lane_moves_to_destination_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(status, "STAGE_CONSUMERS", {"backlog": frozenset({"groom", "triage"})})
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(3, "2026-01-01T00:00:00Z", "backlog")]
+    fleet = [
+        _lane_fleet(
+            "o/a",
+            issues,
+            groom=status.LaneInfo(None, None, "groom.yml"),
+            triage=status.LaneInfo(None, None, "triage.yml"),
+        )
+    ]
+    _set_fleet(monkeypatch, fleet)
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            stage_row = app.query_one(StageRow)
+            stage_row.focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("1")  # first lane, sorted: "groom"
+            await pilot.pause()
+            assert app._pending_trigger is not None
+            assert app._pending_trigger.phase == "destination"
+            assert app._pending_trigger.lane == "groom"
 
     _run(scenario())
 
