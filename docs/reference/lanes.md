@@ -10,27 +10,32 @@ start in #153). The other three still run at least partly as prompt prose in
 (`orchestrator.md` predates the CLI having those commands), not intent, and
 it is the exception being retired by the convergence work tracked in #171.
 
-This page is a reference, not a tutorial: every cell cites the file and line
-it was checked against. If a citation has drifted, that is this page falling
-out of date — fix the page, don't route around it.
+This page is a reference, not a tutorial: every cell cites where it was
+checked. Citations into Python (`src/agent_ops/**.py`) name the file and the
+symbol — function, class, or constant — instead of a line number, so an
+insertion above the symbol can't stale them; `tests/test_lanes_citations.py`
+resolves each one by searching the file. Citations into YAML
+(`.github/workflows/*.yml`) and `prompts/orchestrator.md` still cite a line
+number — there is no symbol there to anchor to. If a citation has drifted,
+that is this page falling out of date — fix the page, don't route around it.
 
 ## The table
 
 | Lane | Local | CI | Same implementation? |
 | --- | --- | --- | --- |
-| groom | `agent groom` — `src/agent_ops/cli.py:772` (`groom`) → `workflows/groom.py` | `uv run agent groom` — `.github/workflows/groom-pipeline.yml:99` | yes |
-| scout | `agent scout` — `src/agent_ops/cli.py:788` (`scout`) → `workflows/scout.py` | `uv run agent scout` — `.github/workflows/scout-pipeline.yml:90` | yes |
-| spec | `agent spec` — `src/agent_ops/cli.py:652` (`spec`) → `workflows/spec.py` | `uv run agent spec` — `.github/workflows/spec-pipeline.yml:155` | yes |
-| plan | `agent plan --post` — `src/agent_ops/cli.py:607` (`plan`) | `uv run agent plan --post` — `.github/workflows/plan-pipeline.yml:154` | yes |
-| evolve | `agent evolve <lane>` — `src/agent_ops/cli.py:818` (`evolve`) → `workflows/evolve.py:583` (`run_evolve`) | `uv run agent evolve "$LANE"` — `.github/workflows/evolve-pipeline.yml:160`, one call per lane via the weekly sweep matrix in `evolve.yml` (#153) | yes |
-| triage | `src/agent_ops/cli.py:751` (`triage`) → `workflows/triage.py:65` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-80) | **no** |
-| implement | `src/agent_ops/cli.py:227` (`implement`) → `workflows/implement.py:228` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 86, role file `prompts/agents/implementer.md` | **no** |
-| review | `src/agent_ops/cli.py:672` (`review`) → `workflows/review.py:84` (`run_review`), fan-out at `workflows/review.py:161` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 89 | **yes** (#171) |
-| merge | `agent merge --check` — `src/agent_ops/cli.py:889` (`merge`) → `workflows/merge.py:171` (`run_merge`) / `workflows/merge.py:43` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 148, shells out to `workflows/merge.py:142` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
+| groom | `agent groom` — `src/agent_ops/cli.py` (`groom`) → `workflows/groom.py` | `uv run agent groom` — `.github/workflows/groom-pipeline.yml:99` | yes |
+| scout | `agent scout` — `src/agent_ops/cli.py` (`scout`) → `workflows/scout.py` | `uv run agent scout` — `.github/workflows/scout-pipeline.yml:90` | yes |
+| spec | `agent spec` — `src/agent_ops/cli.py` (`spec`) → `workflows/spec.py` | `uv run agent spec` — `.github/workflows/spec-pipeline.yml:155` | yes |
+| plan | `agent plan --post` — `src/agent_ops/cli.py` (`plan`) | `uv run agent plan --post` — `.github/workflows/plan-pipeline.yml:154` | yes |
+| evolve | `agent evolve <lane>` — `src/agent_ops/cli.py` (`evolve`) → `src/agent_ops/workflows/evolve.py` (`run_evolve`) | `uv run agent evolve "$LANE"` — `.github/workflows/evolve-pipeline.yml:160`, one call per lane via the weekly sweep matrix in `evolve.yml` (#153) | yes |
+| triage | `src/agent_ops/cli.py` (`triage`) → `src/agent_ops/workflows/triage.py` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-80) | **no** |
+| implement | `src/agent_ops/cli.py` (`implement`) → `src/agent_ops/workflows/implement.py` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 86, role file `prompts/agents/implementer.md` | **no** |
+| review | `src/agent_ops/cli.py` (`review`) → `src/agent_ops/workflows/review.py` (`run_review`), fan-out at `src/agent_ops/workflows/review.py` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 89 | **yes** (#171) |
+| merge | `agent merge --check` — `src/agent_ops/cli.py` (`merge`) → `src/agent_ops/workflows/merge.py` (`run_merge`) / `src/agent_ops/workflows/merge.py` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 148, shells out to `src/agent_ops/workflows/merge.py` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
 
 ## The three diverged lanes
 
-**triage.** Local `run_triage` (`src/agent_ops/workflows/triage.py:65`) renders
+**triage.** Local `src/agent_ops/workflows/triage.py` (`run_triage`) renders
 `prompts/tasks/triage.md`, parses a `TRIAGE RESULTS:` block out of the model's
 reply, and classifies unbucketed issues into `agent-ready` / `needs-human` /
 `backlog`, with an optional `--dispatch` to hand qualifying issues straight to
@@ -42,16 +47,16 @@ everything the local lane does, plus things the local lane does not: it routes
 P0 bugs to a hotfix lane (Step 2B), clears stale `agent:claimed` labels older
 than 8 hours, closes duplicates, answers verifiable questions, caps selection
 at 3 issues per run, and stamps `triage:done` — a label the local lane never
-writes or reads (see the comment at `src/agent_ops/workflows/triage.py:17-19`,
+writes or reads (see the comment above `src/agent_ops/workflows/triage.py` (`BUCKET_LABELS`),
 which exists precisely so the local lane keeps triaging issues the CI lane
 marked done but left bucketless). `agent status --pipeline` counts how many
 open issues carry each of these stage labels, fleet-wide, and how long the
 oldest one in each stage has sat there (issue #227) — the thing this table
 of labels doesn't show on its own.
 
-**implement.** Local `run_implement` (`src/agent_ops/workflows/implement.py:228`)
+**implement.** Local `src/agent_ops/workflows/implement.py` (`run_implement`)
 works in an isolated git worktree, runs a plan stage, then a gate loop that
-retries up to `loop.max_attempts` (default 3, `src/agent_ops/config.py:46`)
+retries up to `loop.max_attempts` (default 3, `src/agent_ops/config.py` (`LoopConfig.max_attempts`))
 times with a fresh context on failure, plus a coded self-review pass and
 claim/release bookkeeping (#131) so two runs can't collide on the same issue.
 CI implement is a single subagent inside the Actions workspace
@@ -65,12 +70,12 @@ prompted this page: #150 ("CI lane and `agent merge` now disagree on what a
 cap counts") is CLOSED, and the fix (ADR
 [`docs/adr/0005-one-merge-cap-evaluator.md`](../adr/0005-one-merge-cap-evaluator.md))
 converged the *cap evaluation* itself. Diff-size and blocked-path caps are now
-judged by one function, `evaluate_merge` (`src/agent_ops/workflows/merge.py:43`),
-on both sides: local `agent merge` calls it via `run_merge`
-(`src/agent_ops/workflows/merge.py:171`), and CI Step 3
+judged by one function, `src/agent_ops/workflows/merge.py` (`evaluate_merge`),
+on both sides: local `agent merge` calls it via
+`src/agent_ops/workflows/merge.py` (`run_merge`), and CI Step 3
 (`prompts/orchestrator.md:148`) shells out to
 `uv run --project agent-ops agent merge <PR> --project target --check`, which
-is `run_merge_check` (`src/agent_ops/workflows/merge.py:142`) wrapping the same
+is `src/agent_ops/workflows/merge.py` (`run_merge_check`) wrapping the same
 `evaluate_merge`. What is still diverged is the merge *decision and action*:
 on CI that remains orchestrator prose (`prompts/orchestrator.md:160-171`) —
 the Tester PASS + `agent review --check` gate, the open-ended "no infra files
@@ -93,7 +98,7 @@ different inputs than `run_review` (issue text and the Tester's PASS/FAIL
 verdict) and had no diff-line budgeting.
 
 Step 2A item 4 now shells out to `agent review --check`
-(`src/agent_ops/cli.py:672`), which runs the exact same `run_review` /
+(`src/agent_ops/cli.py` (`review`)), which runs the exact same `run_review` /
 `verdict_of` code path as the local lane, honours its exit code and printed
 `VERDICT:` line, and feeds that into both the Step 2A revision-round rule and
 the Step 3 merge gate (`prompts/orchestrator.md:89-100,108-113,164-165`).
@@ -128,7 +133,7 @@ been resolved by #150. `config/repos.yml` no longer has an `auto_merge` block
 at all; its comment now states plainly that merge caps and blocked paths live
 in each managed repo's `.agent/config.yaml` (`merge:` section) and are
 enforced by `evaluate_merge` / `agent merge --check`, the same code path
-CI Step 3 calls. `src/agent_ops/registry.py:12` reads only
+CI Step 3 calls. `src/agent_ops/registry.py` (`REGISTRY_FILE`) reads only
 `config/local/repos.yml` (a git-ignored, bare list of managed repos), never
 `config/repos.yml`.
 
@@ -136,23 +141,24 @@ CI Step 3 calls. `src/agent_ops/registry.py:12` reads only
 `auto_merge` `workflow_call` input on the triage pipeline (report-only merge
 toggle, `.github/workflows/triage-pipeline.yml`, consumed at line 222 as
 `AUTO_MERGE` in the orchestrator prompt), and `loop.auto_merge`
-(`src/agent_ops/config.py:64`, default `False`) for the local implement lane,
-checked at `src/agent_ops/workflows/implement.py:455` to decide whether a
-freshly opened PR is immediately run through `run_merge`.
+(`src/agent_ops/config.py` (`LoopConfig.auto_merge`), default `False`) for
+the local implement lane, checked inside
+`src/agent_ops/workflows/implement.py` (`run_implement`) to decide whether a freshly opened
+PR is immediately run through `run_merge`.
 
 ## Trust model
 
 Every local-lane prompt reads GitHub content — issue bodies, comments, PR
 descriptions, review threads, CI logs, diffs — that anyone who can open an
 issue or comment on a managed repo can write, and some of it (dependency-bot
-PR bodies, CI output) no human writes at all. `render_task`
-(`src/agent_ops/prompts.py`) prepends the same untrusted-data guard
+PR bodies, CI output) no human writes at all.
+`src/agent_ops/prompts.py` (`render_task`) prepends the same untrusted-data guard
 (`prompts/untrusted-data.md`) to every `prompts/tasks/*.md` template before
 it reaches a model: the prompt template and the target repo's `AGENTS.md` /
 `CLAUDE.md` are authoritative, everything else is data to reason about, and
 an agent that notices injected instructions says so rather than silently
 following or ignoring them. `scout`'s repo-focus block
-(`focus_block`, `src/agent_ops/workflows/scout.py`, #140) is the trusted end
+(`src/agent_ops/workflows/scout.py` (`focus_block`), #140) is the trusted end
 of the same spectrum: repo-authored text a maintainer configures, held to the
 same authority as `AGENTS.md`.
 
@@ -175,7 +181,7 @@ convergence work. Tracked as a follow-up rather than folded into this file.
 ## Footnote: a ninth lane
 
 `promote` also runs on both surfaces and is already fully converged: local
-`agent promote` (`src/agent_ops/cli.py:916`, `promote`) and
+`agent promote` (`src/agent_ops/cli.py` (`promote`)) and
 `.github/workflows/promote-pipeline.yml` both open the staging → stable
 promotion PR through the same code path. It is not in the table above because
 the issue that requested this page scoped it to the eight lanes with a
@@ -184,9 +190,8 @@ CI-prompt divergence risk; `promote` never had one.
 ## Footnote: a tenth lane, dispatch-only by decision
 
 `distill` also runs on both surfaces through one code path: local `agent
-distill` (`src/agent_ops/cli.py:1058`, `distill`) → `run_distill`
-(`src/agent_ops/workflows/distill.py:168`), and CI's
-`uv run agent distill` (`.github/workflows/distill-pipeline.yml:132`) via
+distill` (`src/agent_ops/cli.py` (`distill`)) → `src/agent_ops/workflows/distill.py` (`run_distill`),
+and CI's `uv run agent distill` (`.github/workflows/distill-pipeline.yml:132`) via
 `stubs/managed-repo-distill.yml`. It is not in the table above for the same
 reason `promote` isn't — no CI-prompt divergence risk to track.
 
@@ -208,7 +213,7 @@ be restored by removing one. See #198 before adding a `schedule:` to either
 branch — GitHub-hosted runners configure neither `user.name` nor
 `user.email`, so a plain `git commit` there fails only after the run has
 already paid for checkout, setup, and a full agent session. The fix lives in
-code, not YAML: `worktree.commit` (`src/agent_ops/worktree.py`) falls back to
+code, not YAML: `src/agent_ops/worktree.py` (`commit`) falls back to
 a `github-actions[bot]` identity only when git has none configured anywhere
 (global, system, repo, or env) — a local `agent distill` / `agent evolve`
 still commits as the developer. `implement.py`'s `_finish_run` uses the same
