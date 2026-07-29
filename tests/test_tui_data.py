@@ -112,9 +112,11 @@ def test_load_fleet_checks_lanes_when_a_consumer_stage_has_items(
     issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged
     monkeypatch.setattr(status, "_pipeline_issues", lambda repo: issues)
     monkeypatch.setattr(status, "_open_prs", lambda repo: [])
-    monkeypatch.setattr(data, "lanes_for", lambda repo: {"triage": status.LaneInfo(None, None)})
+    monkeypatch.setattr(
+        data, "lanes_for", lambda repo: {"triage": status.LaneInfo(None, None, "triage.yml")}
+    )
     fleet = data.load_fleet(RegistryConfig(repos=["o/a"]))
-    assert fleet[0].lanes == {"triage": status.LaneInfo(None, None)}
+    assert fleet[0].lanes == {"triage": status.LaneInfo(None, None, "triage.yml")}
 
 
 def test_load_fleet_unreadable_repo_never_asks_for_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,9 +200,11 @@ def test_lanes_for_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_lanes_for_readable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(status, "_repo_workflows", lambda repo: {"triage.yml": "..."})
     monkeypatch.setattr(
-        status, "detect_lanes", lambda workflows: {"triage": status.LaneInfo(None, None)}
+        status,
+        "detect_lanes",
+        lambda workflows: {"triage": status.LaneInfo(None, None, "triage.yml")},
     )
-    assert data.lanes_for("o/a") == {"triage": status.LaneInfo(None, None)}
+    assert data.lanes_for("o/a") == {"triage": status.LaneInfo(None, None, "triage.yml")}
 
 
 # --- repo_summary --------------------------------------------------------------
@@ -225,7 +229,7 @@ def test_repo_summary_unserviced_marker() -> None:
 def test_repo_summary_serviced_when_lane_deployed() -> None:
     issues = [_issue(1, "2026-01-01T00:00:00Z")]
     rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
-    fr = data.FleetRepo("o/a", rd, lanes={"triage": status.LaneInfo(None, None)})
+    fr = data.FleetRepo("o/a", rd, lanes={"triage": status.LaneInfo(None, None, "triage.yml")})
     assert data.repo_summary(fr).unserviced is False
 
 
@@ -283,6 +287,69 @@ def test_repo_detail_stage_flow_and_pr_count() -> None:
     assert detail.pr_count == 1
 
 
+def test_repo_detail_available_lanes_empty_when_stage_is_empty() -> None:
+    rd = data.RepoData("o/a", readable=True, issues=[], prs=[])
+    fr = data.FleetRepo("o/a", rd, lanes={"triage": status.LaneInfo(None, None, "triage.yml")})
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    by_key = {s.key: s for s in detail.stages}
+    assert by_key["untriaged"].count == 0
+    assert by_key["untriaged"].available_lanes == ()
+
+
+def test_repo_detail_available_lanes_empty_when_unserviced() -> None:
+    issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged
+    rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
+    fr = data.FleetRepo("o/a", rd, lanes={})  # triage not deployed
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    by_key = {s.key: s for s in detail.stages}
+    assert by_key["untriaged"].unserviced is True
+    assert by_key["untriaged"].available_lanes == ()
+
+
+def test_repo_detail_available_lanes_empty_for_run_stage() -> None:
+    # `run` (agent:claimed) has no entry in STAGE_CONSUMERS at all — a human
+    # watches a claimed issue, not a CI lane — so it must never offer a
+    # trigger, even when every lane is fully wired up.
+    issues = [_issue(1, "2026-01-01T00:00:00Z", CLAIM_LABEL)]
+    rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
+    fr = data.FleetRepo("o/a", rd, lanes={"triage": status.LaneInfo(None, None, "triage.yml")})
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    by_key = {s.key: s for s in detail.stages}
+    assert by_key[CLAIM_LABEL].available_lanes == ()
+
+
+def test_repo_detail_available_lanes_populated_when_serviced() -> None:
+    issues = [_issue(1, "2026-01-01T00:00:00Z")]  # untriaged
+    rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
+    fr = data.FleetRepo("o/a", rd, lanes={"triage": status.LaneInfo(None, None, "triage.yml")})
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    by_key = {s.key: s for s in detail.stages}
+    assert by_key["untriaged"].available_lanes == ("triage",)
+
+
+def test_repo_detail_available_lanes_multi_consumer_returns_both_sorted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Not a real shape today — every `STAGE_CONSUMERS` value currently has
+    # exactly one lane — but `available_lanes` must not special-case "exactly
+    # one": a future stage with two consumer lanes must surface both, sorted,
+    # and leave "ask which" to the caller rather than picking one here.
+    monkeypatch.setattr(status, "STAGE_CONSUMERS", {"backlog": frozenset({"triage", "groom"})})
+    issues = [_issue(1, "2026-01-01T00:00:00Z", "backlog")]
+    rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
+    fr = data.FleetRepo(
+        "o/a",
+        rd,
+        lanes={
+            "groom": status.LaneInfo(None, None, "groom.yml"),
+            "triage": status.LaneInfo(None, None, "triage.yml"),
+        },
+    )
+    detail = data.repo_detail(fr, is_local=False, local_running=False)
+    by_key = {s.key: s for s in detail.stages}
+    assert by_key["backlog"].available_lanes == ("groom", "triage")
+
+
 def test_repo_detail_propagates_prs_readable_and_truncated() -> None:
     rd = data.RepoData("o/a", readable=True, issues=[], prs=[], prs_readable=False)
     fr = data.FleetRepo("o/a", rd, lanes=None)
@@ -336,7 +403,7 @@ def test_callout_untriaged_unserviced() -> None:
 def test_callout_cron_scheduled_lane() -> None:
     issues = [_issue(1, "2026-01-01T00:00:00Z", "backlog")]
     rd = data.RepoData("o/a", readable=True, issues=issues, prs=[])
-    fr = data.FleetRepo("o/a", rd, lanes={"groom": status.LaneInfo(None, "0 3 * * *")})
+    fr = data.FleetRepo("o/a", rd, lanes={"groom": status.LaneInfo(None, "0 3 * * *", "groom.yml")})
     detail = data.repo_detail(fr, is_local=False, local_running=False)
     assert detail.callout == "1 backlog, groom is cron-scheduled — nothing to do"
 
@@ -419,6 +486,123 @@ def test_open_web_command_pins_the_repo() -> None:
         "--repo",
         "o/a",
         "--web",
+    ]
+
+
+# --- `t` trigger command builders (#253) --------------------------------------
+
+
+def _stage(
+    key: str,
+    display: str,
+    *,
+    count: int = 1,
+    oldest_number: int | None = 42,
+    available_lanes: tuple[str, ...] = (),
+) -> data.FlowStage:
+    return data.FlowStage(
+        key,
+        display,
+        count,
+        oldest_age=None,
+        oldest_number=oldest_number,
+        unserviced=False,
+        available_lanes=available_lanes,
+    )
+
+
+def test_trigger_description_agent_ready_names_the_implement_step() -> None:
+    # The acceptance criterion this issue calls out by name: agent-ready ->
+    # triage must say it runs the *implement* step, never "re-triage" or
+    # "classify" — an agent-ready issue already passed classification.
+    desc = data.trigger_description(_stage("agent-ready", "ready", oldest_number=42), "triage")
+    assert "implement" in desc
+    assert "#42" in desc
+    assert "re-triage" not in desc
+    assert "classify" not in desc
+
+
+def test_trigger_description_untriaged_names_classification() -> None:
+    desc = data.trigger_description(_stage("untriaged", "untriaged"), "triage")
+    assert "classify" in desc
+
+
+def test_trigger_description_backlog_names_groom() -> None:
+    desc = data.trigger_description(_stage("backlog", "backlog"), "groom")
+    assert "groom" in desc.lower() or "backlog" in desc.lower()
+
+
+def test_trigger_description_spec_requested_names_the_issue() -> None:
+    desc = data.trigger_description(_stage("spec-requested", "spec", oldest_number=7), "spec")
+    assert "#7" in desc
+
+
+def test_trigger_description_plan_requested_names_the_issue() -> None:
+    desc = data.trigger_description(_stage("plan-requested", "plan", oldest_number=9), "plan")
+    assert "#9" in desc
+
+
+def test_local_trigger_command_agent_ready_is_exactly_dispatch_command() -> None:
+    stage = _stage("agent-ready", "ready", oldest_number=42)
+    assert data.local_trigger_command(stage, "triage", 42) == data.dispatch_command(42)
+
+
+def test_local_trigger_command_agent_ready_without_an_issue_is_none() -> None:
+    stage = _stage("agent-ready", "ready", oldest_number=None)
+    assert data.local_trigger_command(stage, "triage", None) is None
+
+
+def test_local_trigger_command_untriaged_has_no_issue_argument() -> None:
+    stage = _stage("untriaged", "untriaged")
+    assert data.local_trigger_command(stage, "triage", 5) == ["agent", "triage"]
+
+
+def test_local_trigger_command_backlog_has_no_issue_argument() -> None:
+    stage = _stage("backlog", "backlog")
+    assert data.local_trigger_command(stage, "groom", 9) == ["agent", "groom"]
+
+
+def test_local_trigger_command_spec_requested() -> None:
+    stage = _stage("spec-requested", "spec", oldest_number=11)
+    assert data.local_trigger_command(stage, "spec", 11) == ["agent", "spec", "11"]
+
+
+def test_local_trigger_command_spec_requested_without_an_issue_is_none() -> None:
+    stage = _stage("spec-requested", "spec", oldest_number=None)
+    assert data.local_trigger_command(stage, "spec", None) is None
+
+
+def test_local_trigger_command_plan_requested_uses_orca_surface() -> None:
+    stage = _stage("plan-requested", "plan", oldest_number=12)
+    assert data.local_trigger_command(stage, "plan", 12) == [
+        "agent",
+        "plan",
+        "12",
+        "--surface",
+        "orca",
+    ]
+
+
+def test_local_trigger_command_plan_requested_without_an_issue_is_none() -> None:
+    stage = _stage("plan-requested", "plan", oldest_number=None)
+    assert data.local_trigger_command(stage, "plan", None) is None
+
+
+def test_local_trigger_command_unknown_pairing_is_none() -> None:
+    # A lane that doesn't service this stage (e.g. `groom` on `backlog`'s
+    # sibling `untriaged`) must not fall back to guessing an argv.
+    stage = _stage("untriaged", "untriaged")
+    assert data.local_trigger_command(stage, "groom", 5) is None
+
+
+def test_cloud_trigger_command_invokes_the_callers_own_file() -> None:
+    assert data.cloud_trigger_command("o/a", "triage.yml") == [
+        "gh",
+        "workflow",
+        "run",
+        "triage.yml",
+        "--repo",
+        "o/a",
     ]
 
 

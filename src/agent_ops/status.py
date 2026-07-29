@@ -153,12 +153,20 @@ def _age(created_at: str, *, now: datetime | None = None) -> str:
 
 @dataclass(frozen=True)
 class LaneInfo:
-    """How a repo wires one lane: runner label passed (None = pipeline default)
-    and the cron expression of the calling stub's `on: schedule:` trigger
-    (None = not cron-scheduled)."""
+    """How a repo wires one lane: runner label passed (None = pipeline default),
+    the cron expression of the calling stub's `on: schedule:` trigger (None =
+    not cron-scheduled), and the calling stub's own filename.
+
+    `caller_file` is the source of truth for a cloud trigger (`gh workflow run
+    <caller_file> --repo <repo>`, #253): stub filenames vary per repo
+    (triage.yml, groom.yml, nightly-cleanup.yml, ...), so there is no way to
+    guess it from the lane name alone — it has to come from whichever file
+    `detect_lanes` actually found the `uses:` reference in.
+    """
 
     runner: str | None
     cron: str | None
+    caller_file: str
 
 
 def detect_lanes(workflows: dict[str, str]) -> dict[str, LaneInfo]:
@@ -174,18 +182,18 @@ def detect_lanes(workflows: dict[str, str]) -> dict[str, LaneInfo]:
     If two jobs/files call the same lane, the last one wins.
     """
     lanes: dict[str, LaneInfo] = {}
-    for content in workflows.values():
-        lanes.update(_lanes_in(content))
+    for filename, content in workflows.items():
+        lanes.update(_lanes_in(content, filename))
     return lanes
 
 
-def _lanes_in(content: str) -> Iterator[tuple[str, LaneInfo]]:
+def _lanes_in(content: str, filename: str) -> Iterator[tuple[str, LaneInfo]]:
     try:
         doc = yaml.safe_load(content)
     except yaml.YAMLError:
         # Unparseable file: fall back to a plain line scan (runner/cron unknown).
         for match in _USES_LINE_RE.finditer(content):
-            yield match.group(1), LaneInfo(runner=None, cron=None)
+            yield match.group(1), LaneInfo(runner=None, cron=None, caller_file=filename)
         return
     jobs = doc.get("jobs") if isinstance(doc, dict) else None
     if not isinstance(jobs, dict):
@@ -200,7 +208,10 @@ def _lanes_in(content: str) -> Iterator[tuple[str, LaneInfo]]:
             continue
         with_block = job.get("with")
         runner = with_block.get("runner") if isinstance(with_block, dict) else None
-        yield match.group(1), LaneInfo(str(runner) if runner is not None else None, cron)
+        yield (
+            match.group(1),
+            LaneInfo(str(runner) if runner is not None else None, cron, caller_file=filename),
+        )
 
 
 def _file_cron(doc: dict[Any, Any]) -> str | None:

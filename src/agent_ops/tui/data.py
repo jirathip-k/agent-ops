@@ -49,6 +49,12 @@ class FlowStage:
     oldest_age: str | None
     oldest_number: int | None
     unserviced: bool
+    # Deployed lane(s) that consume this stage (`STAGE_CONSUMERS[key] & deployed
+    # lanes`), sorted — empty whenever `t` (#253) has nothing to trigger: the
+    # stage is empty, unserviced, or (like `run`/`agent:claimed`) not in
+    # `STAGE_CONSUMERS` at all. More than one entry means the caller must ask
+    # which lane rather than picking one.
+    available_lanes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -315,13 +321,28 @@ def repo_detail(fr: FleetRepo, *, is_local: bool, local_running: bool) -> RepoDe
     for key, display in FLOW_ORDER:
         entry = stage_entries.get(key, status.StageEntry(0, None, None))
         age = status._age(entry.oldest_created_at) if entry.oldest_created_at else None
+        consumers = status.STAGE_CONSUMERS.get(key)
         unserviced = (
             lane_set is not None
-            and key in status.STAGE_CONSUMERS
+            and consumers is not None
             and entry.count > 0
-            and not status.STAGE_CONSUMERS[key] & lane_set
+            and not consumers & lane_set
         )
-        stages.append(FlowStage(key, display, entry.count, age, entry.oldest_number, unserviced))
+        # Trigger is offered iff the stage actually holds something *and* some
+        # deployed lane can consume it — this alone rules out an empty stage,
+        # an unserviced one, and a stage (like `run`/`agent:claimed`) with no
+        # entry in STAGE_CONSUMERS at all, with no hand-written special case
+        # for any of the three (#253).
+        available_lanes = (
+            tuple(sorted(consumers & lane_set))
+            if lane_set is not None and consumers is not None and entry.count > 0
+            else ()
+        )
+        stages.append(
+            FlowStage(
+                key, display, entry.count, age, entry.oldest_number, unserviced, available_lanes
+            )
+        )
     callout = _callout(stages, lanes=fr.lanes, is_local=is_local, local_running=local_running)
     return RepoDetail(
         fr.repo,
@@ -399,6 +420,64 @@ def open_web_command(repo: str, issue: int) -> list[str]:
     # was launched in, and a command preview that silently opened the wrong
     # repo's issue would be exactly the "confident wrong prompt" #232 rules out.
     return ["gh", "issue", "view", str(issue), "--repo", repo, "--web"]
+
+
+# --- `t`: trigger the lane servicing the focused stage (#253) -----------------
+#
+# Resolved purely from `FlowStage.available_lanes` (itself `STAGE_CONSUMERS &
+# deployed lanes`, see `repo_detail` above) — never a second, hand-typed
+# stage → lane map. Local and cloud are both real entry points into the exact
+# same lanes `d`/`r` already use (`agent <lane>`, or `dispatch_command` for the
+# one case — agent-ready → triage's implement step — that already has its own
+# command builder); this only decides *which* argv to show, never runs
+# anything itself, same contract as every builder above.
+
+
+def trigger_description(stage: FlowStage, lane: str) -> str:
+    """Human text naming exactly what `t` would run.
+
+    The agent-ready/triage pairing must say it runs triage's *implement*
+    step, not "re-triage" or "classify" (#253's acceptance criterion): an
+    agent-ready issue already passed classification — what `triage --dispatch`
+    does for it now is hand it to the implementer, not re-classify it.
+    """
+    if stage.key == "agent-ready" and lane == "triage":
+        return f"run triage's implement step for #{stage.oldest_number} (agent-ready)"
+    if stage.key == "untriaged" and lane == "triage":
+        return "classify untriaged issues"
+    if stage.key == "backlog" and lane == "groom":
+        return "groom backlog issues (promote or gate the workable ones)"
+    if stage.key == "spec-requested" and lane == "spec":
+        return f"elaborate #{stage.oldest_number} into an agent-ready spec"
+    if stage.key == "plan-requested" and lane == "plan":
+        return f"plan #{stage.oldest_number}"
+    return f"run {lane} for {stage.display}"
+
+
+def local_trigger_command(stage: FlowStage, lane: str, issue: int | None) -> list[str] | None:
+    """The exact argv `t`'s local option runs in this checkout, or None when
+    `(stage, lane)` isn't one of the pairings this trigger knows how to run
+    locally (including "needs an issue number that isn't available") — a
+    caller must not fall back to guessing a command in that case."""
+    if stage.key == "agent-ready" and lane == "triage":
+        return dispatch_command(issue) if issue is not None else None
+    if stage.key == "untriaged" and lane == "triage":
+        return ["agent", "triage"]
+    if stage.key == "backlog" and lane == "groom":
+        return ["agent", "groom"]
+    if stage.key == "spec-requested" and lane == "spec":
+        return ["agent", "spec", str(issue)] if issue is not None else None
+    if stage.key == "plan-requested" and lane == "plan":
+        return ["agent", "plan", str(issue), "--surface", "orca"] if issue is not None else None
+    return None
+
+
+def cloud_trigger_command(repo: str, caller_file: str) -> list[str]:
+    """`gh workflow run` against the repo's own deployed caller stub — this
+    repo's caller stubs take no `workflow_dispatch` inputs (verified against
+    every stub this platform generates), so no issue number needs plumbing
+    through; invokes the workflow, never touches `.github/workflows/` itself."""
+    return ["gh", "workflow", "run", caller_file, "--repo", repo]
 
 
 def issue_stage(issue: dict[str, Any]) -> str:
