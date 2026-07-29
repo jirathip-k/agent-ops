@@ -156,6 +156,15 @@ def _report_caller_drift(root: Path) -> None:
     if not results:
         return  # no agent-ops lanes wired up at all — nothing to compare
 
+    # An unreadable .github/workflows fails every known lane identically — one
+    # line beats one identical "skipped" line per lane. A single lane already
+    # gets its own "! <lane> drift check skipped: ..." line below, so only
+    # collapse when there's more than one to dedupe.
+    distinct_errors = {drift.error for drift in results}
+    if len(results) > 1 and len(distinct_errors) == 1 and None not in distinct_errors:
+        typer.echo(f"! CI caller drift check skipped: {results[0].error}")
+        return
+
     problems: list[str] = []
     for drift in results:
         if drift.error:
