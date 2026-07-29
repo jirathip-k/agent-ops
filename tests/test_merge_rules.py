@@ -15,6 +15,7 @@ from agent_ops.runs import Run
 from agent_ops.utils import CommandError
 from agent_ops.workflows import merge as merge_module
 from agent_ops.workflows.merge import (
+    MergeNotUpToDateError,
     _is_test_file,
     batch_candidates,
     closable_issue_refs,
@@ -722,6 +723,7 @@ def _stub_batch_gh(
     *,
     poll_feeds: dict[int, _StatusFeed] | None = None,
     required_checks: dict[int, list[dict[str, Any]]] | None = None,
+    merge_failures: dict[int, list[str]] | None = None,
 ) -> list[list[str]]:
     """Fake every `gh`/`git` call `run_merge_batch`'s pipeline makes.
 
@@ -731,13 +733,20 @@ def _stub_batch_gh(
     (`gh pr view --json mergeStateStatus`) returns, one per call.
     `required_checks`: pr_number -> the rows `gh pr checks --required --json`
     returns (default: none configured, i.e. an instant "none"/clean verdict).
-    No in-flight runs by default (`discover_runs` -> `([], True)`), and never
-    a call this stub doesn't recognize — an unexpected command fails the test
-    loudly instead of silently doing the wrong thing.
+    `merge_failures`: pr_number -> a queue of stderr messages `gh pr merge`
+    returns as a non-zero exit instead of succeeding — the Nth `gh pr merge
+    <n>` call fails with `merge_failures[n][N-1]`; once the queue for that PR
+    is exhausted, later calls for the same PR succeed (issue #277's
+    retry-once path). No in-flight runs by default (`discover_runs` ->
+    `([], True)`), and never a call this stub doesn't recognize — an
+    unexpected command fails the test loudly instead of silently doing the
+    wrong thing.
     """
     calls: list[list[str]] = []
     poll_feeds = poll_feeds or {}
     required_checks = required_checks or {}
+    merge_failures = merge_failures or {}
+    merge_call_counts: dict[int, int] = {}
 
     def fake_run(
         cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
@@ -762,6 +771,12 @@ def _stub_batch_gh(
         if cmd[:3] == ["gh", "pr", "checks"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:3] == ["gh", "pr", "merge"]:
+            n = int(cmd[3])
+            queue = merge_failures.get(n, [])
+            call_index = merge_call_counts.get(n, 0)
+            merge_call_counts[n] = call_index + 1
+            if call_index < len(queue):
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=queue[call_index])
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "push"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -966,3 +981,163 @@ def test_batch_exception_mid_batch_leaves_earlier_merge_recorded(
 
     assert any(c[:3] == ["gh", "pr", "merge"] and c[3] == "1" for c in calls)
     assert not any(c[:3] == ["gh", "pr", "merge"] and c[3] in ("2", "3") for c in calls)
+
+
+# ---------- run_merge_batch: retry once on stale mergeStateStatus (issue #277) ----------
+
+_STALE_MERGE_MESSAGE = (
+    "GraphQL: Pull Request is not up to date with the base branch (mergePullRequest)"
+)
+
+
+def _indices(cmd_prefix: list[str], calls: list[list[str]]) -> list[int]:
+    return [i for i, c in enumerate(calls) if c[: len(cmd_prefix)] == cmd_prefix]
+
+
+def test_batch_retries_once_after_stale_clean_merge_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #2's `mergeStateStatus` reads (stale) `CLEAN`, so its first
+    `gh pr merge` is attempted straightaway and GitHub rejects it as not
+    actually up to date; the batch must re-fetch fresh, force an update, and
+    retry the merge once — recovering all 3 PRs in order."""
+    prs = {n: _batch_pr(n, status="CLEAN") for n in (1, 2, 3)}
+    calls = _stub_batch_gh(monkeypatch, prs, merge_failures={2: [_STALE_MERGE_MESSAGE]})
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is True
+    merge_calls = [c for c in calls if c[:3] == ["gh", "pr", "merge"]]
+    assert [c[3] for c in merge_calls] == ["1", "2", "2", "3"]
+
+    merge2_idxs = _indices(["gh", "pr", "merge", "2", "--squash"], calls)
+    update2_idxs = _indices(["gh", "pr", "update-branch", "2"], calls)
+    assert len(merge2_idxs) == 2
+    assert len(update2_idxs) == 1
+    # The extra update-branch call for PR #2 happens between its two merge
+    # attempts, not before the first (which read a — misleadingly — clean
+    # status) or after the second (which succeeded).
+    assert merge2_idxs[0] < update2_idxs[0] < merge2_idxs[1]
+    assert any("retry" in line.lower() for line in lines)
+
+
+def test_batch_stops_when_stale_clean_merge_rejection_repeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #2 fails the same not-up-to-date rejection on both the original
+    attempt and the one retry — bounded to exactly one retry, no loop — so
+    the batch stops and PR #3 is never attempted."""
+    prs = {n: _batch_pr(n, status="CLEAN") for n in (1, 2, 3)}
+    calls = _stub_batch_gh(
+        monkeypatch,
+        prs,
+        merge_failures={2: [_STALE_MERGE_MESSAGE, _STALE_MERGE_MESSAGE]},
+    )
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    merge2_calls = [c for c in calls if c[:4] == ["gh", "pr", "merge", "2"]]
+    assert len(merge2_calls) == 2
+    assert not any(c[:4] == ["gh", "pr", "merge", "3"] for c in calls)
+    assert any("twice" in line.lower() for line in lines)
+    assert any("not attempted" in line and "#3" in line for line in lines)
+
+
+def test_batch_retry_still_refuses_immediately_if_fresh_refetch_shows_dirty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #2 initially reads stale CLEAN (so its first `gh pr merge` is even
+    attempted) and that attempt fails as not-up-to-date; the fresh re-fetch
+    the retry performs shows the real state is DIRTY. The retry must refuse
+    immediately through the same DIRTY handling as the primary path — no
+    `gh pr update-branch` call, nothing force-pushed — exactly like today's
+    DIRTY behavior."""
+    prs = {n: _batch_pr(n, status="CLEAN") for n in (1, 2, 3)}
+    calls = _stub_batch_gh(monkeypatch, prs, merge_failures={2: [_STALE_MERGE_MESSAGE]})
+
+    real_fetch = merge_module._fetch_pr
+    fetch_count_pr2 = {"n": 0}
+
+    def fetch_dirty_on_second_pr2_refetch(project_root: Path, pr_number: int) -> dict[str, Any]:
+        if pr_number == 2:
+            fetch_count_pr2["n"] += 1
+            if fetch_count_pr2["n"] >= 2:
+                dirty_pr = dict(real_fetch(project_root, pr_number))
+                dirty_pr["mergeStateStatus"] = "DIRTY"
+                return dirty_pr
+        return real_fetch(project_root, pr_number)
+
+    monkeypatch.setattr(merge_module, "_fetch_pr", fetch_dirty_on_second_pr2_refetch)
+    lines: list[str] = []
+
+    ok = run_merge_batch(tmp_path, [1, 2, 3], log=lines.append)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "update-branch"] for c in calls)
+    assert not any("--force" in c or "-f" in c for c in calls)
+    assert not any(c[0] == "git" and c[1] != "push" for c in calls)
+    assert any("DIRTY" in line for line in lines)
+    assert any("not attempted" in line and "#3" in line for line in lines)
+
+
+def test_batch_non_stale_merge_failure_propagates_uncaught_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrelated `gh pr merge` failure (no stale-branch marker) must not
+    trigger the retry — it propagates as a plain `CommandError`, and only one
+    `gh pr merge` call is made for PR #2."""
+    prs = {n: _batch_pr(n, status="CLEAN") for n in (1, 2, 3)}
+    calls = _stub_batch_gh(
+        monkeypatch,
+        prs,
+        merge_failures={2: ["GraphQL: Resource not accessible by integration"]},
+    )
+
+    with pytest.raises(CommandError) as excinfo:
+        run_merge_batch(tmp_path, [1, 2, 3], log=lambda _msg: None)
+
+    assert not isinstance(excinfo.value, MergeNotUpToDateError)
+    merge2_calls = [c for c in calls if c[:4] == ["gh", "pr", "merge", "2"]]
+    assert len(merge2_calls) == 1
+    assert not any(c[:4] == ["gh", "pr", "merge", "3"] for c in calls)
+
+
+def test_run_merge_solo_stale_branch_failure_still_raises_uncaught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lone `agent merge` (calling `run_merge` directly, not through the
+    batch) gets no retry — the stale-mergeStateStatus race only matters
+    across a batch's sequential merges. The failure still raises uncaught,
+    now as `MergeNotUpToDateError` — a `CommandError` subclass, so this is a
+    no-op change for any caller not specifically catching it."""
+    pr = _open_pr()
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr), stderr="")
+        if cmd[:3] == ["gh", "pr", "checks"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="the head branch is not up to date with the base branch",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(merge_module, "run", fake_run)
+    monkeypatch.setattr(merge_module, "load_project_config", lambda root: _config())
+    monkeypatch.setattr(merge_module, "discover_runs", lambda root, log: ([], True))
+
+    with pytest.raises(MergeNotUpToDateError):
+        run_merge(tmp_path, 1, log=lambda _msg: None)
+
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
