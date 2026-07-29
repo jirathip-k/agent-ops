@@ -69,8 +69,12 @@ verify (roughly ≤ half a day of human work), and touches no danger zone from
 gh issue edit 123 --add-label agent-ready
 ```
 
-…but you don't have to. `agent triage` buckets new issues (and now re-checks
-issues the CI lane stamped `triage:done` without a bucket), and:
+…but you don't have to. `agent triage` buckets new issues and skips only
+ones already settled — any issue carrying a bucket label (`agent-ready`,
+`needs-human`, `backlog`), whoever applied it and whether or not
+`triage:done` is also present; an issue stamped `triage:done` alone with no
+bucket (from before that pairing was guaranteed, or if it ever regressed) is
+picked back up and bucketed rather than left orphaned — and:
 
 ```sh
 agent groom --project <app>

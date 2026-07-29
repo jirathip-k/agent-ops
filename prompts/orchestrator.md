@@ -45,35 +45,31 @@ Everywhere below, `BASE_BRANCH` and `STABLE_BRANCH` mean these resolved names.
 
 ## Step 1 — Fetch & Triage
 1. List open issues updated since the last run. Skip anything labeled
-   `triage:done`, `needs-human`, `blocked`, `agent:claimed`, or already
-   assigned — and skip any issue that already has an open PR for it (a
+   `needs-human` or `blocked`, already assigned, or carrying `triage:done`
+   together with a bucket label (`agent-ready`/`needs-human`/`backlog`) —
+   `triage:done` alone with no bucket means triage didn't finish
+   (`prompts/tasks/triage.md`'s Housekeeping applies a bucket alongside the
+   stamp for every issue it buckets, #257), so the issue is picked up again.
+   Also skip any issue that already has an open PR for it (a
    `fix/issue-<N>` branch or a PR whose body references it): the local lane
    may have picked it up.
-   `agent:claimed` means a local agent is working on that issue *right now*,
-   which no other label says. Stale-claim rule, and it applies only to this
-   label: if the claim is older than 8 hours the run that took it died, so
-   remove the label, comment saying it was cleared as stale, and treat the
-   issue normally this run. Read the claim's age from GitHub, never guess it:
-   `gh api repos/<owner>/<repo>/issues/<N>/events --paginate --jq '.[] |
-   select(.event == "labeled" and .label.name == "agent:claimed") |
-   .created_at'` — the last line is the current claim.
+   For `agent:claimed` — which means a local agent is working on that issue
+   *right now*, unlike any other label — follow the stale-claim procedure in
+   `prompts/tasks/triage.md`: skip the issue if the claim is still live,
+   include it (once the prompt has cleared the label) if the claim turns out
+   to be stale.
    Exception: `agent-ready` or `approved-for-agent` overrides `triage:done`
    and `backlog` — that's the human's post-triage go-ahead, so the issue
    re-enters the normal lane (Step 2A). It does NOT override `needs-human`,
    `blocked`, `agent:claimed`, or the open-PR skip.
-   If triage exploration itself uncovers unrelated defects, file them per
-   Step 5 (search for duplicates first, `found-by-audit` label, never fix).
-2. Classify each new issue and route it:
-   - `bug` + P0 (production down, data loss, security exploit) → HOTFIX LANE (Step 2B)
-   - `bug` + P1 (major) / P2 (minor) → NORMAL LANE (Step 2A)
-   - `enhancement` / idea → BACKLOG: label `enhancement` + `backlog`, add a triage
-     comment (summary, rough size S/M/L, affected area). Do NOT implement.
-     Exception: issues labeled `agent-ready` or `approved-for-agent` (the human's
-     or local triage's go-ahead — same contract as the local lane) enter the
-     normal lane. The Planner still escalates if the spec is inadequate.
-   - `question` → answer only if verifiable from the codebase/docs, citing file
-     paths; otherwise label `needs-human`.
-   - `duplicate` / `invalid` → close with explanation and a link to the original.
+2. Classify every remaining issue by applying `prompts/tasks/triage.md` in
+   full, passing them as its `{issues}` input. That prompt is the single
+   definition of classification — buckets, bug priority, stale-claim
+   clearing, duplicates/invalids, questions, and the `triage:done` stamp all
+   live there; this step does not restate them. Route its verdicts:
+   - `bug` + P0 (`agent-ready`) → HOTFIX LANE (Step 2B)
+   - everything else actionable (P1/P2 `agent-ready` bug, or any other
+     `agent-ready`/`approved-for-agent` issue) → NORMAL LANE (Step 2A)
 3. Select at most 3 actionable issues, highest priority first. If a P0 hotfix is
    in flight, select ONLY the hotfix this run.
 
