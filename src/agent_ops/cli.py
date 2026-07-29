@@ -29,6 +29,7 @@ from agent_ops.config import (
     runtime_reports,
 )
 from agent_ops.fallback import artifact_footer
+from agent_ops.gates import missing_requirements
 from agent_ops.github import Label
 from agent_ops.runs import issue_from_branch
 from agent_ops.runtimes import get_runtime, runtime_names
@@ -1267,6 +1268,7 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         unset = [g for g in config.loop.gates if not getattr(config.commands, g, None)]
         if unset:
             typer.echo(f"! gates with no command configured (will be skipped): {', '.join(unset)}")
+        _report_toolchain(config, project.resolve())
         ok = _report_roles(config) and ok
         for warning in ladder_warnings(config):
             typer.echo(f"! {warning}")
@@ -1282,6 +1284,43 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         typer.echo(f"! {checkout_note}")
 
     raise typer.Exit(0 if ok else 1)
+
+
+def _report_toolchain(config: ProjectConfig, root: Path) -> None:
+    """Report `commands.requires` against the project root. Warnings only, never fatal.
+
+    A real run resolves these inside a fresh worktree *after* `commands.setup`,
+    so a name missing here may be perfectly well provisioned there — failing
+    `doctor` on that would be wrong. Reporting it is not: it tells whoever is
+    onboarding a repo what its runs are going to need on the machine.
+
+    The empty case is the one worth a line. `requires: []` is not "this repo
+    needs nothing", it is "nobody has said" — and it leaves the failure this
+    check exists for (a gate dying on `<tool>: not found` a full plan+implement
+    cycle in, issue #246) exactly as unguarded as before.
+    """
+    declared = config.commands.requires
+    if not declared:
+        if any(getattr(config.commands, gate, None) for gate in config.loop.gates):
+            typer.echo(
+                "! commands.requires is empty — nothing checks that `setup` provisions what "
+                "the gates need; a missing binary will surface as a gate failure mid-run"
+            )
+        return
+    try:
+        missing = missing_requirements(config, root)
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
+        typer.echo(f"! could not check commands.requires ({exc})")
+        return
+    resolved = [name for name in declared if name not in missing]
+    if resolved:
+        typer.echo(f"✓ requires on PATH: {', '.join(resolved)}")
+    if missing:
+        typer.echo(
+            f"! requires not on PATH here: {', '.join(missing)} — a run resolves these in the "
+            f"worktree after `commands.setup` ({config.commands.setup or 'unset'}), so this is "
+            "only a warning; if setup does not provide them, that run aborts"
+        )
 
 
 def _report_claims(root: Path) -> None:

@@ -50,6 +50,25 @@ then watched working in a live `agent spawn` session.
 | An implementer that changed nothing passed its gates and stopped without a word | Gates pass trivially on an unchanged tree and self-review skips an empty diff, so every signal matched success; the only push went over the optional Orca bus, no durable outcome was written, and `agent runs` fell through to `stopped — inspect` (#198, in contrast to #153 which escalated) | An empty diff is a named terminal outcome: `ESCALATE:` in the final message records `halted` with the reasoning posted on the issue; no escalation records `failed` with the final message quoted — either way `agent runs` shows the reason (#199) |
 | A resumed run asked to fix a CI failure verified everything it could reach, found it all green, and returned an empty diff — twice | Local gates all passed; the failing check (actionlint on a `startup_failure`-shaped workflow) runs only in CI, and a resume had no channel to its own PR's check rollup, so a correct "nothing to fix locally" read as the same silent failure #198 already named | `agent resume` fetches the PR's failing checks and a failed-job-log tail once per resume, as observed, untrusted CI data attached to the prompt; an empty-diff `failed` outcome now names failing-but-shown or unobservable CI as context instead of leaving the two indistinguishable (#236) |
 
+## Toolchain gaps (both dispatch lanes)
+
+| Failure | Why it was invisible | What catches it now |
+|---|---|---|
+| A gate fails with `<tool>: not found` because `commands.setup` never provisioned it | The run does everything first — worktree, `setup`, a planner pass, an implementer pass — and only then hits a gate that dies on a missing binary. A gate failure is the same signal bad code produces, so it reads as the implementer's fault and the retry loop spends its remaining attempts rewriting working code. Nothing in the repo says the gates need the tool: `npm run check` ending in `hugo --minify` mentions Hugo nowhere, and CI is fine because CI installs it in a step `setup` does not mirror | `commands.requires` — the repo lists the binaries its gates need on PATH, and `implement` resolves each with `command -v` in the worktree after `setup` and before the planner, aborting with a message that names the missing binaries, the gate commands at stake, and `commands.setup` as the thing to fix. `agent doctor` reports the same check as warnings, and calls out gates configured with an empty `requires` (#246) |
+
+**The fix belongs in the managed repo, not here.** agent-ops deliberately learns
+nothing about npm, uv, Homebrew or Hugo: it resolves names the repo declared and
+installs nothing. A run that aborts on this is not a platform bug to be worked
+around — it is `.agent/config.yaml`'s `setup` failing to reproduce what that
+repo's CI does, and the repair is to make `setup` install the tool (or drop the
+gate that needs it).
+
+Two costs, stated rather than discounted. `requires` is a hand-maintained list,
+so it drifts: a gate that grows a new dependency is unguarded until someone adds
+the name, which is the pre-#246 behaviour, not a regression. And it verifies
+presence only — a `hugo` on PATH three minor versions from CI's still resolves,
+so version drift remains a separate, unguarded class.
+
 ## Answering "is this run finished?"
 
 Terminal output is not the answer. A terminal that has exited returns an empty

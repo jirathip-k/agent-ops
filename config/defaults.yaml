@@ -72,6 +72,8 @@ commands:
   test: null               # e.g. "uv run pytest -q" / "npm test"
   lint: null               # e.g. "uv run ruff check ."
   typecheck: null          # e.g. "uv run pyright"
+  requires: []             # binaries the gates need on PATH, e.g. [node, npm, hugo];
+                           # resolved (never installed) after `setup` in each worktree
 
 loop:
   max_attempts: 3          # implement attempts before escalating to a human

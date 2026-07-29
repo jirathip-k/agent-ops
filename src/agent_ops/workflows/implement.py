@@ -8,6 +8,7 @@ from typing import Any
 from agent_ops import claims, github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
+from agent_ops.gates import format_missing_requirements, missing_requirements
 from agent_ops.loop import LoopOutcome, run_task_loop
 from agent_ops.prompts import escalated, opens_with_escalation_word, render_task, verdict_of
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
@@ -458,6 +459,17 @@ def _run_implement(
             log(f"setup failed: {exc}")
             _abort_cleanly(project_root, config, task_id, log)
             return False
+
+    # Whatever `setup` was supposed to provision, prove it is actually there —
+    # here, in the worktree, with setup's PATH additions in effect — before a
+    # planner pass and an implementer pass are spent on a run whose gates
+    # cannot pass. Same clean abort as a setup failure, because that is what
+    # this is (issue #246).
+    missing_tools = missing_requirements(config, wt_path)
+    if missing_tools:
+        log(format_missing_requirements(config, missing_tools, project_root))
+        _abort_cleanly(project_root, config, task_id, log)
+        return False
 
     plan = NO_PLAN_TEXT
     if plan_file is not None:

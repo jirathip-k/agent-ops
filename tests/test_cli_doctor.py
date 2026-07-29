@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from agent_ops import stubs
+from agent_ops import cli, stubs
 from agent_ops.cli import _checkout_drift, _missing_gitignore_markers, app
 from agent_ops.utils import run
 
@@ -459,6 +459,86 @@ def test_doctor_says_nothing_when_no_lane_is_wired(tmp_path: Path, monkeypatch) 
 
     assert result.exit_code == 0
     assert "CI lane callers" not in result.output
+
+
+def _write_commands(root: Path, body: str) -> None:
+    (root / ".agent").mkdir(exist_ok=True)
+    (root / ".agent" / "config.yaml").write_text(f"commands:\n{body}")
+
+
+def test_doctor_hints_when_gates_are_configured_but_requires_is_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_commands(tmp_path, '  test: "npm run check"\n')
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "! commands.requires is empty" in result.output
+
+
+def test_doctor_stays_quiet_about_requires_when_no_gate_has_a_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing to guard: a repo with no gate commands cannot fail one on a missing tool."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "commands.requires" not in result.output
+
+
+def test_doctor_reports_a_missing_required_tool_as_a_warning_not_a_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A run provisions these via `setup`, so `doctor` reports and never fails on them."""
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_commands(
+        tmp_path,
+        '  setup: "npm ci"\n  test: "npm run check"\n  requires: [sh, no-such-binary-246]\n',
+    )
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "✓ requires on PATH: sh" in result.output
+    assert "! requires not on PATH here: no-such-binary-246" in result.output
+    assert "npm ci" in result.output
+
+
+def test_doctor_reports_resolved_requires_without_a_warning(tmp_path: Path, monkeypatch) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_commands(tmp_path, '  test: "npm run check"\n  requires: [sh]\n')
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "✓ requires on PATH: sh" in result.output
+    assert "not on PATH here" not in result.output
+
+
+def test_doctor_does_not_crash_when_the_requires_check_blows_up(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_commands(tmp_path, '  test: "npm run check"\n  requires: [sh]\n')
+    _all_clis_present(monkeypatch)
+
+    def explode(*args: object, **kwargs: object) -> list[str]:
+        raise OSError("no shell here")
+
+    monkeypatch.setattr(cli, "missing_requirements", explode)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "! could not check commands.requires (no shell here)" in result.output
 
 
 def test_checkout_drift_in_sync(origin_and_clone: tuple[Path, Path]) -> None:
