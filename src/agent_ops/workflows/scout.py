@@ -14,11 +14,15 @@ from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import LABEL_COLORS
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s*[—-]+\s*(.+)$")
-#: Looser than `_RESULT_LINE` — anchored only on the `#<digits>` shape every
-#: valid result line shares. A line matching this but not `_RESULT_LINE` is
-#: an attempted-but-malformed result, distinct from unrelated chatter that
-#: matches neither (e.g. a trailing sign-off line).
-_LOOKS_LIKE_RESULT = re.compile(r"^[-*]?\s*#\d+")
+#: Looser than `_RESULT_LINE` — matches the `#<digits>` shape every valid
+#: result line shares anywhere in the line, not just at the start, since a
+#: malformed line may mention the issue number mid-sentence (e.g. "Issue #42
+#: filed for reason X"). A line matching this but not `_RESULT_LINE` is an
+#: attempted-but-malformed result, distinct from unrelated chatter that
+#: matches neither (e.g. a trailing sign-off line). Checked only after
+#: `_RESULT_LINE` has already failed to match, so a well-formed result line
+#: is never re-flagged as malformed here.
+_LOOKS_LIKE_RESULT = re.compile(r"#\d+")
 
 #: How much repo-authored focus text may reach the prompt. Repo text is
 #: trusted at the same level as AGENTS.md, but a long one would still crowd
@@ -63,7 +67,7 @@ def parse_scout(text: str) -> list[ScoutResult] | None:
         m = _RESULT_LINE.match(line)
         if m:
             results.append(ScoutResult(int(m.group(1)), m.group(2).strip()))
-        elif _LOOKS_LIKE_RESULT.match(line):
+        elif _LOOKS_LIKE_RESULT.search(line):
             malformed.append(line)
     if malformed and results:
         raise ValueError(f"unparseable result line(s): {malformed!r}")

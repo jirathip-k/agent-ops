@@ -69,6 +69,30 @@ def test_unrelated_trailing_prose_does_not_raise() -> None:
     assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
 
 
+def test_unrelated_trailing_prose_without_issue_number_does_not_raise() -> None:
+    text = "SCOUT RESULTS:\n#41 — a valid one\nFiled the above issues after reviewing the TODOs.\n"
+    results = parse_scout(text)
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SCOUT RESULTS:\n#41 — a valid one\nIssue #42 filed for reason X\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n(#42) parenthesized reason\n",
+        "SCOUT RESULTS:\n#41 — a valid one\nsee #42 for details\n",
+    ],
+)
+def test_mixed_valid_and_mid_line_malformed_lines_raises(text: str) -> None:
+    """A malformed `#N` mention that isn't at the start of the line (e.g.
+    "Issue #42 filed for reason X") must still be treated as an
+    attempted-but-malformed result and raise, not be dropped as unrelated
+    chatter — `gh issue create` has already filed #42 by this point."""
+    with pytest.raises(ValueError, match="#42"):
+        parse_scout(text)
+
+
 class _FakeRuntime:
     name = "fake"
 
