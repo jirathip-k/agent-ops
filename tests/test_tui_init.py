@@ -23,6 +23,9 @@ class _FakeApp:
 
     last_theme: str | None = None
     last_project_config: Any = None
+    # `run_tui` reads this off the app after `run()` returns (issue #252) —
+    # this stand-in needs it too, or attribute access blows up.
+    chat_sink_error: str | None = None
 
     def __init__(self, project_root: Path, *, theme: str, project_config: Any = None) -> None:
         _FakeApp.last_theme = theme

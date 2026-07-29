@@ -313,6 +313,10 @@ class CommandSink:
 
     def __init__(self, template: str) -> None:
         self._template = template
+        # Set on failure so a caller (namely `deliver()`) can report *why* the
+        # configured sink failed, not just that it did — `None` on success or
+        # before `send()` has run.
+        self.failure_reason: str | None = None
 
     def available(self) -> bool:
         return True
@@ -326,26 +330,49 @@ class CommandSink:
         # validation is ever bypassed.
         try:
             parts = shlex.split(self._template)
-        except ValueError:
+        except ValueError as exc:
+            self.failure_reason = f"invalid command: {exc}"
             return False
         argv = [text if part == "{text}" else part for part in parts]
-        return run(argv, check=False).returncode == 0
+        proc = run(argv, check=False)
+        if proc.returncode == 0:
+            self.failure_reason = None
+            return True
+        # Same stderr-or-exit-code idiom as `app.py`'s `_exec_worker`. A spawn
+        # failure (missing binary) never reaches here as a bare exit code:
+        # `utils.run`'s `check=False` contract populates `stderr` with a
+        # descriptive "could not be started" message in that case, which is
+        # what ends up in `failure_reason` instead of `f"exit 127"` — that's
+        # what makes a missing binary distinguishable from an ordinary
+        # non-zero exit with nothing on stderr.
+        self.failure_reason = proc.stderr.strip() or f"exit {proc.returncode}"
+        return False
 
 
 def deliver(
     text: str, config_value: str | None, env: dict[str, str], project_root: Path
-) -> ChatSink:
-    """Deliver `text` through the first sink that can take it and return the
-    sink that delivered it. The returned sink has already received the
-    payload — it is not meant for a second `send()`.
+) -> tuple[ChatSink, str | None]:
+    """Deliver `text` through the first sink that can take it and return
+    `(sink, error)` — the sink that delivered it, and, only when an explicit
+    `tui.chat_sink` was configured and failed, a message saying so. The
+    returned sink has already received the payload — it is not meant for a
+    second `send()`.
 
-    An explicit `tui.chat_sink` wins outright; otherwise the table is probed
-    in order (tmux, wezterm, kitty, Orca), actually attempting `send()` on
-    each available candidate — a multiplexer whose env var is set but whose
-    binary is missing on PATH (`available()` true, `send()` false) is
-    skipped rather than trusted, so it degrades silently to the next
-    candidate. `FileSink` is last and its `send()` never fails, so this
-    always returns having delivered `text` somewhere.
+    An explicit `tui.chat_sink` wins outright; if it fails, this still falls
+    back to `FileSink` (so `text` is never lost), but the operator configured
+    a specific sink and it broke — that must be reported, not swallowed
+    (issue #252), so `error` names the template and the reason. Auto-probing
+    (no `config_value`) working as designed even when it exhausts every
+    candidate and lands on the file sink — `error` is always `None` on that
+    path.
+
+    With no `config_value`, the table is probed in order (tmux, wezterm,
+    kitty, Orca), actually attempting `send()` on each available candidate —
+    a multiplexer whose env var is set but whose binary is missing on PATH
+    (`available()` true, `send()` false) is skipped rather than trusted, so
+    it degrades silently to the next candidate. `FileSink` is last and its
+    `send()` never fails, so this always returns having delivered `text`
+    somewhere.
 
     Zellij is deliberately not in this table: `zellij action write-chars`
     hits whichever pane is currently focused, and there is no race-free way
@@ -361,9 +388,10 @@ def deliver(
     if config_value:
         override = CommandSink(config_value)
         if override.send(text):
-            return override
+            return override, None
         file_sink.send(text)
-        return file_sink
+        reason = override.failure_reason or "failed"
+        return file_sink, f'chat_sink "{config_value}" failed ({reason})'
     for sink in (
         TmuxSink(env),
         WeztermSink(env),
@@ -371,6 +399,6 @@ def deliver(
         OrcaSink(project_root, env),
     ):
         if sink.available() and sink.send(text):
-            return sink
+            return sink, None
     file_sink.send(text)
-    return file_sink
+    return file_sink, None
