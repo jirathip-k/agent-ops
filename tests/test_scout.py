@@ -56,8 +56,20 @@ def test_only_unparseable_attempted_lines_is_none(text: str) -> None:
     assert parse_scout(text) is None
 
 
-def test_mixed_valid_and_malformed_lines_raises() -> None:
-    text = "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n"
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n(#42) parenthesized reason\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n- #42 no separator\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n  #42 indented, no separator\n",
+    ],
+)
+def test_mixed_valid_and_line_start_malformed_lines_raises(text: str) -> None:
+    """A line that *begins* with the `#<digits>` shape — bare, bulleted,
+    parenthesized or indented — is an attempted result line whose separator
+    the agent got wrong. `gh issue create` has already filed #42 by this
+    point, so it must raise rather than be dropped as chatter."""
     with pytest.raises(ValueError, match="#42"):
         parse_scout(text)
 
@@ -77,20 +89,29 @@ def test_unrelated_trailing_prose_without_issue_number_does_not_raise() -> None:
 
 
 @pytest.mark.parametrize(
-    "text",
+    "chatter",
     [
-        "SCOUT RESULTS:\n#41 — a valid one\nIssue #42 filed for reason X\n",
-        "SCOUT RESULTS:\n#41 — a valid one\n(#42) parenthesized reason\n",
-        "SCOUT RESULTS:\n#41 — a valid one\nsee #42 for details\n",
+        "Issue #42 filed for reason X",
+        "see #42 for details",
+        "these follow the pattern from #42",
+        "part of epic #42",
     ],
 )
-def test_mixed_valid_and_mid_line_malformed_lines_raises(text: str) -> None:
-    """A malformed `#N` mention that isn't at the start of the line (e.g.
-    "Issue #42 filed for reason X") must still be treated as an
-    attempted-but-malformed result and raise, not be dropped as unrelated
-    chatter — `gh issue create` has already filed #42 by this point."""
-    with pytest.raises(ValueError, match="#42"):
-        parse_scout(text)
+def test_mid_line_issue_mentions_are_chatter_not_malformed_results(chatter: str) -> None:
+    """A `#N` cited mid-sentence is ordinary sign-off prose, not a mangled
+    report line: the agent is explaining context, not writing out a result
+    whose separator it fumbled. Raising here would abort a scout run that
+    fully succeeded — and abort it *after* `gh issue create` already filed
+    every issue, which is strictly worse than the silent no-op #286 fixed."""
+    results = parse_scout(f"SCOUT RESULTS:\n#41 — a valid one\n{chatter}\n")
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
+def test_a_block_of_only_mid_line_mentions_is_none_not_a_raise() -> None:
+    """With no valid result to mix with, chatter-only text still yields no
+    usable results — `None`, the caller's existing raise — never `ValueError`."""
+    assert parse_scout("SCOUT RESULTS:\nsee #42 for details\nnothing cleared the bar\n") is None
 
 
 class _FakeRuntime:

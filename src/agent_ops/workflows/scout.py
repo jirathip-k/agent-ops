@@ -14,15 +14,18 @@ from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import LABEL_COLORS
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s*[—-]+\s*(.+)$")
-#: Looser than `_RESULT_LINE` — matches the `#<digits>` shape every valid
-#: result line shares anywhere in the line, not just at the start, since a
-#: malformed line may mention the issue number mid-sentence (e.g. "Issue #42
-#: filed for reason X"). A line matching this but not `_RESULT_LINE` is an
-#: attempted-but-malformed result, distinct from unrelated chatter that
-#: matches neither (e.g. a trailing sign-off line). Checked only after
-#: `_RESULT_LINE` has already failed to match, so a well-formed result line
-#: is never re-flagged as malformed here.
-_LOOKS_LIKE_RESULT = re.compile(r"#\d+")
+#: Looser than `_RESULT_LINE`, but anchored the same way: a line counts as an
+#: attempted result only if it *begins* with the `#<digits>` shape every valid
+#: result line shares, allowing the leading noise a real result line might
+#: carry (bullet marker, opening paren, indentation) and nothing else. The
+#: raise this feeds exists to catch a filed-but-mangled *report line* — an
+#: agent writing out a result and getting the separator wrong — and such a
+#: line always leads with its issue number. Ordinary prose that happens to
+#: cite an issue mid-sentence ("see #279 for context", "part of epic #12") is
+#: chatter, not a mangled report, so an unanchored search would abort runs
+#: that fully succeeded. Checked only after `_RESULT_LINE` has already failed
+#: to match, so a well-formed result line is never re-flagged as malformed.
+_LOOKS_LIKE_RESULT = re.compile(r"^[-*(\s]*#\d+")
 
 #: How much repo-authored focus text may reach the prompt. Repo text is
 #: trusted at the same level as AGENTS.md, but a long one would still crowd
@@ -47,11 +50,13 @@ def parse_scout(text: str) -> list[ScoutResult] | None:
     explicit `none` line returns `[]`; that is the sole way to get `[]`.
 
     A block that mixes at least one valid result with at least one
-    attempted-but-malformed result (a line shaped like `#<digits>` that
-    still fails to parse) raises `ValueError` naming the offending line(s)
-    rather than silently keeping just the parseable subset — by the time
-    this text is parsed, `gh issue create` has already run, so dropping a
-    mangled line here would leave a filed issue uncounted with no signal.
+    attempted-but-malformed result raises `ValueError` naming the offending
+    line(s) rather than silently keeping just the parseable subset — by the
+    time this text is parsed, `gh issue create` has already run, so dropping
+    a mangled line here would leave a filed issue uncounted with no signal.
+    A line is an attempted result only when it *starts* with `#<digits>`
+    (bullet markers, an opening paren and indentation allowed); a `#N` cited
+    mid-sentence is chatter and is ignored, not a mangled report.
     """
     _, marker, tail = text.rpartition("SCOUT RESULTS:")
     if not marker:
@@ -67,7 +72,7 @@ def parse_scout(text: str) -> list[ScoutResult] | None:
         m = _RESULT_LINE.match(line)
         if m:
             results.append(ScoutResult(int(m.group(1)), m.group(2).strip()))
-        elif _LOOKS_LIKE_RESULT.search(line):
+        elif _LOOKS_LIKE_RESULT.match(line):
             malformed.append(line)
     if malformed and results:
         raise ValueError(f"unparseable result line(s): {malformed!r}")
