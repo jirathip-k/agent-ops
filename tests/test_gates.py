@@ -60,6 +60,23 @@ def test_deliberate_exit_127_with_no_not_found_text_is_failed_not_missing(tmp_pa
     assert not results[0].ok
 
 
+def test_deliberate_exit_127_with_matching_not_found_text_is_still_failed(
+    tmp_path: Path,
+) -> None:
+    """A script's own "not found" message must not be mistaken for the shell's.
+
+    The command here is `printf`, not `widget` — `widget` only appears inside
+    the printed message, coincidentally matching `_NOT_FOUND_RE`. That must
+    not be classified MISSING: `printf` is on PATH and ran; the gate command
+    itself chose to report a real failure as exit code 127.
+    """
+    config = _config(test="printf 'widget: not found\\n' >&2; exit 127")
+    results = run_gates(config, tmp_path)
+    assert results[0].status is GateStatus.FAILED
+    assert results[0].missing_binary is None
+    assert not results[0].ok
+
+
 def test_overrunning_gate_fails_that_gate_instead_of_raising(tmp_path: Path) -> None:
     config = _config(gate_timeout_seconds=0.1, test="sleep 5", lint="echo fine")
     results = run_gates(config, tmp_path)

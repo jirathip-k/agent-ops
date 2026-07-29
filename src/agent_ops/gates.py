@@ -45,20 +45,47 @@ class GateResult:
         return self.status is GateStatus.PASSED
 
 
-def _classify(proc: subprocess.CompletedProcess[str]) -> tuple[GateStatus, str | None]:
+def _names_invoked_command(name: str, command: str) -> bool:
+    """Whether `name` (pulled from a "not found" stderr message) is actually a
+    token of `command` — i.e. something the gate's own command tried to run —
+    rather than unrelated text a script happened to print.
+
+    Allows a path-qualified variant on either side (`/usr/bin/actionlint`
+    matching a bare `actionlint`) since that's exactly what the shell vs. the
+    gate's own command string might disagree on. A script that deliberately
+    `exit 127`s with a message like "widget: not found" has no reason for
+    "widget" to coincidentally equal a token of the command that ran it, so
+    this closes the false-positive gap while keeping the real case (the gate
+    command literally names the missing binary, directly or via a nested
+    `bash -c <name>`) working.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    target = Path(name).name
+    return any(name == token or target == Path(token).name for token in tokens)
+
+
+def _classify(
+    proc: subprocess.CompletedProcess[str], command: str
+) -> tuple[GateStatus, str | None]:
     """Turn a gate's completed process into a `(status, missing_binary)` pair.
 
     `SPAWN_FAILURE_RETURNCODE` (127) is shell convention for "couldn't exec
-    this", but a script can also `exit 127` on purpose with nothing on stderr
-    about it — that must stay `FAILED`, not be mistaken for the environment
-    gap this exists to catch. `TIMEOUT_RETURNCODE` (124) and every other
-    non-zero code fall straight through to `FAILED`.
+    this", but a script can also `exit 127` on purpose with stderr text that
+    happens to match the "not found" phrasing for reasons unrelated to PATH
+    resolution — that must stay `FAILED`, not be mistaken for the environment
+    gap this exists to catch. `_names_invoked_command` disambiguates the two
+    by requiring the matched name to actually be a token of `command`.
+    `TIMEOUT_RETURNCODE` (124) and every other non-zero code fall straight
+    through to `FAILED`.
     """
     if proc.returncode == 0:
         return GateStatus.PASSED, None
     if proc.returncode == SPAWN_FAILURE_RETURNCODE:
         match = _NOT_FOUND_RE.search(proc.stderr)
-        if match:
+        if match and _names_invoked_command(match.group(1), command):
             return GateStatus.MISSING, match.group(1)
     return GateStatus.FAILED, None
 
@@ -92,7 +119,7 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
             timeout=config.loop.gate_timeout_seconds,
         )
         output = tail(proc.stdout + "\n" + proc.stderr)
-        status, missing_binary = _classify(proc)
+        status, missing_binary = _classify(proc, command)
         results.append(GateResult(name, command, status, output, missing_binary))
     return results
 
