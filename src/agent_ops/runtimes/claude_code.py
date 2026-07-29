@@ -193,47 +193,63 @@ class ClaudeCodeRuntime:
         # failure classification needs, so keep them for the fallback path.
         plain: list[str] = []
         reader = IdleLineReader(stdout)
+        # `terminate_and_reap` on the way out unconditionally — normal return,
+        # an exception raised mid-loop, everything — not just the IdleTimeout
+        # branch below. `start_new_session=True` above makes this pid its own
+        # process-group leader, so leaving any other exit path unsignaled lets
+        # a descendant that outlives the top-level `claude` process (a
+        # backgrounded tool call, a stuck subagent) get reparented to pid 1
+        # and keep running (issue #279). Safe to double-call: `proc.wait()`
+        # inside it is a no-op once a returncode is already cached, and
+        # `_signal_process` already suppresses `ProcessLookupError`. Python
+        # evaluates a `return` expression before running `finally`, so on
+        # normal completion the result below is fully built from output
+        # already captured before this mops up any leftover descendants.
         try:
-            for line in reader.lines(request.idle_timeout_seconds):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    plain.append(line)
-                    print(line, flush=True)
-                    continue
-                if event.get("type") == "result":
-                    final = event
-                    continue
-                summary = format_event(event, cwd=request.cwd)
-                if summary:
-                    print(summary, flush=True)
-        except IdleTimeout:
-            terminate_and_reap(proc)
+            try:
+                for line in reader.lines(request.idle_timeout_seconds):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        plain.append(line)
+                        print(line, flush=True)
+                        continue
+                    if event.get("type") == "result":
+                        final = event
+                        continue
+                    summary = format_event(event, cwd=request.cwd)
+                    if summary:
+                        print(summary, flush=True)
+            except IdleTimeout:
+                terminate_and_reap(proc)
+                stdin_thread.join()
+                stderr_thread.join()
+                if final is not None:
+                    # The run itself already finished — the CLI's own result
+                    # event arrived — and the child merely took too long to
+                    # exit after that (e.g. slow hook teardown). The exit code
+                    # from a forced kill reflects our signal, not the run, so
+                    # don't let a slow goodbye turn an already-successful run
+                    # into a failure.
+                    return result_from_json(final, 0)
+                return idle_timeout_result(request.idle_timeout_seconds, stderr=stderr_chunks[0])
+
+            returncode = proc.wait()
             stdin_thread.join()
             stderr_thread.join()
-            if final is not None:
-                # The run itself already finished — the CLI's own result event
-                # arrived — and the child merely took too long to exit after
-                # that (e.g. slow hook teardown). The exit code from a forced
-                # kill reflects our signal, not the run, so don't let a slow
-                # goodbye turn an already-successful run into a failure.
-                return result_from_json(final, 0)
-            return idle_timeout_result(request.idle_timeout_seconds, stderr=stderr_chunks[0])
-
-        returncode = proc.wait()
-        stdin_thread.join()
-        stderr_thread.join()
-        stderr = stderr_chunks[0]
-        if final is None:
-            return RunResult(
-                ok=returncode == 0,
-                text="\n".join(plain).strip() or stderr.strip(),
-                raw={"stderr": stderr, "returncode": returncode},
-            )
-        return result_from_json(final, returncode)
+            stderr = stderr_chunks[0]
+            if final is None:
+                return RunResult(
+                    ok=returncode == 0,
+                    text="\n".join(plain).strip() or stderr.strip(),
+                    raw={"stderr": stderr, "returncode": returncode},
+                )
+            return result_from_json(final, returncode)
+        finally:
+            terminate_and_reap(proc)
 
 
 def build_command(request: RunRequest) -> list[str]:
