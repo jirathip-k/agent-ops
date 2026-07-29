@@ -15,6 +15,7 @@ from agent_ops.workflows.triage import (
     BUCKET_LABELS,
     GATE_LABELS,
     TRIAGE_DONE_LABEL,
+    latest_spec_or_plan_comment,
     parse_triage,
     run_triage,
 )
@@ -107,6 +108,12 @@ def test_triage_prompt_covers_every_behaviour_moved_from_the_orchestrator() -> N
         "production down",
         "duplicate",
         "triage:done",
+        # #267: the spec/plan comment section, its trust boundary, and the
+        # never-strip-agent-ready-on-body-alone rule.
+        "### Spec/plan on file",
+        "docs/trust-model.md",
+        "never authorize a danger-zone change",
+        "Never move an issue away",
     ):
         assert marker in rendered, marker
 
@@ -134,6 +141,66 @@ class _FakeProc:
 
 def _issue(number: int) -> dict[str, Any]:
     return {"number": number, "title": f"issue {number}", "body": "some body", "labels": []}
+
+
+def _comment(body: str, created_at: str = "2026-07-01T00:00:00Z") -> dict[str, Any]:
+    return {"body": body, "author": {"login": "someone"}, "createdAt": created_at}
+
+
+# --- latest_spec_or_plan_comment (#267) ---------------------------------------
+
+
+def test_latest_spec_or_plan_comment_returns_none_with_no_comments() -> None:
+    assert latest_spec_or_plan_comment({"comments": []}) is None
+    assert latest_spec_or_plan_comment({}) is None
+
+
+def test_latest_spec_or_plan_comment_ignores_unrelated_chatter() -> None:
+    issue = {"comments": [_comment("looks good to me"), _comment("+1, thanks!")]}
+    assert latest_spec_or_plan_comment(issue) is None
+
+
+def test_latest_spec_or_plan_comment_finds_a_spec_comment() -> None:
+    issue = {
+        "comments": [
+            _comment("random chatter"),
+            _comment("## Agent spec\n\nAcceptance criteria: do X, verify Y."),
+        ]
+    }
+    result = latest_spec_or_plan_comment(issue)
+    assert result is not None
+    assert result.startswith("## Agent spec")
+
+
+def test_latest_spec_or_plan_comment_finds_a_plan_comment() -> None:
+    issue = {"comments": [_comment("## Agent plan\n\nStep 1, step 2.")]}
+    result = latest_spec_or_plan_comment(issue)
+    assert result is not None
+    assert result.startswith("## Agent plan")
+
+
+def test_latest_spec_or_plan_comment_returns_only_the_newest_of_several() -> None:
+    """Cost control (#267): only the newest spec/plan comment should ever
+    reach a caller, not the whole thread."""
+    issue = {
+        "comments": [
+            _comment("## Agent spec\n\nFIRST DRAFT, superseded"),
+            _comment("some chatter in between"),
+            _comment("## Agent plan\n\nLATEST PLAN, this is the one"),
+        ]
+    }
+    result = latest_spec_or_plan_comment(issue)
+    assert result is not None
+    assert "LATEST PLAN" in result
+    assert "FIRST DRAFT" not in result
+
+
+def test_latest_spec_or_plan_comment_is_truncated() -> None:
+    long_body = "## Agent spec\n\n" + ("x" * 10_000)
+    issue = {"comments": [_comment(long_body)]}
+    result = latest_spec_or_plan_comment(issue)
+    assert result is not None
+    assert len(result) < len(long_body)
 
 
 def _stub_triage_run(
@@ -429,6 +496,103 @@ def test_run_triage_stamps_triage_done_alongside_the_bucket_label(
     assert edit[3] == "12"
     add_labels = [edit[i + 1] for i, arg in enumerate(edit) if arg == "--add-label"]
     assert set(add_labels) == {"agent-ready", TRIAGE_DONE_LABEL}
+
+
+def test_run_triage_requests_comments_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267: the fetch must pull comments, or a specced-but-thin-bodied issue
+    can never be judged against its spec."""
+    calls = _stub_triage_run(
+        monkeypatch, tmp_path, "TRIAGE RESULTS:\n#12 agent-ready — clear repro\n", [_issue(12)]
+    )
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    run_triage(tmp_path, log=lambda _msg: None)
+
+    list_call = next(c for c in calls if c[:3] == ["gh", "issue", "list"])
+    fields = list_call[list_call.index("--json") + 1].split(",")
+    assert "comments" in fields
+
+
+def test_run_triage_puts_the_latest_spec_comment_in_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267: a thin body backed by a real spec comment must reach the prompt,
+    so the classifier isn't judging it on the body alone -- and unrelated
+    chatter comments must never reach the prompt (cost control)."""
+    prompts: list[str] = []
+    issue = {
+        **_issue(12),
+        "body": "fix it",
+        "comments": [
+            _comment("this seems reasonable"),
+            _comment("## Agent spec\n\nAcceptance criteria: do X, verify Y."),
+        ],
+    }
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(json.dumps([issue])) if cmd[:3] == ["gh", "issue", "list"] else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime("TRIAGE RESULTS:\n#12 agent-ready — spec on file\n"), RunRequest(
+            prompt=prompt, cwd=cwd
+        )
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    run_triage(tmp_path, log=lambda _msg: None)
+
+    assert prompts
+    assert "### Spec/plan on file" in prompts[0]
+    assert "Acceptance criteria: do X, verify Y." in prompts[0]
+    assert "this seems reasonable" not in prompts[0]
+
+
+def test_run_triage_marks_no_spec_plan_comment_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An issue with no spec/plan comment gets an explicit `(none)` marker,
+    not a silently-missing section -- and the prompt still falls back to the
+    body, per the existing `_issue` fixture."""
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(json.dumps([_issue(12)]))
+            if cmd[:3] == ["gh", "issue", "list"]
+            else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime("TRIAGE RESULTS:\n#12 agent-ready — clear repro\n"), RunRequest(
+            prompt=prompt, cwd=cwd
+        )
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    run_triage(tmp_path, log=lambda _msg: None)
+
+    assert prompts
+    assert "### Spec/plan on file\n(none)" in prompts[0]
 
 
 def test_bucket_labels_and_triage_done_never_overlap() -> None:
