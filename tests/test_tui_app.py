@@ -1308,6 +1308,10 @@ def test_chat_writes_handoff_and_exits_with_its_path(
                     break
                 await pilot.pause()
                 await asyncio.sleep(0.01)
+            # No `tui.chat_sink` configured — auto-probe exhausting the table
+            # and landing on the file sink is working as designed (#252),
+            # never reported as a failure.
+            assert app.chat_sink_error is None
         return app.return_value
 
     result = _run(scenario())
@@ -1365,7 +1369,7 @@ def test_chat_through_a_live_sink_stays_running_and_names_the_sink(
     )
     monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
     monkeypatch.setattr(
-        sinks, "deliver", lambda text, config_value, env, project_root: _StubLiveSink()
+        sinks, "deliver", lambda text, config_value, env, project_root: (_StubLiveSink(), None)
     )
 
     async def scenario() -> None:
@@ -1378,9 +1382,53 @@ def test_chat_through_a_live_sink_stays_running_and_names_the_sink(
             await pilot.pause()
             assert app.return_value is None
             assert "tmux" in app.status_message
+            assert app.chat_sink_error is None
 
     _run(scenario())
     assert not (tmp_path / ".agent-runs" / "tui-selection.md").exists()
+
+
+def test_chat_reports_when_a_configured_sink_fails_and_falls_back_to_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#252: a configured `tui.chat_sink` that fails must set
+    `chat_sink_error` so the CLI layer can report it — the handoff path
+    returned via `exit()`/`return_value` is unaffected; the message travels
+    through the separate `chat_sink_error` field instead."""
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+    detail = data.IssueDetail(
+        7, readable=True, title="Fix it", body="the body", labels=("agent-ready",), age="1d"
+    )
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
+    file_sink = sinks.FileSink(tmp_path / ".agent-runs" / "tui-selection.md")
+    error_message = 'chat_sink "mymux send -- {text}" failed (exit 127)'
+    monkeypatch.setattr(
+        sinks,
+        "deliver",
+        lambda text, config_value, env, project_root: (file_sink, error_message),
+    )
+
+    async def scenario() -> Path | None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_chat()
+            for _ in range(200):
+                if app.return_value is not None:
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            assert app.chat_sink_error == error_message
+        return app.return_value
+
+    result = _run(scenario())
+    assert result == tmp_path / ".agent-runs" / "tui-selection.md"
 
 
 def test_narrow_layout_still_works_with_the_detail_pane(

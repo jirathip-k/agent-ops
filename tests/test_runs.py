@@ -1358,6 +1358,184 @@ def test_ps_output_is_parseable_and_finds_this_process() -> None:
     assert args, "args= column empty"
 
 
+# --- _process_cwd / find_stray_processes (issue #279 orphan detection) -----
+
+
+def _lsof_result(
+    stdout: str = "", returncode: int = 0, stderr: str = ""
+) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["lsof"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def test_process_cwd_parses_lsof_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runs, "run", lambda cmd, **kwargs: _lsof_result(stdout="p1234\nfcwd\nn/home/user/project\n")
+    )
+    assert runs._process_cwd(1234) == Path("/home/user/project")
+
+
+def test_process_cwd_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runs, "run", lambda cmd, **kwargs: _lsof_result(returncode=1))
+    assert runs._process_cwd(1234) is None
+
+
+def test_process_cwd_none_on_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runs, "run", lambda cmd, **kwargs: _lsof_result(returncode=127, stderr="lsof: not found")
+    )
+    assert runs._process_cwd(1234) is None
+
+
+def test_process_cwd_none_on_unparsable_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runs, "run", lambda cmd, **kwargs: _lsof_result(stdout="garbage, no n line\n")
+    )
+    assert runs._process_cwd(1234) is None
+
+
+def test_process_cwd_none_on_readlink_permission_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """lsof exits 0 but can't resolve /proc/<pid>/cwd (e.g. different uid, hidepid
+    mount): the n-line carries error text instead of a path, and that must not be
+    trusted as a real cwd (issue #279 fail-open contract)."""
+    monkeypatch.setattr(
+        runs,
+        "run",
+        lambda cmd, **kwargs: _lsof_result(
+            stdout="p1\nn/proc/1/cwd (readlink: Permission denied)\n"
+        ),
+    )
+    assert runs._process_cwd(1) is None
+
+
+def test_find_stray_processes_reports_orphan_not_in_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / ".worktrees" / "issue-42"
+    monkeypatch.setattr(
+        runs, "_ps_output", lambda log: "555 00:01:00 claude -p --output-format json\n"
+    )
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: wt_path)
+
+    result = runs.find_stray_processes(tmp_path, {}, {42: wt_path}, lambda m: None)
+
+    assert result["by_issue"] == {42: (555,)}
+    assert result["unmapped"] == ()
+    assert result["unknown"] == ()
+
+
+def test_find_stray_processes_skips_own_child_of_a_live_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / ".worktrees" / "issue-42"
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:01:00 claude -p\n")
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: wt_path)
+    live = {42: (999, "00:05:00", "implement")}
+
+    result = runs.find_stray_processes(tmp_path, live, {42: wt_path}, lambda m: None)
+
+    assert result["by_issue"] == {}
+
+
+def test_find_stray_processes_unresolvable_cwd_reported_as_unknown_not_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:01:00 claude -p\n")
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: None)
+
+    result = runs.find_stray_processes(tmp_path, {}, {}, lambda m: None)
+
+    assert result["unknown"] == (555,)
+    assert result["by_issue"] == {}
+    assert result["unmapped"] == ()
+
+
+def test_find_stray_processes_reports_unmapped_worktree_shaped_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cwd inside the project tree but matching no known issue worktree —
+    e.g. one `git worktree remove`d out from under a still-running process —
+    is reported unmapped, with its raw path, rather than dropped."""
+    stray_path = tmp_path / ".worktrees" / "issue-99-deregistered"
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:01:00 claude -p\n")
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: stray_path)
+
+    result = runs.find_stray_processes(tmp_path, {}, {}, lambda m: None)
+
+    assert result["unmapped"] == ((555, stray_path.resolve()),)
+    assert result["by_issue"] == {}
+    assert result["unknown"] == ()
+
+
+def test_find_stray_processes_ignores_a_process_outside_the_project_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `claude` process cwd'd into some unrelated repo is not this project's
+    orphan to report — only cwds under `project_root` count."""
+    outside = tmp_path.parent / "some-unrelated-repo"
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "555 00:01:00 claude -p\n")
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: outside)
+
+    result = runs.find_stray_processes(tmp_path, {}, {}, lambda m: None)
+
+    assert result == {"by_issue": {}, "unmapped": (), "unknown": ()}
+
+
+def test_discover_runs_surfaces_orphan_pid_on_the_matching_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / ".worktrees" / "issue-68"
+    wt_path.mkdir(parents=True)
+    monkeypatch.setattr(
+        runs.worktree, "list_worktrees", lambda root: [worktree.Worktree(wt_path, "fix/issue-68")]
+    )
+    monkeypatch.setattr(runs, "_ps_output", lambda log: "13965 00:10:00 claude -p\n")
+    monkeypatch.setattr(runs, "_process_cwd", lambda pid: wt_path)
+    monkeypatch.setattr(github, "open_prs", lambda cwd: [])
+
+    result, trustworthy = runs.discover_runs(tmp_path)
+
+    assert trustworthy is True
+    assert result == [runs.Run(68, "stopped", STOPPED_DETAIL, orphan_pids=(13965,))]
+
+
+def test_report_runs_prints_stray_pid_line_for_a_row_with_orphans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs,
+        "discover_runs",
+        lambda root, log=print: (
+            [runs.Run(68, "stopped", STOPPED_DETAIL, orphan_pids=(13965,))],
+            True,
+        ),
+    )
+    lines: list[str] = []
+
+    runs.report_runs(tmp_path, log=lines.append)
+
+    assert len(lines) == 2
+    assert lines[0] == f"#68  {'stopped':<8}  {STOPPED_DETAIL}"
+    assert lines[1].startswith("!")
+    assert "13965" in lines[1]
+
+
+def test_report_runs_row_without_orphans_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runs,
+        "discover_runs",
+        lambda root, log=print: ([runs.Run(68, "stopped", STOPPED_DETAIL)], True),
+    )
+    lines: list[str] = []
+
+    runs.report_runs(tmp_path, log=lines.append)
+
+    assert lines == [f"#68  {'stopped':<8}  {STOPPED_DETAIL}"]
+
+
 def test_declared_project_survives_a_path_containing_a_space(tmp_path: Path) -> None:
     """An unreadable `--project` value means "unknown", never "elsewhere".
 

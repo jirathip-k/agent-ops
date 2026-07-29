@@ -21,6 +21,11 @@ from agent_ops import (
     surfaces,
     worktree,
 )
+
+# Aliased: this module defines its own `runs` typer command further down, and
+# that `def` rebinds the plain name at module scope — importing the module
+# itself unaliased would be silently shadowed by it.
+from agent_ops import runs as runs_mod
 from agent_ops.config import (
     PROJECT_CONFIG_REL,
     ProjectConfig,
@@ -87,10 +92,12 @@ def _main(ctx: typer.Context) -> None:
         from agent_ops.tui import run_tui
 
         try:
-            path = run_tui(Path("."))
+            path, sink_error = run_tui(Path("."))
         except (ValueError, CommandError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
+        if sink_error:
+            _err(f"! {sink_error}; wrote {path} instead")
         if path is not None:
             typer.echo(str(path))
 
@@ -1354,6 +1361,7 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         typer.echo(f"! .gitignore missing {', '.join(missing)} — run: agent init")
 
     _report_claims(project.resolve())
+    _report_orphans(project.resolve())
     _report_caller_drift(project.resolve())
     checkout_note = _checkout_drift(PLATFORM_ROOT)
     if checkout_note:
@@ -1380,7 +1388,8 @@ def _report_toolchain(config: ProjectConfig, root: Path) -> None:
         if any(getattr(config.commands, gate, None) for gate in config.loop.gates):
             typer.echo(
                 "! commands.requires is empty — nothing checks that `setup` provisions what "
-                "the gates need; a missing binary will surface as a gate failure mid-run"
+                "the gates need; a missing binary will abort the run mid-attempt instead of "
+                "being caught before planning even starts"
             )
         return
     try:
@@ -1428,6 +1437,69 @@ def _report_claims(root: Path) -> None:
         typer.echo(
             f"! #{issue} has a worktree here but no `{claims.CLAIM_LABEL}` label — the CI "
             f"lane can still start its own run on it; claim it with `agent claim {issue}`"
+        )
+
+
+def _report_orphans(root: Path) -> None:
+    """Report `claude`/`codex` processes no live run accounts for (issue #279).
+
+    Best-effort, same shape as `_report_claims`: never fails or crashes
+    `doctor`, and a degraded probe (missing `ps`/`lsof`, a `git worktree list`
+    failure) is its own warning line rather than being silently read as "no
+    orphans" — the whole point of surfacing this is to not let a leaked
+    process go unnoticed.
+
+    Orphans mapped to a known `fix/issue-N` worktree ride on `discover_runs`'s
+    own `orphan_pids` (every such worktree is already one of its rows), rather
+    than a second, separately-assembled `live` here — `discover_runs` is the
+    one place that already resolves "live" correctly against every signal
+    (spawned sessions, `dispatch`'s pre-exec window, and so on), and
+    duplicating that logic is exactly the kind of drift two copies invite. The
+    second `find_stray_processes` call below is only for the two buckets
+    `discover_runs` has no row to hang off of — `unmapped` and `unknown` — so
+    it is passed an empty `live`, which does not affect either: both are
+    populated before a process's cwd is ever checked against `live`.
+    """
+    try:
+        worktrees = worktree.list_worktrees(root)
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
+        typer.echo(f"! could not check for stray agent processes ({exc})")
+        return
+    worktree_by_issue: dict[int, Path] = {}
+    for wt in worktrees:
+        issue = issue_from_branch(wt.branch)
+        if issue is not None and wt.path.is_dir():
+            worktree_by_issue[issue] = wt.path
+
+    # Deduped: `discover_runs` and the `find_stray_processes` call below both
+    # shell out to `ps` on their own, so a single `ps` failure would otherwise
+    # print the identical warning line twice.
+    seen_warnings: set[str] = set()
+
+    def _log(message: str) -> None:
+        if message not in seen_warnings:
+            seen_warnings.add(message)
+            typer.echo(f"! {message}")
+
+    try:
+        mapped, _trustworthy = runs_mod.discover_runs(root, log=_log)
+        stray = runs_mod.find_stray_processes(root, {}, worktree_by_issue, _log)
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
+        typer.echo(f"! could not determine whether stray agent processes exist ({exc})")
+        return
+
+    for r in mapped:
+        for pid in r.orphan_pids:
+            typer.echo(
+                f"! #{r.issue}: stray agent pid {pid} still running in this worktree — not "
+                "tracked by any live run"
+            )
+    for pid, path in stray["unmapped"]:
+        typer.echo(f"! stray agent pid {pid} running in {path} — not a registered worktree")
+    if stray["unknown"]:
+        typer.echo(
+            "! could not determine whether stray agent processes exist for "
+            f"{len(stray['unknown'])} process(es) — their working directory could not be read"
         )
 
 
@@ -1630,10 +1702,12 @@ def tui(project: ProjectOpt = Path(".")) -> None:
     from agent_ops.tui import run_tui
 
     try:
-        path = run_tui(project.resolve())
+        path, sink_error = run_tui(project.resolve())
     except (ValueError, CommandError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+    if sink_error:
+        _err(f"! {sink_error}; wrote {path} instead")
     if path is not None:
         typer.echo(str(path))
 

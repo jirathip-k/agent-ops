@@ -8,7 +8,7 @@ from typing import Any
 from agent_ops import claims, github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.fallback import model_note, run_with_fallback
-from agent_ops.gates import format_missing_requirements, missing_requirements
+from agent_ops.gates import format_missing_gate, format_missing_requirements, missing_requirements
 from agent_ops.loop import LoopOutcome, run_task_loop
 from agent_ops.prompts import escalated, opens_with_escalation_word, render_task, verdict_of
 from agent_ops.runtimes import RunRequest, RunResult, Runtime, get_runtime
@@ -523,6 +523,24 @@ def _run_implement(
 
     card.note(f"#{issue_number}: implementing")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
+    if outcome.missing_gate is not None:
+        missing = outcome.missing_gate
+        binary = missing.missing_binary or "a required binary"
+        log(format_missing_gate(config, missing, project_root))
+        card.note(f"#{issue_number}: gate `{missing.name}` did not run ({binary} missing); kept")
+        # Kept, unlike the earlier preflight abort (`_abort_cleanly`): an
+        # attempt already ran before this gate came up missing, so the
+        # worktree may hold a legitimate diff worth inspecting rather than
+        # nothing at all.
+        messages.send_outcome(
+            project_root,
+            issue_number,
+            state="failed",
+            reason=f"gate `{missing.name}` did not run — `{binary}` not on PATH; environment "
+            f"gap, not a code failure; worktree kept at {wt_path}",
+            log=log,
+        )
+        return False
     if not outcome.ok:
         failing = ", ".join(g.name for g in outcome.gate_failures)
         log(
@@ -804,6 +822,24 @@ def _run_resume(
     claim.take()
     card.note(f"#{issue_number}: resuming")
     outcome = run_task_loop(runtime, request, config, wt_path, on_event=log)
+    if outcome.missing_gate is not None:
+        missing = outcome.missing_gate
+        binary = missing.missing_binary or "a required binary"
+        log(format_missing_gate(config, missing, project_root))
+        card.note(f"#{issue_number}: gate `{missing.name}` did not run ({binary} missing); kept")
+        # Kept, unlike the earlier preflight abort (`_abort_cleanly`): an
+        # attempt already ran before this gate came up missing, so the
+        # worktree may hold a legitimate diff worth inspecting rather than
+        # nothing at all.
+        messages.send_outcome(
+            project_root,
+            issue_number,
+            state="failed",
+            reason=f"gate `{missing.name}` did not run — `{binary}` not on PATH; environment "
+            f"gap, not a code failure; worktree kept at {wt_path}",
+            log=log,
+        )
+        return False
     if not outcome.ok:
         failing = ", ".join(g.name for g in outcome.gate_failures)
         log(

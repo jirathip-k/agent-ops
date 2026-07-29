@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_ops.config import ProjectConfig
 from agent_ops.fallback import pin_to_model, run_with_fallback
-from agent_ops.gates import GateResult, format_failures, run_gates
+from agent_ops.gates import GateResult, GateStatus, format_failures, run_gates
 from agent_ops.runtimes import FailureKind, RunRequest, RunResult, Runtime
 
 RETRY_TEMPLATE = """\
@@ -30,6 +30,14 @@ class LoopOutcome:
     attempts: int
     last_result: RunResult | None
     gate_failures: list[GateResult]
+    missing_gate: GateResult | None = None
+    """Set when the loop aborted on a `GateStatus.MISSING` result instead of retrying.
+
+    A trailing field with a default so every existing positional
+    `LoopOutcome(...)` construction across the test suite keeps working
+    unchanged. `None` in every other outcome, including a plain gate failure
+    — that path is unchanged and still retries via `gate_failures`.
+    """
 
 
 def run_task_loop(
@@ -71,7 +79,21 @@ def run_task_loop(
             on_event("runtime reported an error; retrying")
             continue
 
-        failures = [g for g in run_gates(config, cwd) if not g.ok]
+        results = run_gates(config, cwd)
+        missing = next((g for g in results if g.status is GateStatus.MISSING), None)
+        if missing is not None:
+            # A binary that isn't on PATH is an environment gap the implementer
+            # cannot fix by rewriting code — retrying would just burn the rest
+            # of the attempt budget on the same wall (issue #287). Abort on the
+            # first occurrence instead of consuming this attempt as a failure.
+            binary = missing.missing_binary or "a required binary"
+            on_event(
+                f"gate {missing.name!r} did not run — {binary} not on PATH; "
+                "aborting without retrying"
+            )
+            return LoopOutcome(False, attempt, last_result, [], missing_gate=missing)
+
+        failures = [g for g in results if g.status is GateStatus.FAILED]
         if not failures:
             on_event(f"all gates passed on attempt {attempt}")
             return LoopOutcome(True, attempt, last_result, [])

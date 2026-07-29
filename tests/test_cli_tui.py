@@ -21,6 +21,66 @@ from agent_ops.cli import app
 
 runner = CliRunner()
 
+# --- #252: a configured `tui.chat_sink` that failed must be reported, not --
+# --- silently swallowed by the ordinary "print the path" success path -----
+
+_SINK_ERROR = 'chat_sink "mymux send -- {text}" failed (exit 127)'
+
+
+def _stub_run_tui_with_error(project_root: object) -> tuple[Path, str]:
+    return Path("/tmp/handoff.md"), _SINK_ERROR
+
+
+def _stub_run_tui_without_error(project_root: object) -> tuple[Path, None]:
+    return Path("/tmp/handoff.md"), None
+
+
+def test_bare_agent_reports_a_failed_chat_sink_on_stderr_but_path_on_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui, "run_tui", _stub_run_tui_with_error)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "/tmp/handoff.md"
+    stderr_line = next(line for line in result.stderr.splitlines() if line.startswith("!"))
+    assert "mymux send -- {text}" in stderr_line
+    assert "exit 127" in stderr_line
+    assert "/tmp/handoff.md" in stderr_line
+    assert "instead" in stderr_line
+
+
+def test_tui_subcommand_reports_a_failed_chat_sink_on_stderr_but_path_on_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui, "run_tui", _stub_run_tui_with_error)
+    result = runner.invoke(app, ["tui"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "/tmp/handoff.md"
+    stderr_line = next(line for line in result.stderr.splitlines() if line.startswith("!"))
+    assert "mymux send -- {text}" in stderr_line
+    assert "exit 127" in stderr_line
+    assert "instead" in stderr_line
+
+
+def test_bare_agent_prints_nothing_on_stderr_when_the_sink_did_not_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui, "run_tui", _stub_run_tui_without_error)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "/tmp/handoff.md"
+    assert result.stderr == ""
+
+
+def test_tui_subcommand_prints_nothing_on_stderr_when_the_sink_did_not_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui, "run_tui", _stub_run_tui_without_error)
+    result = runner.invoke(app, ["tui"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "/tmp/handoff.md"
+    assert result.stderr == ""
+
 
 def _boom(project_root: object) -> None:
     raise ValueError("tui.theme: 'catppucin-moka' is not a built-in theme. Valid themes: nord")

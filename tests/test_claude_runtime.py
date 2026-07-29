@@ -1,12 +1,14 @@
+import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from agent_ops.runtimes import claude_code as claude_mod
-from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, terminate_and_reap
 from agent_ops.runtimes.claude_code import (
     PERMISSION_MODES,
     ClaudeCodeRuntime,
@@ -538,3 +540,109 @@ def test_streaming_idle_timeout_after_result_keeps_the_already_captured_result()
     result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
     assert result.ok
     assert result.text == "done-slow-teardown"
+
+
+# --- _run_streaming reaps the process group on every exit path (issue #279) --
+
+# Spawns a grandchild that outlives the immediate `claude` child (which exits
+# right after handing off its pid, without waiting on it) and writes the
+# grandchild's pid to argv[1] so the test can check on it afterwards. The
+# grandchild inherits the immediate child's process group — the immediate
+# child is the group leader because the outer `Popen` in `_run_streaming` sets
+# `start_new_session=True` — so `terminate_and_reap`'s `os.killpg` reaches it
+# too, exactly as it would a stuck tool call.
+_CHILD_SPAWNS_OUTLIVING_GRANDCHILD = """
+import subprocess, sys
+pid_file = sys.argv[1]
+# DEVNULL, not inherited: a grandchild holding the parent's stdout pipe open
+# would block EOF and hide this test behind the idle timeout instead of the
+# normal-completion path this test means to exercise. It stays in the same
+# process group either way (no start_new_session here), which is all
+# terminate_and_reap's os.killpg needs to reach it.
+grandchild = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+with open(pid_file, "w") as f:
+    f.write(str(grandchild.pid))
+sys.stdin.read()
+sys.stdout.write('{"type": "result", "result": "spawned-grandchild", "is_error": false}\\n')
+sys.stdout.flush()
+"""
+
+
+def test_streaming_normal_completion_reaps_the_process_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    cmd = [sys.executable, "-c", _CHILD_SPAWNS_OUTLIVING_GRANDCHILD, str(pid_file)]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True)
+
+    result = _run_streaming_with_timeout(cmd, request, timeout=10.0)
+
+    assert result.ok
+    assert result.text == "spawned-grandchild"
+    grandchild_pid = int(pid_file.read_text())
+
+    deadline = time.monotonic() + 5.0
+    alive = True
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            alive = False
+            break
+        time.sleep(0.05)
+    assert not alive, "grandchild process was not reaped after normal _run_streaming completion"
+
+
+# Emits one event (so the loop reaches `format_event`, which the test makes
+# raise) and then lingers, so the process is still alive when the exception
+# propagates and `finally` has something real to reap.
+_CHILD_EMITS_EVENT_THEN_SLEEPS = """
+import sys, time
+sys.stdin.read()
+sys.stdout.write('{"type": "assistant", "message": {"content": []}}\\n')
+sys.stdout.flush()
+time.sleep(30)
+"""
+
+
+def test_streaming_exception_mid_loop_still_reaps_before_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[subprocess.Popen[str]] = []
+    real_terminate_and_reap = claude_mod.terminate_and_reap
+
+    def spy(proc: subprocess.Popen[str], **kwargs: object) -> None:
+        calls.append(proc)
+        real_terminate_and_reap(proc, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(claude_mod, "terminate_and_reap", spy)
+
+    def boom(event: dict[str, object], cwd: Path | None = None) -> str | None:
+        raise RuntimeError("boom-in-format-event")
+
+    monkeypatch.setattr(claude_mod, "format_event", boom)
+
+    cmd = [sys.executable, "-c", _CHILD_EMITS_EVENT_THEN_SLEEPS]
+    request = RunRequest(prompt="p", cwd=Path("."), stream=True)
+
+    with pytest.raises(RuntimeError, match="boom-in-format-event"):
+        _run_streaming_with_timeout(cmd, request, timeout=10.0)
+
+    assert len(calls) == 1, "terminate_and_reap must run exactly once on the way out via finally"
+
+
+def test_terminate_and_reap_twice_on_same_proc_does_not_raise_or_hang() -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        text=True,
+        start_new_session=sys.platform != "win32",
+    )
+    terminate_and_reap(proc)
+    assert proc.returncode is not None
+    # A second call on an already-reaped proc is the no-op the docstring
+    # promises: `proc.wait()` returns immediately once a returncode is
+    # cached, and `_signal_process` already suppresses ProcessLookupError.
+    terminate_and_reap(proc)

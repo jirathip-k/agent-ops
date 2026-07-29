@@ -12,7 +12,7 @@ from agent_ops import github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops import loop as loop_module
 from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
-from agent_ops.gates import GateResult
+from agent_ops.gates import GateResult, GateStatus
 from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import RunRequest, RunResult
 from agent_ops.utils import CommandError, run
@@ -2168,7 +2168,7 @@ def test_resume_retries_do_not_refetch_observed_ci(
     def fake_run_gates(config: object, cwd: Path) -> list[GateResult]:
         gate_calls["n"] += 1
         if gate_calls["n"] == 1:
-            return [GateResult("tests", "pytest", False, "boom")]
+            return [GateResult("tests", "pytest", GateStatus.FAILED, "boom")]
         return []
 
     monkeypatch.setattr(loop_module, "run_gates", fake_run_gates)
