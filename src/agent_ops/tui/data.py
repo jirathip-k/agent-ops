@@ -55,6 +55,11 @@ class RepoData:
     `readable=False` is distinct from an empty fleet repo: the former means
     `gh` could not list the repo at all (404, no access, wedged network), the
     latter means it answered and there is simply nothing open.
+
+    `prs_readable`/`prs_truncated` mirror `readable`/`truncated` but for the
+    PR listing specifically: a failed `gh pr list` used to be swallowed into
+    a plain empty `prs`, indistinguishable from "this repo really has zero
+    open PRs" — the #243 "fallback that didn't say it fell back" shape.
     """
 
     repo: str
@@ -62,19 +67,32 @@ class RepoData:
     truncated: bool = False
     issues: list[dict[str, Any]] = field(default_factory=list)
     prs: list[dict[str, Any]] = field(default_factory=list)
+    prs_readable: bool = True
+    prs_truncated: bool = False
 
 
 def load_repo(repo: str) -> RepoData:
     try:
         issues = status._pipeline_issues(repo)
     except CommandError:
-        return RepoData(repo, readable=False)
+        # The PR fetch never even ran here — `prs_readable` must say so too,
+        # not default to "readable" for a listing that was never attempted.
+        return RepoData(repo, readable=False, prs_readable=False)
     truncated = len(issues) == status.PIPELINE_ISSUE_LIMIT
     try:
         prs = status._open_prs(repo)
     except CommandError:
-        prs = []
-    return RepoData(repo, readable=True, truncated=truncated, issues=issues, prs=prs)
+        return RepoData(repo, readable=True, truncated=truncated, issues=issues, prs_readable=False)
+    prs_truncated = len(prs) == status.OPEN_PR_LIMIT
+    return RepoData(
+        repo,
+        readable=True,
+        truncated=truncated,
+        issues=issues,
+        prs=prs,
+        prs_readable=True,
+        prs_truncated=prs_truncated,
+    )
 
 
 def lanes_for(repo: str) -> dict[str, status.LaneInfo] | None:
@@ -271,6 +289,8 @@ class RepoDetail:
     issues: list[dict[str, Any]]
     prs: list[dict[str, Any]]
     callout: str | None
+    prs_readable: bool = True
+    prs_truncated: bool = False
 
 
 def repo_detail(fr: FleetRepo, *, is_local: bool, local_running: bool) -> RepoDetail:
@@ -284,6 +304,7 @@ def repo_detail(fr: FleetRepo, *, is_local: bool, local_running: bool) -> RepoDe
             issues=[],
             prs=[],
             callout=None,
+            prs_readable=False,
         )
     stage_entries = status.stage_counts(fr.data.issues)
     lane_set = set(fr.lanes) if fr.lanes is not None else None
@@ -308,6 +329,8 @@ def repo_detail(fr: FleetRepo, *, is_local: bool, local_running: bool) -> RepoDe
         issues=fr.data.issues,
         prs=fr.data.prs,
         callout=callout,
+        prs_readable=fr.data.prs_readable,
+        prs_truncated=fr.data.prs_truncated,
     )
 
 
@@ -320,6 +343,10 @@ class WaitingOnYou:
     halted_runs: int
     unserviced_repos: int
     unreadable_repos: tuple[str, ...]
+    # True when `open_prs` is a lower bound, not the true count: some readable
+    # repo's PR listing either failed outright or hit `status.OPEN_PR_LIMIT`
+    # (#243) — same "say the fallback happened" shape as `unreadable_repos`.
+    open_prs_incomplete: bool = False
 
 
 def waiting_on_you(fleet: list[FleetRepo], local: list[runs.Run]) -> WaitingOnYou:
@@ -327,6 +354,7 @@ def waiting_on_you(fleet: list[FleetRepo], local: list[runs.Run]) -> WaitingOnYo
     open_prs = 0
     unserviced_repos = 0
     unreadable: list[str] = []
+    open_prs_incomplete = False
     for fr in fleet:
         if not fr.data.readable:
             unreadable.append(fr.repo)
@@ -334,12 +362,21 @@ def waiting_on_you(fleet: list[FleetRepo], local: list[runs.Run]) -> WaitingOnYo
         buckets = status.bucket_counts(fr.data.issues)
         needs_human += buckets.get("needs-human", 0)
         open_prs += len(fr.data.prs)
+        if not fr.data.prs_readable or fr.data.prs_truncated:
+            open_prs_incomplete = True
         stage_entries = status.stage_counts(fr.data.issues)
         lane_set = set(fr.lanes) if fr.lanes is not None else None
         if _unserviced_stages(stage_entries, lane_set):
             unserviced_repos += 1
     halted_runs = sum(1 for r in local if r.state == "halted")
-    return WaitingOnYou(needs_human, open_prs, halted_runs, unserviced_repos, tuple(unreadable))
+    return WaitingOnYou(
+        needs_human,
+        open_prs,
+        halted_runs,
+        unserviced_repos,
+        tuple(unreadable),
+        open_prs_incomplete,
+    )
 
 
 # --- Actions: every binding builds the exact argv it runs, shown before it runs -----
@@ -391,14 +428,24 @@ class IssueDetail:
     body: str = ""
     labels: tuple[str, ...] = ()
     age: str = "?"
-    has_open_pr: bool = False
+    # None means "unknown" — the PR listing this was computed from either
+    # failed outright or hit `status.OPEN_PR_LIMIT`, so "no match found in
+    # it" cannot be read as "there is no open PR" (#243).
+    has_open_pr: bool | None = None
 
 
-def load_issue_detail(repo: str, number: int, prs: list[dict[str, Any]]) -> IssueDetail:
+def load_issue_detail(
+    repo: str, number: int, prs: list[dict[str, Any]], *, prs_complete: bool = True
+) -> IssueDetail:
     """`repo`'s already-fetched open-PR listing (`RepoData.prs`) is reused for
     PR status rather than fetched again — the one-fetch-per-issue rule this
     issue asks for applies to the detail call itself, and a second `gh pr
     list` here would be exactly the extra fetch path #235 rules out.
+
+    `prs_complete=False` means `prs` is known incomplete (the fetch failed or
+    hit `status.OPEN_PR_LIMIT`, see `data._prs_for`) — a non-match against it
+    then means "not found in what we could see", not "there is no open PR",
+    so `has_open_pr` comes back `None` (unknown) rather than `False` (#243).
 
     Degrades to `readable=False` on `CommandError` (gone, no access, wedged
     `gh`) rather than raising: a body that can't be fetched is the same shape
@@ -410,7 +457,8 @@ def load_issue_detail(repo: str, number: int, prs: list[dict[str, Any]]) -> Issu
         return IssueDetail(number, readable=False)
     labels = tuple(lbl["name"] for lbl in raw.get("labels", []))
     age = status._age(raw["createdAt"]) if raw.get("createdAt") else "?"
-    has_open_pr = any(github.pr_references_issue(pr, number) for pr in prs)
+    matched = any(github.pr_references_issue(pr, number) for pr in prs)
+    has_open_pr = True if matched else (False if prs_complete else None)
     return IssueDetail(
         number,
         readable=True,
@@ -450,7 +498,7 @@ def write_chat_handoff(path: Path, repo: str, detail: IssueDetail) -> None:
     explicit "untrusted" header: it is content to read, never an instruction
     this file itself carries (#141/#191)."""
     labels = ", ".join(detail.labels) if detail.labels else "(none)"
-    pr_status = "yes" if detail.has_open_pr else "no"
+    pr_status = "unknown" if detail.has_open_pr is None else "yes" if detail.has_open_pr else "no"
     body = detail.body if detail.readable else "(could not be fetched)"
     lines = [
         f"# {repo}#{detail.number}: {detail.title}",
