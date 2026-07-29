@@ -355,3 +355,12 @@ def test_scout_focus_defaults_to_empty(tmp_path: Path) -> None:
     assert load_project_config(tmp_path).scout.focus == ""
     _write_config(tmp_path, "base_branch: develop\n")
     assert load_project_config(tmp_path).scout.focus == ""
+
+
+def test_tui_theme_defaults_to_catppuccin_macchiato(tmp_path: Path) -> None:
+    assert load_project_config(tmp_path).tui.theme == "catppuccin-macchiato"
+
+
+def test_tui_theme_project_override_wins(tmp_path: Path) -> None:
+    _write_config(tmp_path, "tui:\n  theme: nord\n")
+    assert load_project_config(tmp_path).tui.theme == "nord"

@@ -79,7 +79,11 @@ def _main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
         from agent_ops.tui import run_tui
 
-        path = run_tui(Path("."))
+        try:
+            path = run_tui(Path("."))
+        except ValueError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
         if path is not None:
             typer.echo(str(path))
 
@@ -1553,7 +1557,11 @@ def tui(project: ProjectOpt = Path(".")) -> None:
     with dispatch and resume — bare `agent` opens the same thing."""
     from agent_ops.tui import run_tui
 
-    path = run_tui(project.resolve())
+    try:
+        path = run_tui(project.resolve())
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
     if path is not None:
         typer.echo(str(path))
 

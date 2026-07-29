@@ -14,7 +14,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from textual import events
+from textual import events, markup
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
@@ -32,10 +32,21 @@ from agent_ops.utils import run as run_cmd
 NARROW_WIDTH = 76
 
 
+# Labels that mark an issue as stuck on a human rather than an agent — not
+# the platform's full label vocabulary (`blocked` isn't one `status.py`
+# knows), just the ones worth calling out in the issue list (#248).
+_ATTENTION_LABELS = ("needs-human", "blocked")
+
+
 def _issue_line(issue: dict[str, Any]) -> str:
     number = issue.get("number", "?")
     age = status._age(issue["createdAt"]) if issue.get("createdAt") else "?"
-    return f"#{number}  {age}"
+    line = f"#{number}  {age}"
+    labels = {lbl["name"] for lbl in issue.get("labels", [])}
+    hits = [name for name in _ATTENTION_LABELS if name in labels]
+    if hits:
+        line += f"  [$warning]⚠ {', '.join(hits)}[/]"
+    return line
 
 
 def _select_first(list_view: ListView) -> None:
@@ -171,6 +182,7 @@ class StageRow(Static):
                 label += f"({s.oldest_age})"
             if s.unserviced:
                 label += "⚠"
+                label = f"[$error]{label}[/]"
             if i == self.stage_index:
                 label = f"[reverse]{label}[/reverse]"
             parts.append(label)
@@ -183,7 +195,7 @@ class StageRow(Static):
             pr_line = f"PRs open: {d.pr_count}"
         lines = [header, flow, pr_line]
         if d.callout:
-            lines.append(f"▲ {d.callout}")
+            lines.append(f"[$warning]▲ {d.callout}[/]")
         self.update("\n".join(lines))
 
     @property
@@ -301,14 +313,30 @@ class WaitingPane(Static):
 
     def set_summary(self, w: data.WaitingOnYou, *, loaded: int, total: int) -> None:
         open_prs = f"≥{w.open_prs}" if w.open_prs_incomplete else str(w.open_prs)
+        # Colour is added alongside the text, never instead of it: the number
+        # and label are what NO_COLOR/2-colour terminals fall back to.
+        all_clear = w.needs_human == 0 and w.halted_runs == 0 and w.unserviced_repos == 0
+
+        def _count_line(count: int, label: str) -> str:
+            text = f"{count}  {label}"
+            if count > 0:
+                return f"[$warning]{text}[/]"
+            if all_clear:
+                return f"[$success]{text}[/]"
+            return text
+
         lines = [
-            f"{w.needs_human}  needs-human",
+            _count_line(w.needs_human, "needs-human"),
             f"{open_prs}  open PRs",
-            f"{w.halted_runs}  halted runs",
-            f"{w.unserviced_repos}  unserviced ⚠",
+            _count_line(w.halted_runs, "halted runs"),
+            _count_line(w.unserviced_repos, "unserviced ⚠"),
         ]
         if w.unreadable_repos:
-            lines.append(f"⚠ unreadable: {', '.join(w.unreadable_repos)}")
+            # Repo names come from the registry, not `gh` output, but escape
+            # them anyway before they reach a markup-enabled `Static.update` —
+            # a `[` in a name must not be parsed as a markup tag.
+            names = ", ".join(markup.escape(r) for r in w.unreadable_repos)
+            lines.append(f"⚠ unreadable: {names}")
         if loaded < total:
             lines.append(f"(loading {loaded}/{total} repos…)")
         self.update("\n".join(lines))
@@ -381,6 +409,9 @@ class TuiApp(App[Path | None]):
         border: round $panel;
         height: 100%;
     }
+    ReposPane:focus, StageRow:focus, IssueList:focus, IssueDetailPane:focus, RunsPane:focus {
+        border: double $accent;
+    }
     #flow-wrap {
         height: 100%;
     }
@@ -412,9 +443,10 @@ class TuiApp(App[Path | None]):
         Binding("c", "chat", "chat"),
     ]
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, *, theme: str = "catppuccin-macchiato") -> None:
         super().__init__()
         self.project_root = project_root
+        self._initial_theme = theme
         self.local_slug = github.remote_slug(project_root)
         self.config = registry.RegistryConfig()
         self.fleet: list[data.FleetRepo | None] = []
@@ -436,6 +468,7 @@ class TuiApp(App[Path | None]):
         yield CommandBar(id="bar")
 
     def on_mount(self) -> None:
+        self.theme = self._initial_theme
         self._apply_layout(self.size.width)
         try:
             self.config = registry.load_registry()
