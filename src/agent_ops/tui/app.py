@@ -445,13 +445,21 @@ class TuiApp(App[Path | None]):
         Binding("c", "chat", "chat"),
     ]
 
-    def __init__(self, project_root: Path, *, theme: str = "catppuccin-macchiato") -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        theme: str = "catppuccin-macchiato",
+        project_config: ProjectConfig | None = None,
+    ) -> None:
         super().__init__()
         self.project_root = project_root
         self._initial_theme = theme
         self.local_slug = github.remote_slug(project_root)
         self.config = registry.RegistryConfig()
-        self.project_config: ProjectConfig = load_project_config(project_root)
+        self.project_config: ProjectConfig = (
+            project_config if project_config is not None else load_project_config(project_root)
+        )
         self.fleet: list[data.FleetRepo | None] = []
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
@@ -713,7 +721,7 @@ class TuiApp(App[Path | None]):
             else data.load_issue_detail(repo, issue, prs, prs_complete=prs_complete)
         )
         text = data.render_chat_handoff(repo, detail)
-        sink = sinks.pick(
+        sink = sinks.deliver(
             text, self.project_config.tui.chat_sink, dict(os.environ), self.project_root
         )
         if isinstance(sink, sinks.FileSink):
