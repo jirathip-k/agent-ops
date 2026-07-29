@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from fnmatch import fnmatch, fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from agent_ops import github
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.runs import Run, discover_runs, issue_from_branch
-from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
+from agent_ops.utils import DEFAULT_TIMEOUT_S, SLOW_GIT_TIMEOUT_S, CommandError, run
 
 
 def _is_test_file(path: str, patterns: list[str]) -> bool:
@@ -176,7 +178,10 @@ def _fetch_pr(project_root: Path, pr_number: int) -> dict[str, Any]:
             # only in run_merge so `agent merge --check` sees them too. The CI
             # lane reaches the rules through --check, so a label enforced only
             # on the local path would be no containment at all.
-            "baseRefName,headRefName,title,url,files,state,labels",
+            # `mergeStateStatus` feeds run_merge_batch's `_update_and_wait`
+            # (issue #272): DIRTY vs BEHIND is the only signal that decides
+            # whether a batched PR can be brought up to date at all.
+            "baseRefName,headRefName,title,url,files,state,labels,mergeStateStatus",
         ],
         cwd=project_root,
     )
@@ -299,6 +304,252 @@ def run_merge(
     )
     log(f"merged PR #{pr_number} ({pr['title']}) into {pr['baseRefName']}")
     return True
+
+
+# `bucket` values `gh pr checks --json` reports. "skipping" (a required check
+# marked skipped, e.g. a path-filtered workflow) counts toward "passing" —
+# GitHub itself lets a skipped required check merge, so a batch that stopped
+# on it would be stricter than GitHub's own gate. "cancel" counts as failing:
+# a cancelled required check never produced a passing result and is not
+# going to on its own.
+_PASSING_BUCKETS = {"pass", "skipping"}
+_FAILING_BUCKETS = {"fail", "cancel"}
+
+
+def _wait_for_required_checks(
+    project_root: Path,
+    pr_number: int,
+    *,
+    timeout_s: float,
+    interval_s: float,
+    log: Callable[[str], None],
+) -> Literal["passing", "failing", "timeout", "none"]:
+    """Poll `gh pr checks <n> --required` until every required check settles.
+
+    Mirrors `runs.wait_for_runs`'s poll cadence: module-level `time.sleep`/
+    `time.monotonic`, so tests can monkeypatch the clock instead of actually
+    waiting. "none" (no required checks configured on this repo, or the repo
+    has no branch protection at all) returns immediately — there is nothing
+    to wait on, and `run_merge`'s own `gh pr checks` call already tolerates
+    the same "no checks" shape.
+
+    One poll always happens before the deadline is checked, so an
+    already-settled PR returns immediately without sleeping.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        proc = run(
+            ["gh", "pr", "checks", str(pr_number), "--required", "--json", "name,bucket,link"],
+            cwd=project_root,
+            check=False,
+            timeout=DEFAULT_TIMEOUT_S,
+        )
+        if "no required checks" in (proc.stdout + proc.stderr).lower():
+            return "none"
+        try:
+            checks = json.loads(proc.stdout) if proc.stdout.strip() else []
+        except json.JSONDecodeError:
+            checks = []
+        if not checks:
+            return "none"
+
+        buckets = {c.get("bucket") for c in checks}
+        if buckets & _FAILING_BUCKETS:
+            failing = [c["name"] for c in checks if c.get("bucket") in _FAILING_BUCKETS]
+            log(f"PR #{pr_number}: required check(s) failing: {', '.join(failing)}")
+            return "failing"
+        if buckets <= _PASSING_BUCKETS:
+            return "passing"
+
+        if time.monotonic() >= deadline:
+            pending = [c["name"] for c in checks if c.get("bucket") not in _PASSING_BUCKETS]
+            log(
+                f"PR #{pr_number}: required check(s) still pending after {timeout_s:g}s: "
+                f"{', '.join(pending)}"
+            )
+            return "timeout"
+        time.sleep(interval_s)
+
+
+def _update_and_wait(
+    project_root: Path,
+    pr_number: int,
+    pr: dict[str, Any],
+    *,
+    timeout_s: float,
+    interval_s: float,
+    log: Callable[[str], None],
+) -> Literal["clean", "dirty", "failing", "timeout", "none"]:
+    """Bring PR #`pr_number` up to date with its base, then wait for its
+    required checks — the update→wait half of `agent merge --batch`.
+
+    `mergeStateStatus == "DIRTY"` (real merge conflicts) refuses immediately:
+    no `gh pr update-branch` call is made and nothing is force-pushed. GitHub's
+    update-branch endpoint can only fast-forward-merge a branch that is
+    cleanly behind; asking it to do anything with a conflicted branch is not
+    a thing this command is ever allowed to attempt (a human resolves
+    conflicts, never this batch).
+
+    `"BEHIND"` runs `gh pr update-branch` once, then re-fetches
+    `mergeStateStatus` fresh on every poll (never caching the rollup this
+    function was called with) until it leaves BEHIND/UNKNOWN or `timeout_s`
+    elapses. A PR that turns out DIRTY only once the update lands (the
+    update itself surfaces a conflict) is caught here too and refused the
+    same way.
+    """
+    status = pr.get("mergeStateStatus")
+    if status == "DIRTY":
+        log(f"PR #{pr_number} is DIRTY (merge conflicts) — not updating, not merging")
+        return "dirty"
+
+    if status == "BEHIND":
+        log(f"PR #{pr_number} is behind its base — running gh pr update-branch")
+        run(
+            ["gh", "pr", "update-branch", str(pr_number)],
+            cwd=project_root,
+            timeout=DEFAULT_TIMEOUT_S,
+        )
+        deadline = time.monotonic() + timeout_s
+        while True:
+            proc = run(
+                ["gh", "pr", "view", str(pr_number), "--json", "mergeStateStatus"],
+                cwd=project_root,
+                timeout=DEFAULT_TIMEOUT_S,
+            )
+            status = json.loads(proc.stdout)["mergeStateStatus"]
+            if status == "DIRTY":
+                log(f"PR #{pr_number} became DIRTY while updating — not merging")
+                return "dirty"
+            if status not in ("BEHIND", "UNKNOWN"):
+                break
+            if time.monotonic() >= deadline:
+                log(f"PR #{pr_number} did not leave {status} within {timeout_s:g}s of updating")
+                return "timeout"
+            time.sleep(interval_s)
+
+    verdict = _wait_for_required_checks(
+        project_root, pr_number, timeout_s=timeout_s, interval_s=interval_s, log=log
+    )
+    if verdict in ("failing", "timeout"):
+        return verdict
+    return "clean"
+
+
+def run_merge_batch(
+    project_root: Path,
+    pr_numbers: list[int],
+    *,
+    override: bool = False,
+    force: bool = False,
+    confirm: Callable[[str], bool] | None = None,
+    log: Callable[[str], None] = print,
+) -> bool:
+    """Update → wait for required checks → merge each PR in `pr_numbers`, in order.
+
+    Stands in for a GitHub merge queue, which isn't available on a
+    personal-account repo: `required_status_checks.strict=true` on the base
+    branch means every merge marks every *other* open PR BEHIND, so merging a
+    round of PRs one `agent merge` at a time re-stales the rest on every
+    single merge. Routing a whole round through one call instead means each
+    PR is only ever updated against the tree the *previous* PR in this same
+    batch just produced.
+
+    Sequential only, deliberately: unlike `review --jobs`, there is no
+    parallelism knob here and never should be — a PR later in the list is
+    tested against the result of the PR merged just before it, so merging two
+    at once would test one of them against a base that's already stale by the
+    time it lands.
+
+    Stops (never skips) on the first PR that is DIRTY, has failing required
+    checks, or times out waiting on them — and reports every PR after it as
+    not attempted, rather than silently leaving them for a re-run to
+    rediscover. A non-OPEN PR (closed/merged out from under the batch between
+    scheduling and running) stops it the same way.
+
+    The in-flight-runs guard (issue #265) is inherited for free: this
+    function never checks for in-flight runs itself, and instead lets the
+    unmodified `run_merge` call below do that check as it always has. If a
+    run is in flight, `run_merge`'s own guard refuses the very first PR in
+    the batch (unless `force`/`confirm` clears it, exactly as for a lone
+    `agent merge`), so the batch reports that refusal and stops before
+    merging anything — there is no second copy of that guard to keep in sync
+    with the original.
+    """
+    config = load_project_config(project_root)
+    for i, pr_number in enumerate(pr_numbers):
+        remaining = pr_numbers[i + 1 :]
+        not_attempted = f"not attempted: {', '.join(f'#{n}' for n in remaining)}"
+
+        pr = _fetch_pr(project_root, pr_number)
+        if pr["state"] != "OPEN":
+            log(f"PR #{pr_number} is {pr['state']} — nothing to merge, batch stopped")
+            if remaining:
+                log(not_attempted)
+            return False
+
+        verdict = _update_and_wait(
+            project_root,
+            pr_number,
+            pr,
+            timeout_s=config.merge.batch_check_timeout_s,
+            interval_s=config.merge.batch_poll_interval_s,
+            log=log,
+        )
+        if verdict == "dirty":
+            log(f"PR #{pr_number} has merge conflicts — batch stopped, nothing auto-resolved")
+            if remaining:
+                log(not_attempted)
+            return False
+        if verdict == "failing":
+            log(f"PR #{pr_number}'s required checks are failing — batch stopped")
+            if remaining:
+                log(not_attempted)
+            return False
+        if verdict == "timeout":
+            log(f"PR #{pr_number}'s required checks did not settle in time — batch stopped")
+            if remaining:
+                log(not_attempted)
+            return False
+
+        ok = run_merge(
+            project_root, pr_number, override=override, force=force, confirm=confirm, log=log
+        )
+        if not ok:
+            log(f"PR #{pr_number} was not merged — batch stopped")
+            if remaining:
+                log(not_attempted)
+            return False
+        log(f"batch: merged {i + 1}/{len(pr_numbers)} ({', '.join(f'#{n}' for n in pr_numbers)})")
+
+    log(f"batch complete: merged {len(pr_numbers)} PR(s)")
+    return True
+
+
+def batch_candidates(project_root: Path, *, log: Callable[[str], None] = print) -> list[int]:
+    """Open PR numbers with no `evaluate_merge` violations and not DIRTY, ascending.
+
+    Backs `agent merge --batch --all-clean`: builds the batch by filtering
+    down the candidate set up front, rather than including every open PR and
+    letting the batch itself stop at the first one that isn't clean. Those are
+    different behaviours — `--all-clean` is meant to land everything that
+    *is* mergeable in one round, not to give up the moment it meets a PR
+    (however far down the list) that carries a blocked label or a conflict.
+    """
+    config = load_project_config(project_root)
+    clean: list[int] = []
+    for number in github.open_pr_numbers(config.base_branch, cwd=project_root):
+        pr = _fetch_pr(project_root, number)
+        if pr["state"] != "OPEN":
+            continue
+        if pr.get("mergeStateStatus") == "DIRTY":
+            log(f"PR #{number} is DIRTY — excluded from --all-clean batch")
+            continue
+        violations = evaluate_merge(pr, config)
+        if violations:
+            log(f"PR #{number} has rule violation(s) — excluded from --all-clean batch")
+            continue
+        clean.append(number)
+    return clean
 
 
 def closable_issue_refs(commit_subjects: list[str], open_issues: set[int]) -> list[int]:

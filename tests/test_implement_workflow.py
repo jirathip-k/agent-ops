@@ -4,10 +4,10 @@ from pathlib import Path
 import pytest
 
 from agent_ops import github, grants, orca, runs, worktree
-from agent_ops.config import LoopConfig, ProjectConfig
+from agent_ops.config import LoopConfig, ProjectConfig, load_project_config
 from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import RunRequest, RunResult
-from agent_ops.utils import run
+from agent_ops.utils import PLATFORM_ROOT, run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import (
     _format_comments,
@@ -52,6 +52,22 @@ def test_gate_allowed_tools_splits_compound_commands() -> None:
     patterns = gate_allowed_tools(config)
     assert "Bash(uv run ruff check .)" in patterns
     assert "Bash(uv run ruff format --check .)" in patterns
+
+
+def test_this_repos_config_declares_and_allows_actionlint() -> None:
+    """This repo's own `.agent/config.yaml` — the one used by real runs here.
+
+    Regression for issue #268: actionlint is a real gate (`ci.yml` runs it and
+    fails the build) but was missing from `commands.*`, so `gate_allowed_tools`
+    never generated a permission pattern for it and a headless agent got a
+    silent sandbox denial instead of running the lint.
+    """
+    config = load_project_config(PLATFORM_ROOT)
+    assert "actionlint" in config.commands.requires
+    assert "uv" in config.commands.requires
+    patterns = gate_allowed_tools(config)
+    assert "Bash(actionlint -color -shellcheck=)" in patterns
+    assert "Bash(actionlint -color -shellcheck=:*)" in patterns
 
 
 def test_gate_allowed_tools_empty_when_no_commands() -> None:

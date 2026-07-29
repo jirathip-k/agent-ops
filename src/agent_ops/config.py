@@ -183,6 +183,16 @@ class MergeConfig(BaseModel):
     # understand. Code-side default, same precedent as `blocked_paths`: a
     # project overrides it in `config/defaults.yaml`, not here.
     blocked_labels: list[str] = Field(default_factory=lambda: ["human-merge-only"])
+    # `agent merge --batch` (issue #272): with no GitHub merge queue available
+    # (personal-account repo) and `required_status_checks.strict=true` on the
+    # base branch marking every other open PR BEHIND on each merge, a batch
+    # updates → waits for required checks → merges each PR in turn. These two
+    # mirror `runs.py`'s `_DEFAULT_TIMEOUT_S`/`_POLL_INTERVAL_S` convention but
+    # are kept separate from it — a merge-checks wait is bounded by how long
+    # this repo's CI takes, not by how long an agent run takes, and the two
+    # have no reason to move together.
+    batch_check_timeout_s: float = 900.0
+    batch_poll_interval_s: float = 15.0
 
 
 class ReviewConfig(BaseModel):
