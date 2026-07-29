@@ -1395,6 +1395,20 @@ def test_process_cwd_none_on_unparsable_output(monkeypatch: pytest.MonkeyPatch) 
     assert runs._process_cwd(1234) is None
 
 
+def test_process_cwd_none_on_readlink_permission_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """lsof exits 0 but can't resolve /proc/<pid>/cwd (e.g. different uid, hidepid
+    mount): the n-line carries error text instead of a path, and that must not be
+    trusted as a real cwd (issue #279 fail-open contract)."""
+    monkeypatch.setattr(
+        runs,
+        "run",
+        lambda cmd, **kwargs: _lsof_result(
+            stdout="p1\nn/proc/1/cwd (readlink: Permission denied)\n"
+        ),
+    )
+    assert runs._process_cwd(1) is None
+
+
 def test_find_stray_processes_reports_orphan_not_in_live(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -392,6 +392,13 @@ def _process_cwd(pid: int) -> Path | None:
     permission error, output that doesn't parse — never raises: this is a
     best-effort probe, and `find_stray_processes` treats None as "unknown",
     not as "no orphan here".
+
+    `lsof` can exit 0 while still failing to resolve the cwd (e.g. a
+    permission error reading `/proc/<pid>/cwd` under a different uid, or a
+    hardened `hidepid` mount): the `n`-line is then `n<path> (readlink:
+    <reason>)` instead of a clean path. That embedded `(readlink: ...)`
+    marker never appears in a real path, so any line containing it is
+    treated as unresolved rather than trusted as a cwd.
     """
     proc = run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], check=False, timeout=10.0)
     if proc.returncode != 0:
@@ -399,7 +406,8 @@ def _process_cwd(pid: int) -> Path | None:
     path: Path | None = None
     for line in proc.stdout.splitlines():
         if line.startswith("n") and len(line) > 1:
-            path = Path(line[1:])
+            candidate = line[1:]
+            path = None if "(readlink:" in candidate else Path(candidate)
     return path
 
 
