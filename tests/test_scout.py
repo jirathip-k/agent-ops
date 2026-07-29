@@ -45,6 +45,30 @@ def test_uses_last_marker_and_ignores_junk() -> None:
     assert [(r.number, r.reason) for r in results] == [(2, "final")]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SCOUT RESULTS:\n#41: missing the dash\n",
+        "SCOUT RESULTS:\n#41\n",
+    ],
+)
+def test_only_unparseable_attempted_lines_is_none(text: str) -> None:
+    assert parse_scout(text) is None
+
+
+def test_mixed_valid_and_malformed_lines_raises() -> None:
+    text = "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n"
+    with pytest.raises(ValueError, match="#42"):
+        parse_scout(text)
+
+
+def test_unrelated_trailing_prose_does_not_raise() -> None:
+    text = "SCOUT RESULTS:\n#41 — a valid one\nFiled the above.\n"
+    results = parse_scout(text)
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
 class _FakeRuntime:
     name = "fake"
 
@@ -175,6 +199,29 @@ def test_run_scout_logs_a_single_label_failure_without_aborting(
 
     assert [r.number for r in results] == [41]
     assert any("backlog" in line and "HTTP 403: no scope" in line for line in logged)
+
+
+def test_run_scout_raises_runtime_error_on_a_mixed_unparseable_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block mixing a valid result with a malformed `#N`-shaped line makes
+    `parse_scout` raise `ValueError` — `run_scout` must wrap that into a
+    `RuntimeError` so `cli.py`'s `except (CommandError, RuntimeError)` still
+    catches it, instead of letting a bare `ValueError` escape uncaught."""
+    _stub_scout_run(
+        monkeypatch, tmp_path, "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n"
+    )
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        return github.LabelSync(created=list(labels), updated=[], unchanged=[], failed=[])
+
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+
+    with pytest.raises(RuntimeError, match="unparseable"):
+        run_scout(tmp_path, log=lambda _msg: None)
 
 
 def test_focus_reaches_the_prompt_with_its_grounding_reminder() -> None:
