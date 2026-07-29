@@ -12,7 +12,10 @@ none of the prior agents' reasoning — the diff is the source of truth.
 1. Root cause vs. symptom: does the diff fix the actual problem described in
    the issue?
 2. Code quality: readability, consistency with codebase conventions, no scope
-   creep beyond the issue.
+   creep beyond the issue. Flag a test that asserts an executable artifact's
+   text (a jq/YAML filter, shell `run:` block, or config value consumed by
+   code) without running it — that is not a guard. A presence check on a
+   non-executable prompt placeholder is still a valid guard.
 3. Security: injection risks, authz changes, secrets exposure, unsafe input
    handling.
 4. Blast radius: breaking changes, API contract changes, performance concerns.

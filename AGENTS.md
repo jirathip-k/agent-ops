@@ -32,6 +32,11 @@ triage pipeline. This repo manages itself with its own tooling.
 - Subprocesses go through `utils.run()` — never raw `subprocess.run`
   (exception: runtime adapters may use `Popen` for streaming output)
 - Commit style: `component: imperative summary` (e.g. `cli: add plan command`)
+- A test is a guard only if it fails on the tree without the change it
+  covers; if the artifact under test is executable (jq/YAML filter, shell
+  `run:` block, prompt placeholder consumed by code, config value read by
+  code), the test must execute it against fixture data — asserting the
+  artifact's text is not a guard
 
 ## Commands
 
