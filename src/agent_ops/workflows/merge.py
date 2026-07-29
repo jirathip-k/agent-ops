@@ -166,6 +166,33 @@ def _runs_in_flight(project_root: Path, log: Callable[[str], None]) -> list[Run]
     return None if not trustworthy else []
 
 
+# Substrings (matched case-insensitively against a failed `gh pr merge`'s
+# combined stdout+stderr) that identify GitHub's "the branch isn't actually
+# up to date" rejection specifically — the one failure mode `run_merge_batch`
+# retries (issue #277), as distinct from every other reason `gh pr merge` can
+# fail (permissions, required review, etc.), which must keep crashing exactly
+# as before.
+_STALE_BRANCH_MARKERS = (
+    "not up to date with the base branch",
+    "not up-to-date with the base branch",
+)
+
+
+class MergeNotUpToDateError(CommandError):
+    """`gh pr merge` rejected the merge because the branch isn't up to date.
+
+    Raised instead of a plain `CommandError` only when the failure message
+    matches `_STALE_BRANCH_MARKERS` (issue #277): GitHub's `mergeStateStatus`
+    is eventually consistent, so a PR read as `CLEAN` right after an earlier
+    batch merge can still be rejected by the authoritative `gh pr merge` call
+    a moment later. A subclass of `CommandError`, so any caller not
+    specifically catching this (a lone `agent merge`, or anything calling
+    `run_merge` directly) behaves exactly as it did before — the same
+    uncaught crash. Only `run_merge_batch` catches it, to re-fetch the PR
+    fresh and retry the merge once after forcing an update.
+    """
+
+
 def _fetch_pr(project_root: Path, pr_number: int) -> dict[str, Any]:
     proc = run(
         [
@@ -296,7 +323,25 @@ def run_merge(
     # no --delete-branch: it also deletes the LOCAL branch, which fails (and
     # taints the exit code) while the task worktree still holds it. Delete
     # only the remote branch; locals are cleaned with the worktree.
-    run(["gh", "pr", "merge", str(pr_number), "--squash"], cwd=project_root)
+    #
+    # check=False here (issue #277): a rejection because the branch isn't
+    # actually up to date (GitHub's mergeStateStatus is eventually
+    # consistent, so a batch's next PR can read stale CLEAN) needs to be
+    # distinguishable from every other merge failure, so `run_merge_batch`
+    # can retry only that one reason. Every other non-zero exit raises the
+    # same `CommandError`, with a byte-identical message to what `check=True`
+    # would have raised — a lone `agent merge` crashes exactly as before.
+    merge_cmd = ["gh", "pr", "merge", str(pr_number), "--squash"]
+    merge_proc = run(merge_cmd, cwd=project_root, check=False)
+    if merge_proc.returncode != 0:
+        message = (
+            f"`{' '.join(merge_cmd)}` failed with exit code {merge_proc.returncode}:\n"
+            f"{merge_proc.stderr.strip() or merge_proc.stdout.strip()}"
+        )
+        combined = (merge_proc.stdout + merge_proc.stderr).lower()
+        if any(marker in combined for marker in _STALE_BRANCH_MARKERS):
+            raise MergeNotUpToDateError(message)
+        raise CommandError(message)
     run(
         ["git", "push", "origin", "--delete", pr["headRefName"]],
         cwd=project_root,
@@ -379,6 +424,7 @@ def _update_and_wait(
     timeout_s: float,
     interval_s: float,
     log: Callable[[str], None],
+    force_update: bool = False,
 ) -> Literal["clean", "dirty", "failing", "timeout", "none"]:
     """Bring PR #`pr_number` up to date with its base, then wait for its
     required checks — the update→wait half of `agent merge --batch`.
@@ -388,7 +434,8 @@ def _update_and_wait(
     update-branch endpoint can only fast-forward-merge a branch that is
     cleanly behind; asking it to do anything with a conflicted branch is not
     a thing this command is ever allowed to attempt (a human resolves
-    conflicts, never this batch).
+    conflicts, never this batch). This check runs first and unconditionally —
+    `force_update=True` never skips or weakens it.
 
     `"BEHIND"` runs `gh pr update-branch` once, then re-fetches
     `mergeStateStatus` fresh on every poll (never caching the rollup this
@@ -396,14 +443,28 @@ def _update_and_wait(
     elapses. A PR that turns out DIRTY only once the update lands (the
     update itself surfaces a conflict) is caught here too and refused the
     same way.
+
+    `force_update=True` (issue #277) runs that same update+poll even when
+    `pr["mergeStateStatus"]` reads `CLEAN` — used for the one-shot retry
+    after `gh pr merge` rejects a batched PR as not up to date despite a
+    freshly-fetched `CLEAN` read: GitHub's `mergeStateStatus` is eventually
+    consistent, so the authoritative `gh pr merge` rejection can lag behind
+    what the rollup reports. `pr` must be a *fresh* re-fetch in that case,
+    never the possibly-stale dict from before the rejection.
     """
     status = pr.get("mergeStateStatus")
     if status == "DIRTY":
         log(f"PR #{pr_number} is DIRTY (merge conflicts) — not updating, not merging")
         return "dirty"
 
-    if status == "BEHIND":
-        log(f"PR #{pr_number} is behind its base — running gh pr update-branch")
+    if status == "BEHIND" or force_update:
+        if status == "BEHIND":
+            log(f"PR #{pr_number} is behind its base — running gh pr update-branch")
+        else:
+            log(
+                f"PR #{pr_number}: forcing gh pr update-branch after a stale "
+                "mergeStateStatus read caused a merge rejection"
+            )
         run(
             ["gh", "pr", "update-branch", str(pr_number)],
             cwd=project_root,
@@ -433,6 +494,34 @@ def _update_and_wait(
     if verdict in ("failing", "timeout"):
         return verdict
     return "clean"
+
+
+def _stop_batch_if_terminal(
+    verdict: Literal["clean", "dirty", "failing", "timeout", "none"],
+    pr_number: int,
+    not_attempted: str,
+    log: Callable[[str], None],
+) -> bool:
+    """Log why the batch must stop for a terminal `_update_and_wait` verdict.
+
+    "clean"/"none" are not terminal — they return `False` so the caller
+    proceeds to merge. Factored out (issue #277) so the retry path added to
+    `run_merge_batch` for a stale-mergeStateStatus merge rejection routes
+    through the exact same dirty/failing/timeout handling as the primary
+    pass, rather than a second copy of these branches that could drift from
+    it.
+    """
+    if verdict == "dirty":
+        log(f"PR #{pr_number} has merge conflicts — batch stopped, nothing auto-resolved")
+    elif verdict == "failing":
+        log(f"PR #{pr_number}'s required checks are failing — batch stopped")
+    elif verdict == "timeout":
+        log(f"PR #{pr_number}'s required checks did not settle in time — batch stopped")
+    else:
+        return False
+    if not_attempted:
+        log(not_attempted)
+    return True
 
 
 def run_merge_batch(
@@ -474,16 +563,30 @@ def run_merge_batch(
     `agent merge`), so the batch reports that refusal and stops before
     merging anything — there is no second copy of that guard to keep in sync
     with the original.
+
+    `mergeStateStatus` is eventually consistent (issue #277): the PR just
+    after one this batch merged can be fetched fresh and still read stale
+    `CLEAN`, even though GitHub's authoritative merge check will reject it as
+    not actually up to date. `run_merge` raises `MergeNotUpToDateError` for
+    exactly that rejection; this function catches it (once per PR) and
+    re-fetches the PR fresh, forces an update via
+    `_update_and_wait(force_update=True)`, and retries the merge once. A
+    second `MergeNotUpToDateError` for the same PR stops the batch instead of
+    looping — bounded to exactly one retry. Any other `CommandError` from
+    `run_merge` (a different failure reason) is not caught here and
+    propagates uncaught, exactly as before this retry existed.
     """
     config = load_project_config(project_root)
     for i, pr_number in enumerate(pr_numbers):
         remaining = pr_numbers[i + 1 :]
-        not_attempted = f"not attempted: {', '.join(f'#{n}' for n in remaining)}"
+        not_attempted = (
+            f"not attempted: {', '.join(f'#{n}' for n in remaining)}" if remaining else ""
+        )
 
         pr = _fetch_pr(project_root, pr_number)
         if pr["state"] != "OPEN":
             log(f"PR #{pr_number} is {pr['state']} — nothing to merge, batch stopped")
-            if remaining:
+            if not_attempted:
                 log(not_attempted)
             return False
 
@@ -495,28 +598,49 @@ def run_merge_batch(
             interval_s=config.merge.batch_poll_interval_s,
             log=log,
         )
-        if verdict == "dirty":
-            log(f"PR #{pr_number} has merge conflicts — batch stopped, nothing auto-resolved")
-            if remaining:
-                log(not_attempted)
-            return False
-        if verdict == "failing":
-            log(f"PR #{pr_number}'s required checks are failing — batch stopped")
-            if remaining:
-                log(not_attempted)
-            return False
-        if verdict == "timeout":
-            log(f"PR #{pr_number}'s required checks did not settle in time — batch stopped")
-            if remaining:
-                log(not_attempted)
+        if _stop_batch_if_terminal(verdict, pr_number, not_attempted, log):
             return False
 
-        ok = run_merge(
-            project_root, pr_number, override=override, force=force, confirm=confirm, log=log
-        )
+        try:
+            ok = run_merge(
+                project_root, pr_number, override=override, force=force, confirm=confirm, log=log
+            )
+        except MergeNotUpToDateError:
+            log(
+                f"PR #{pr_number}: gh pr merge rejected it as not up to date with the base — "
+                "mergeStateStatus was read stale before this retry; re-fetching the PR fresh, "
+                "forcing gh pr update-branch, and retrying the merge once"
+            )
+            fresh_pr = _fetch_pr(project_root, pr_number)
+            retry_verdict = _update_and_wait(
+                project_root,
+                pr_number,
+                fresh_pr,
+                timeout_s=config.merge.batch_check_timeout_s,
+                interval_s=config.merge.batch_poll_interval_s,
+                log=log,
+                force_update=True,
+            )
+            if _stop_batch_if_terminal(retry_verdict, pr_number, not_attempted, log):
+                return False
+            try:
+                ok = run_merge(
+                    project_root,
+                    pr_number,
+                    override=override,
+                    force=force,
+                    confirm=confirm,
+                    log=log,
+                )
+            except MergeNotUpToDateError:
+                log(f"PR #{pr_number} failed to merge twice for the same reason — batch stopped")
+                if not_attempted:
+                    log(not_attempted)
+                return False
+
         if not ok:
             log(f"PR #{pr_number} was not merged — batch stopped")
-            if remaining:
+            if not_attempted:
                 log(not_attempted)
             return False
         log(f"batch: merged {i + 1}/{len(pr_numbers)} ({', '.join(f'#{n}' for n in pr_numbers)})")
