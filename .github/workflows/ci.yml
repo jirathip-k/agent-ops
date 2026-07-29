@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Required for GitHub's merge queue: the queue builds a temporary merge
+  # group ref and waits for the required `checks` context on *that* ref, not
+  # on the PR head. Without this trigger the check never reports, every
+  # queued PR times out and is ejected, and the queue is worse than no queue.
+  merge_group:
 
 jobs:
   checks:
