@@ -194,3 +194,33 @@ def test_evolve_dry_run_gather_command_error_exits_1(
 
     assert result.exit_code == 1
     assert "did not finish within 120s" in result.stderr
+
+
+def test_evolve_dry_run_survives_unreadable_workflows_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#242 regression: an unreadable `.github/workflows` must not crash `agent
+    evolve --dry-run` (real `gather`/`caller_workflows`, nothing mocked out) —
+    the `gather()` call site that checks for a "no evidence source" note is a
+    second, previously-unguarded caller of `stubs.caller_workflows` besides
+    `_fetch_ci_runs`.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self: Path) -> object:
+        if self == workflows:
+            raise PermissionError(13, "Permission denied", str(workflows))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+
+    # "triage" has no other evidence source (not implement/pr, not in
+    # LANE_ESCALATION_HEADERS), so it's the lane that reaches the previously
+    # unguarded `caller_workflows` call in `gather`.
+    result = runner.invoke(app, ["evolve", "triage", "--dry-run", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert "no evidence source" in result.output
