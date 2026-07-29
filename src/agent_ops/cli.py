@@ -49,7 +49,13 @@ from agent_ops.workflows import (
     run_spawn,
 )
 from agent_ops.workflows.implement import make_plan, task_identifiers
-from agent_ops.workflows.merge import run_merge, run_merge_check, run_promote
+from agent_ops.workflows.merge import (
+    batch_candidates,
+    run_merge,
+    run_merge_batch,
+    run_merge_check,
+    run_promote,
+)
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES, ReviewOutcome
 from agent_ops.workflows.spawn import REPORT_STATES
 from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
@@ -1069,7 +1075,10 @@ def distill(project: ProjectOpt = Path(".")) -> None:
 
 @app.command()
 def merge(
-    pr: Annotated[int, typer.Argument(help="PR number to merge into the working branch")],
+    pr: Annotated[
+        list[int] | None,
+        typer.Argument(help="PR number(s) to merge into the working branch"),
+    ] = None,
     project: ProjectOpt = Path("."),
     override: Annotated[
         bool, typer.Option("--override", help="Human override: merge despite rule violations")
@@ -1082,20 +1091,75 @@ def merge(
         bool,
         typer.Option("--force", help="Merge despite runs in flight elsewhere, without confirming"),
     ] = False,
+    batch: Annotated[
+        bool,
+        typer.Option(
+            "--batch",
+            help="Update, wait for required checks, then merge each PR in order "
+            "(no merge queue here)",
+        ),
+    ] = False,
+    all_clean: Annotated[
+        bool,
+        typer.Option(
+            "--all-clean",
+            help="With --batch: batch every open PR with no merge-rule violations",
+        ),
+    ] = False,
 ) -> None:
-    """Squash-merge a PR into the working branch (staging) if all merge rules pass."""
+    """Squash-merge a PR into the working branch (staging) if all merge rules pass.
+
+    `--batch <PR>...` (or `--batch --all-clean`) updates, waits for required
+    checks, then merges each PR in order instead of one at a time — the
+    stand-in for a GitHub merge queue on a repo where none is available: with
+    `required_status_checks.strict=true`, every merge marks every other open
+    PR BEHIND, so merging a round one `agent merge` at a time re-stales the
+    rest on every single merge.
+    """
     if check and override:
         _err("--check and --override are mutually exclusive")
         raise typer.Exit(1)
     if check and force:
         _err("--check and --force are mutually exclusive")
         raise typer.Exit(1)
+    if check and batch:
+        _err("--check and --batch are mutually exclusive")
+        raise typer.Exit(1)
+    if all_clean and not batch:
+        _err("--all-clean requires --batch")
+        raise typer.Exit(1)
+    if all_clean and pr:
+        _err("--all-clean does not take explicit PR numbers")
+        raise typer.Exit(1)
+    if batch and not all_clean and not pr:
+        _err("--batch needs at least one PR number, or --all-clean")
+        raise typer.Exit(1)
+    if not batch and (not pr or len(pr) != 1):
+        _err("specify exactly one PR number, or pass --batch for more than one")
+        raise typer.Exit(1)
+
+    root = project.resolve()
     try:
         if check:
-            violations = run_merge_check(project.resolve(), pr)
+            assert pr is not None  # guarded above: exactly one, no --batch
+            violations = run_merge_check(root, pr[0])
             raise typer.Exit(0 if not violations else 1)
+
         confirm = typer.confirm if sys.stdin.isatty() else None
-        ok = run_merge(project.resolve(), pr, override=override, force=force, confirm=confirm)
+
+        if batch:
+            if all_clean:
+                pr_numbers = batch_candidates(root)
+                if not pr_numbers:
+                    typer.echo("no clean open PRs to batch")
+                    raise typer.Exit(0)
+            else:
+                assert pr is not None  # guarded above
+                pr_numbers = pr
+            ok = run_merge_batch(root, pr_numbers, override=override, force=force, confirm=confirm)
+        else:
+            assert pr is not None  # guarded above: exactly one, no --batch
+            ok = run_merge(root, pr[0], override=override, force=force, confirm=confirm)
     except CommandError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
