@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -1077,16 +1078,24 @@ def merge(
         bool,
         typer.Option("--check", help="Report merge-rule violations only; never merge"),
     ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Merge despite runs in flight elsewhere, without confirming"),
+    ] = False,
 ) -> None:
     """Squash-merge a PR into the working branch (staging) if all merge rules pass."""
     if check and override:
         _err("--check and --override are mutually exclusive")
         raise typer.Exit(1)
+    if check and force:
+        _err("--check and --force are mutually exclusive")
+        raise typer.Exit(1)
     try:
         if check:
             violations = run_merge_check(project.resolve(), pr)
             raise typer.Exit(0 if not violations else 1)
-        ok = run_merge(project.resolve(), pr, override=override)
+        confirm = typer.confirm if sys.stdin.isatty() else None
+        ok = run_merge(project.resolve(), pr, override=override, force=force, confirm=confirm)
     except CommandError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc

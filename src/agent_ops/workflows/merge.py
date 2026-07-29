@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops.config import ProjectConfig, load_project_config
+from agent_ops.runs import Run, discover_runs, issue_from_branch
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 
 
@@ -134,6 +135,35 @@ def evaluate_merge(pr: dict[str, Any], config: ProjectConfig) -> list[str]:
     return violations
 
 
+def _runs_in_flight(project_root: Path, log: Callable[[str], None]) -> list[Run] | None:
+    """Locally-running agent runs, or `None` if that can't be determined.
+
+    `None` (unknown) is distinct from `[]` (checked, nothing running) — same
+    fail-open contract as `status.local_deployed_lanes` and
+    `stubs.caller_workflows`: a caller must never read "could not tell" as
+    "nothing running". `discover_runs` degrades most of its own signals
+    internally and reports that via its `trustworthy` flag, but leaves
+    `.agent-runs/`'s own directory listing unguarded, so an unreadable
+    registry is caught here too.
+    """
+    try:
+        found, trustworthy = discover_runs(project_root, log=log)
+    except (CommandError, OSError) as exc:
+        log(f"warning: could not read local run state ({exc}) — proceeding")
+        return None
+    # A degraded poll only ever under-reports runs (misreports them as
+    # stopped), never over-reports them (see runs.discover_runs) — so a
+    # `running` row is positive, non-degradable evidence regardless of
+    # `trustworthy`, and discarding it here would throw away exactly the
+    # signal this check exists to act on. Only the absence of a `running`
+    # row is ambiguous under `trustworthy=False`: that's "unknown", not
+    # "nothing running".
+    running = [r for r in found if r.state == "running"]
+    if running:
+        return running
+    return None if not trustworthy else []
+
+
 def _fetch_pr(project_root: Path, pr_number: int) -> dict[str, Any]:
     proc = run(
         [
@@ -187,6 +217,8 @@ def run_merge(
     pr_number: int,
     *,
     override: bool = False,
+    force: bool = False,
+    confirm: Callable[[str], bool] | None = None,
     log: Callable[[str], None] = print,
 ) -> bool:
     """Squash-merge a PR into the working branch if every rule passes.
@@ -195,6 +227,18 @@ def run_merge(
     diff within caps, no blocked paths, no blocked label. `override=True`
     merges anyway but logs every overridden rule — that is a human decision,
     never automate it.
+
+    Runs elsewhere in the same repo are checked just before the merge itself
+    (issue #258): merging now stales every one of their bases, which review
+    only catches after the implementer already ran. The PR's own run (its
+    headRefName's issue) is excluded from that count — it is the run that
+    just produced this PR, not one this merge would stale, and it may still
+    show as `running` if its process hasn't fully exited yet. `force=True`
+    skips the prompt; otherwise `confirm` (when given, e.g. an interactive
+    human) is asked, and a non-interactive caller (`confirm=None`) is refused
+    with instructions to pass `--force`. This is advisory only — it never
+    touches `evaluate_merge`'s violations, and in CI it is a no-op because no
+    local run signals exist.
     """
     config = load_project_config(project_root)
     pr = _fetch_pr(project_root, pr_number)
@@ -220,6 +264,29 @@ def run_merge(
             log(f"PR #{pr_number} NOT merged. Re-run with --override to force (human call).")
             return False
         log(f"OVERRIDE: merging despite {len(violations)} rule violation(s)")
+
+    if not force:
+        own = issue_from_branch(pr["headRefName"])
+        in_flight = _runs_in_flight(project_root, log)
+        if in_flight:
+            in_flight = [r for r in in_flight if r.issue != own]
+        if in_flight:
+            log(
+                f"{len(in_flight)} run(s) in flight — merging now stales each one's base, "
+                "costing it a full cycle:"
+            )
+            for r in in_flight:
+                log(f"  #{r.issue}  {r.detail}")
+            log(
+                "the cost is per merge, not per PR — batch any other PRs you're about to "
+                "merge into this same round to pay it once"
+            )
+            if confirm is None:
+                log(f"PR #{pr_number} NOT merged. Re-run with --force to merge anyway.")
+                return False
+            if not confirm(f"merge PR #{pr_number} anyway?"):
+                log(f"PR #{pr_number} NOT merged.")
+                return False
 
     # no --delete-branch: it also deletes the LOCAL branch, which fails (and
     # taints the exit code) while the task worktree still holds it. Delete
