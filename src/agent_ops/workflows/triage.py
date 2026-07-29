@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_ops import claims, github, messages, worktree
 from agent_ops.config import load_project_config
@@ -66,6 +67,34 @@ GATE_LABELS: dict[str, Label] = {
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s+(agent-ready|needs-human|backlog)\s*[—-]+\s*(.+)$")
 
+# Mirrors the pinning prefix-check in workflows/implement.py's `_is_pinned`.
+_SPEC_PLAN_PREFIXES = ("## Agent spec", "## Agent plan")
+# Bounds prompt cost (#267): only the newest spec/plan comment reaches the
+# prompt, and only up to this many characters of it.
+_SPEC_PLAN_COMMENT_MAX_CHARS = 4000
+
+
+def latest_spec_or_plan_comment(issue: dict[str, Any]) -> str | None:
+    """The newest `## Agent spec` / `## Agent plan` comment on `issue`, if any.
+
+    Triage/groom used to classify from title+body alone, which re-judged (and
+    could strip `agent-ready` from) an issue whose body is thin precisely
+    because its substance lives in a spec/plan comment instead (#267). Only
+    the single newest match reaches the caller, truncated -- not the full
+    thread -- to bound prompt cost.
+
+    Comments are untrusted data like any other GitHub text
+    (docs/trust-model.md): this feeds the readiness *assessment* only. It
+    cannot assert `agent-ready` into existence by merely claiming it, and it
+    can never authorize a danger-zone change on its own.
+    """
+    comments = issue.get("comments") or []
+    for comment in reversed(comments):
+        body = (comment.get("body") or "").lstrip()
+        if body.startswith(_SPEC_PLAN_PREFIXES):
+            return body[:_SPEC_PLAN_COMMENT_MAX_CHARS]
+    return None
+
 
 @dataclass(frozen=True)
 class TriageResult:
@@ -110,7 +139,7 @@ def run_triage(
             "--limit",
             "50",
             "--json",
-            "number,title,body,labels",
+            "number,title,body,labels,comments",
         ],
         cwd=project_root,
     )
@@ -131,9 +160,14 @@ def run_triage(
         return []
     log(f"triaging {len(issues)} issue(s)")
 
-    issues_text = "\n\n".join(
-        f"### #{i['number']}: {i['title']}\n{i.get('body') or '(no description)'}" for i in issues
-    )
+    def _issue_block(i: dict[str, Any]) -> str:
+        spec = latest_spec_or_plan_comment(i)
+        return (
+            f"### #{i['number']}: {i['title']}\n{i.get('body') or '(no description)'}\n\n"
+            f"### Spec/plan on file\n{spec if spec is not None else '(none)'}"
+        )
+
+    issues_text = "\n\n".join(_issue_block(i) for i in issues)
 
     # Classify against the WORKING branch (staging), not the local checkout —
     # the checkout may sit on a stale main while merged work lives on staging.

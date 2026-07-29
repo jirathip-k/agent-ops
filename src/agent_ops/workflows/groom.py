@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_ops import github, status, worktree
 from agent_ops.config import load_project_config
@@ -12,7 +13,12 @@ from agent_ops.fallback import run_with_fallback
 from agent_ops.prompts import render_task
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
-from agent_ops.workflows.triage import BUCKET_LABELS, GATE_LABELS, LABEL_COLORS
+from agent_ops.workflows.triage import (
+    BUCKET_LABELS,
+    GATE_LABELS,
+    LABEL_COLORS,
+    latest_spec_or_plan_comment,
+)
 
 # Marker title for the issue groom's own-workflow check opens — searched for
 # on every run so a repeat run updates nothing new rather than filing a
@@ -150,7 +156,7 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
             "--limit",
             "100",
             "--json",
-            "number,title,body,labels,updatedAt",
+            "number,title,body,labels,updatedAt,comments",
         ],
         cwd=project_root,
     )
@@ -160,14 +166,23 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
         return []
     log(f"grooming {len(issues)} issue(s)")
 
-    issues_text = "\n\n".join(
-        f"### #{i['number']}: {i['title']}\n"
-        f"labels: {', '.join(lbl['name'] for lbl in i.get('labels', [])) or '(none)'} | "
-        f"updated: {i['updatedAt']}\n"
-        f"{i.get('body') or '(no description)'}"
-        for i in issues
-    )
+    def _issue_block(i: dict[str, Any]) -> str:
+        spec = latest_spec_or_plan_comment(i)
+        return (
+            f"### #{i['number']}: {i['title']}\n"
+            f"labels: {', '.join(lbl['name'] for lbl in i.get('labels', [])) or '(none)'} | "
+            f"updated: {i['updatedAt']}\n"
+            f"{i.get('body') or '(no description)'}\n\n"
+            f"### Spec/plan on file\n{spec if spec is not None else '(none)'}"
+        )
+
+    issues_text = "\n\n".join(_issue_block(i) for i in issues)
     labels_by_number = {i["number"]: {lbl["name"] for lbl in i.get("labels", [])} for i in issues}
+    # Fed to the narrower-removal check below: a verdict must not strip an
+    # existing `agent-ready` on body text alone (#267) -- it needs the spec/
+    # plan comment that presumably justified `agent-ready` in the first place
+    # to actually judge it against.
+    spec_comment_by_number = {i["number"]: latest_spec_or_plan_comment(i) for i in issues}
 
     # Groom against the WORKING branch — merged-but-unpromoted fixes live there.
     run(
@@ -241,8 +256,24 @@ def run_groom(project_root: Path, *, log: Callable[[str], None] = print) -> list
             continue
         edit = ["gh", "issue", "edit", str(r.number), "--add-label", r.verdict]
         superseded = {"agent-ready"} if r.verdict in GATE_VERDICTS else BUCKET_LABELS
-        for stale in (superseded - {r.verdict}) & current:
-            edit += ["--remove-label", stale]
+        stale = (superseded - {r.verdict}) & current
+        # Refuse to strip an existing `agent-ready` on this verdict alone when
+        # there is no spec/plan comment on file for it to have been judged
+        # against (#267) -- the model classifying issues never sees existing
+        # labels (see the comment on BUCKET_LABELS above), so a body-only
+        # verdict is not grounds to walk back a readiness call that may have
+        # been made from a spec/plan comment the model here can't see either.
+        # Any OTHER stale bucket (backlog, needs-human) still clears normally;
+        # only the agent-ready-removal path is gated.
+        if "agent-ready" in stale and spec_comment_by_number.get(r.number) is None:
+            stale = stale - {"agent-ready"}
+            log(
+                f"#{r.number} keeping agent-ready — verdict {r.verdict!r} would have "
+                "stripped it, but no spec/plan comment is on file to judge it against; "
+                "a human should look"
+            )
+        for label in stale:
+            edit += ["--remove-label", label]
         run(edit, cwd=project_root)
         if r.verdict not in current:
             run(
