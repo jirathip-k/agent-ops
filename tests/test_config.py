@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pydantic
 import pytest
 
 from agent_ops.config import (
@@ -364,3 +365,54 @@ def test_tui_theme_defaults_to_catppuccin_macchiato(tmp_path: Path) -> None:
 def test_tui_theme_project_override_wins(tmp_path: Path) -> None:
     _write_config(tmp_path, "tui:\n  theme: nord\n")
     assert load_project_config(tmp_path).tui.theme == "nord"
+
+
+def test_tui_chat_sink_defaults_to_none(tmp_path: Path) -> None:
+    """None means the TUI's `c` auto-probes the sink table (#249) instead of
+    a fixed transport — the same "unset means detect" shape as `runtime.name`
+    elsewhere in this file."""
+    assert load_project_config(tmp_path).tui.chat_sink is None
+    _write_config(tmp_path, "base_branch: develop\n")
+    assert load_project_config(tmp_path).tui.chat_sink is None
+
+
+def test_tui_chat_sink_loads_a_free_form_command(tmp_path: Path) -> None:
+    _write_config(tmp_path, 'tui:\n  chat_sink: "mymux send --pane right -- {text}"\n')
+    assert load_project_config(tmp_path).tui.chat_sink == "mymux send --pane right -- {text}"
+
+
+def test_tui_chat_sink_without_placeholder_fails_at_load(tmp_path: Path) -> None:
+    """A template with no `{text}` would reach `CommandSink.send` with nothing
+    to substitute — refused here, naming `tui.chat_sink`, rather than a sink
+    that silently sends the same literal command on every issue (#249)."""
+    _write_config(tmp_path, 'tui:\n  chat_sink: "mymux send --pane right"\n')
+    with pytest.raises(pydantic.ValidationError, match="tui.chat_sink"):
+        load_project_config(tmp_path)
+
+
+def test_tui_chat_sink_blank_fails_at_load(tmp_path: Path) -> None:
+    """A whitespace-only template would `shlex.split` to `[]`, and `run([])`
+    breaks the sink's never-raise contract — refused here instead."""
+    _write_config(tmp_path, 'tui:\n  chat_sink: "   "\n')
+    with pytest.raises(pydantic.ValidationError, match="tui.chat_sink"):
+        load_project_config(tmp_path)
+
+
+def test_tui_chat_sink_with_unbalanced_quotes_fails_at_load(tmp_path: Path) -> None:
+    """#249 review finding: the validator must `shlex.split` the template
+    itself, not just check for the `{text}` substring — a template
+    `shlex.split` chokes on (an unbalanced quote here) would otherwise reach
+    `CommandSink.send` and raise there instead of failing at config load."""
+    _write_config(tmp_path, "tui:\n  chat_sink: 'mymux send --pane \"right -- {text}'\n")
+    with pytest.raises(pydantic.ValidationError, match="tui.chat_sink"):
+        load_project_config(tmp_path)
+
+
+def test_tui_chat_sink_requires_text_as_its_own_token(tmp_path: Path) -> None:
+    """`{text}` must be a standalone argv token, not merely a substring of
+    one — `--data=foo{text}bar` has no single argv element `send()` could
+    substitute the whole payload into, so a plain substring check would let
+    a broken template through (#249 review finding)."""
+    _write_config(tmp_path, 'tui:\n  chat_sink: "mymux --data=foo{text}bar"\n')
+    with pytest.raises(pydantic.ValidationError, match="tui.chat_sink"):
+        load_project_config(tmp_path)

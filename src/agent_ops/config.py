@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agent_ops.utils import PLATFORM_ROOT
 
@@ -209,18 +210,6 @@ class DistillConfig(BaseModel):
     )
 
 
-class TuiConfig(BaseModel):
-    """The pipeline TUI's own settings (issue #248).
-
-    `theme` is a bare string here, validated against `textual.theme
-    .BUILTIN_THEMES` by the TUI itself (`agent_ops.tui.run_tui`) rather than
-    here — importing `textual` from this module would pull it into every
-    command's import path, not just `agent tui`.
-    """
-
-    theme: str = "catppuccin-macchiato"
-
-
 class ScoutConfig(BaseModel):
     """What this repo wants mined, on top of scout's standard signal list.
 
@@ -234,6 +223,53 @@ class ScoutConfig(BaseModel):
     """
 
     focus: str = ""
+
+
+class TuiConfig(BaseModel):
+    """The pipeline TUI's own settings (issues #248 and #249).
+
+    `theme` is a bare string, validated against `textual.theme.BUILTIN_THEMES`
+    by the TUI itself (`agent_ops.tui.run_tui`) rather than here — importing
+    `textual` from this module would pull it into every command's import path,
+    not just `agent tui`.
+
+    `chat_sink` is where `c` (the chat handoff) sends the selected issue.
+
+    `None` means auto-probe the sink table (tmux/wezterm/kitty/Orca, falling
+    back to the file — see `agent_ops.tui.sinks`; zellij is deliberately not
+    auto-probed, see `sinks.pick`, but reachable through this field). A
+    free-form command with a `{text}` placeholder is also accepted, for a
+    multiplexer not in the auto-probe table — `shlex.split` on it, `{text}`
+    substituted as one argv element, never through a shell (issue #249).
+
+    Must `shlex.split` cleanly and contain `{text}` as its own token: a
+    template that doesn't parse (unbalanced quotes) or has no `{text}` token
+    would reach `CommandSink.send` with nothing safe to substitute, and
+    `shlex.split` on a whitespace-only template returns `[]`, calling
+    `run([])` — all three break the sink's "never raise" contract, so this is
+    refused at config load instead, where the broken key can be named in the
+    error. `CommandSink.send` re-parses with the same `shlex.split` call and
+    catches `ValueError` there too, so the contract holds even for a template
+    that reaches it some other way.
+    """
+
+    theme: str = "catppuccin-macchiato"
+    chat_sink: str | None = None
+
+    @field_validator("chat_sink")
+    @classmethod
+    def _chat_sink_has_placeholder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            tokens = shlex.split(value)
+        except ValueError as exc:
+            raise ValueError(f"tui.chat_sink is not a valid command line: {exc}") from exc
+        if "{text}" not in tokens:
+            raise ValueError(
+                f"tui.chat_sink must be non-blank and contain a {{text}} token, got {value!r}"
+            )
+        return value
 
 
 class ProjectConfig(BaseModel):

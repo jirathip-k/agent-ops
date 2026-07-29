@@ -20,7 +20,7 @@ from textual.widgets import Label
 
 from agent_ops import github, registry, runs, status
 from agent_ops.tui import app as tui_app
-from agent_ops.tui import data
+from agent_ops.tui import data, sinks
 from agent_ops.tui.app import (
     CommandBar,
     IssueDetailPane,
@@ -883,6 +883,54 @@ def test_chat_with_nothing_selected_does_not_crash_or_write(
             app.action_chat()
             await pilot.pause()
             assert "no issue selected" in app.status_message
+
+    _run(scenario())
+    assert not (tmp_path / ".agent-runs" / "tui-selection.md").exists()
+
+
+class _StubLiveSink:
+    """A `ChatSink` (#249) that always delivers — stands in for tmux/Orca/a
+    `tui.chat_sink` command without shelling out."""
+
+    name = "tmux"
+
+    def available(self) -> bool:
+        return True
+
+    def send(self, text: str) -> bool:
+        return True
+
+
+def test_chat_through_a_live_sink_stays_running_and_names_the_sink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#249: when a multiplexer/Orca/command sink actually delivers the
+    handoff, the TUI does not exit — the multiplexer already split the
+    screen, so there's nothing left for `c` to hand off by quitting."""
+    monkeypatch.setattr(github, "remote_slug", lambda root: "o/a")
+    issues = [_issue(7, "2026-01-01T00:00:00Z", "agent-ready")]
+    fleet = [
+        data.FleetRepo("o/a", data.RepoData("o/a", readable=True, issues=issues, prs=[]), None),
+    ]
+    _set_fleet(monkeypatch, fleet)
+    detail = data.IssueDetail(
+        7, readable=True, title="Fix it", body="the body", labels=("agent-ready",), age="1d"
+    )
+    monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
+    monkeypatch.setattr(
+        sinks, "pick", lambda text, config_value, env, project_root: _StubLiveSink()
+    )
+
+    async def scenario() -> None:
+        app = TuiApp(tmp_path)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_chat()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.return_value is None
+            assert "tmux" in app.status_message
 
     _run(scenario())
     assert not (tmp_path / ".agent-runs" / "tui-selection.md").exists()

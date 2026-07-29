@@ -9,6 +9,7 @@ itself is a thin wrapper over `status.py`/`runs.py`.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -22,7 +23,8 @@ from textual.message import Message
 from textual.widgets import Label, ListItem, ListView, Static
 
 from agent_ops import github, registry, runs, status
-from agent_ops.tui import data
+from agent_ops.config import ProjectConfig, load_project_config
+from agent_ops.tui import data, sinks
 from agent_ops.utils import run as run_cmd
 
 # Below this width the 2x2 grid no longer has room to stay side-by-side —
@@ -449,6 +451,7 @@ class TuiApp(App[Path | None]):
         self._initial_theme = theme
         self.local_slug = github.remote_slug(project_root)
         self.config = registry.RegistryConfig()
+        self.project_config: ProjectConfig = load_project_config(project_root)
         self.fleet: list[data.FleetRepo | None] = []
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
@@ -681,9 +684,11 @@ class TuiApp(App[Path | None]):
         self._exec(data.open_web_command(repo, issue))
 
     def action_chat(self) -> None:
-        """`c` (#235): write the handoff file and exit through it — no
-        worktree, no hosted chat, same as `d`/`r`/`o`, this shells out to
-        nothing and hands off instead."""
+        """`c` (#235/#249): hand the selection to a chat pane through a
+        multiplexer-agnostic sink (tmux/wezterm/kitty/Orca, or
+        `tui.chat_sink`), same as `d`/`r`/`o`, this shells out to nothing
+        itself and hands off instead. No live pane reachable → falls back to
+        writing the handoff file and exiting, exactly as before this issue."""
         issue, repo = self._current_selection()
         if issue is None or repo is None:
             self._set_status("no issue selected")
@@ -707,9 +712,17 @@ class TuiApp(App[Path | None]):
             if cached is not None
             else data.load_issue_detail(repo, issue, prs, prs_complete=prs_complete)
         )
-        path = data.chat_handoff_path(self.project_root)
-        data.write_chat_handoff(path, repo, detail)
-        self.call_from_thread(self.exit, path)
+        text = data.render_chat_handoff(repo, detail)
+        sink = sinks.pick(
+            text, self.project_config.tui.chat_sink, dict(os.environ), self.project_root
+        )
+        if isinstance(sink, sinks.FileSink):
+            # The multiplexer already splits (#249 supersedes #240's
+            # suspend-and-host-a-chat proposal) — only the file sink has
+            # nowhere else to show its result, so only it ends the session.
+            self.call_from_thread(self.exit, data.chat_handoff_path(self.project_root))
+            return
+        self.call_from_thread(self._set_status, f"chat: sent #{issue} to a {sink.name} pane")
 
     def _run_action(self, builder: Callable[[int], list[str]], *, require_local: bool) -> None:
         issue, repo = self._current_selection()
