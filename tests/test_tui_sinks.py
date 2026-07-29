@@ -434,7 +434,7 @@ def test_command_sink_returns_false_rather_than_raise_on_an_unparseable_template
     """`TuiConfig` already refuses a template `shlex.split` chokes on at
     config load (#249 review finding) — this is the belt to that braces:
     `CommandSink.send` must not let a bad template raise past it and crash
-    `sinks.pick`/the TUI, even if one somehow reaches `send()` unvalidated."""
+    `sinks.deliver`/the TUI, even if one somehow reaches `send()` unvalidated."""
 
     def boom(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise AssertionError("must not shell out for a template it can't parse")
@@ -445,10 +445,10 @@ def test_command_sink_returns_false_rather_than_raise_on_an_unparseable_template
     assert sink.send("hi") is False
 
 
-# --- pick(): selection order, config override, and the file-sink floor -------------------
+# --- deliver(): selection order, config override, and the file-sink floor ----------------
 
 
-def test_pick_config_override_wins_over_detection(
+def test_deliver_config_override_wins_over_detection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
@@ -456,13 +456,13 @@ def test_pick_config_override_wins_over_detection(
     text = _text()
     env = {"TMUX": "x"}  # would otherwise select tmux
 
-    sink = sinks.pick(text, "mymux send -- {text}", env, tmp_path)
+    sink = sinks.deliver(text, "mymux send -- {text}", env, tmp_path)
 
     assert sink.name == "command"
     assert calls == [["mymux", "send", "--", text]]
 
 
-def test_pick_probes_in_table_order_and_falls_through_to_file(
+def test_deliver_probes_in_table_order_and_falls_through_to_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     order: list[str] = []
@@ -485,7 +485,7 @@ def test_pick_probes_in_table_order_and_falls_through_to_file(
         "ORCA_TERMINAL_HANDLE": "term_a",
     }
 
-    sink = sinks.pick("hi", None, env, tmp_path)
+    sink = sinks.deliver("hi", None, env, tmp_path)
 
     assert sink.name == "file"
     # tmux's own probe is `list-panes`, so its first call is still "tmux".
@@ -493,7 +493,7 @@ def test_pick_probes_in_table_order_and_falls_through_to_file(
     assert (tmp_path / ".agent-runs" / "tui-selection.md").read_text() == "hi"
 
 
-def test_pick_empty_env_selects_file_sink_without_shelling_out(
+def test_deliver_empty_env_selects_file_sink_without_shelling_out(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     def boom(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -502,12 +502,12 @@ def test_pick_empty_env_selects_file_sink_without_shelling_out(
     monkeypatch.setattr(sinks, "run", boom)
     monkeypatch.setattr(orca, "available", lambda: False)
 
-    sink = sinks.pick("hi", None, {}, tmp_path)
+    sink = sinks.deliver("hi", None, {}, tmp_path)
 
     assert sink.name == "file"
 
 
-def test_pick_degrades_silently_when_a_detected_multiplexer_binary_is_missing(
+def test_deliver_degrades_silently_when_a_detected_multiplexer_binary_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """`$TMUX` set (so `available()` is true) but `tmux` isn't on PATH: `run`
@@ -523,6 +523,6 @@ def test_pick_degrades_silently_when_a_detected_multiplexer_binary_is_missing(
     monkeypatch.setattr(sinks, "run", fake_run)
     monkeypatch.setattr(orca, "available", lambda: False)
 
-    sink = sinks.pick("hi", None, {"TMUX": "x", "TMUX_PANE": "%1"}, tmp_path)
+    sink = sinks.deliver("hi", None, {"TMUX": "x", "TMUX_PANE": "%1"}, tmp_path)
 
     assert sink.name == "file"

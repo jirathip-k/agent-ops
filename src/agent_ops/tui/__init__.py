@@ -19,8 +19,9 @@ def run_tui(project_root: Path) -> Path | None:
 
     from agent_ops.tui.app import TuiApp
 
-    theme = load_project_config(project_root).tui.theme
+    config = load_project_config(project_root)
+    theme = config.tui.theme
     if theme not in BUILTIN_THEMES:
         valid = ", ".join(sorted(BUILTIN_THEMES))
         raise ValueError(f"tui.theme: {theme!r} is not a built-in theme. Valid themes: {valid}")
-    return TuiApp(project_root, theme=theme).run()
+    return TuiApp(project_root, theme=theme, project_config=config).run()

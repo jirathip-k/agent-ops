@@ -60,7 +60,7 @@ def _orca_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # Multiplexer env vars a `ChatSink` (#249) probes for. The pipeline TUI's `c`
 # reads real `os.environ`, so a suite run from inside tmux/zellij/wezterm/kitty
-# would otherwise have `sinks.pick` actually shell out to the developer's own
+# would otherwise have `sinks.deliver` actually shell out to the developer's own
 # session — same hazard `_orca_unavailable` guards against, for the same
 # reason: tests must not behave differently depending on where they were
 # started from. Tests exercising a specific sink set the var they need

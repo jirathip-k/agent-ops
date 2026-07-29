@@ -237,7 +237,7 @@ class TuiConfig(BaseModel):
 
     `None` means auto-probe the sink table (tmux/wezterm/kitty/Orca, falling
     back to the file — see `agent_ops.tui.sinks`; zellij is deliberately not
-    auto-probed, see `sinks.pick`, but reachable through this field). A
+    auto-probed, see `sinks.deliver`, but reachable through this field). A
     free-form command with a `{text}` placeholder is also accepted, for a
     multiplexer not in the auto-probe table — `shlex.split` on it, `{text}`
     substituted as one argv element, never through a shell (issue #249).
