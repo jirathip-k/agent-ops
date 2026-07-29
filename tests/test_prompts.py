@@ -20,6 +20,7 @@ TASK_FIELDS = {
         "issue_body": "b",
         "issue_labels": "none",
         "issue_comments": "some comment",
+        "authorization": "(none — danger-zone rules fully in force)",
     },
     "spec": {
         "issue_number": "1",

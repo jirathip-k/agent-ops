@@ -85,7 +85,7 @@ def _resolve_grant(
 
 
 def _render_authorization(grant: grants.Grant | None) -> str:
-    """The `{authorization}` field for the implement/resume prompts."""
+    """The `{authorization}` field for the plan/implement/resume prompts."""
     if grant is None:
         return "(none — danger-zone rules fully in force)"
     paths = "\n".join(f"- `{p}`" for p in grant.paths)
@@ -254,10 +254,17 @@ def make_plan(
     issue: dict[str, Any],
     cwd: Path,
     *,
+    grant: grants.Grant | None = None,
     runtime_override: str | None = None,
     log: Callable[[str], None] = lambda _: None,
 ) -> tuple[RunRequest, RunResult]:
     """Run the planner role.
+
+    `grant` is the same `--grant-file` authorization the implementer prompt
+    gets, rendered through the same `_render_authorization` so the two stages
+    can never describe one grant differently (issue #263) — without it, a
+    granted issue whose sole deliverable is danger-zone work has no
+    verifiable authorization to plan within and (correctly) escalates.
 
     Returns the request and its result so callers can attribute the plan to the
     model that actually wrote it; raises on ESCALATE or failure.
@@ -269,6 +276,7 @@ def make_plan(
         issue_body=issue.get("body") or "(no description)",
         issue_labels=_labels(issue),
         issue_comments=_format_comments(issue),
+        authorization=_render_authorization(grant),
     )
     runtime, request = role_request(
         config, "planner", prompt, cwd, runtime_override=runtime_override
@@ -471,6 +479,12 @@ def _run_implement(
         _abort_cleanly(project_root, config, task_id, log)
         return False
 
+    # Resolved before planning, not after: the planner needs the same grant the
+    # implementer gets (issue #263) — a danger-zone-only issue with no grant
+    # visible yet would otherwise escalate at planning even when `--grant-file`
+    # was passed, because the grant hadn't been loaded.
+    grant, grant_carried_over = _resolve_grant(project_root, issue_number, grant_file, log=log)
+
     plan = NO_PLAN_TEXT
     if plan_file is not None:
         # human-approved plan (e.g. from a prior escalation) — skip the planner
@@ -482,7 +496,7 @@ def _run_implement(
         card.note(f"#{issue_number}: planning")
         try:
             plan_request, plan_result = make_plan(
-                config, issue, wt_path, runtime_override=runtime_name, log=log
+                config, issue, wt_path, grant=grant, runtime_override=runtime_name, log=log
             )
         except RuntimeError as exc:
             log(str(exc))
@@ -491,8 +505,6 @@ def _run_implement(
             return False
         plan = plan_result.text
         log(f"plan ready ({len(plan.splitlines())} lines, {model_note(plan_request, plan_result)})")
-
-    grant, grant_carried_over = _resolve_grant(project_root, issue_number, grant_file, log=log)
 
     prompt = render_task(
         "implement",
