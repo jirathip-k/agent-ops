@@ -9,8 +9,11 @@ itself is a thin wrapper over `status.py`/`runs.py`.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,7 @@ from textual.widgets import Label, ListItem, ListView, Static
 from agent_ops import github, registry, runs, status
 from agent_ops.config import ProjectConfig, load_project_config
 from agent_ops.tui import data, sinks
+from agent_ops.utils import CommandError
 from agent_ops.utils import run as run_cmd
 
 # Below this width the 2x2 grid no longer has room to stay side-by-side —
@@ -120,6 +124,10 @@ class StageRow(Static):
     BINDINGS = [
         Binding("left", "prev_stage", "◀ stage", show=False),
         Binding("right", "next_stage", "▶ stage", show=False),
+        # Only fires while StageRow itself is focused (#253) — mirrors how
+        # left/right above only move the stage cursor while this row has
+        # focus, rather than a global App binding like d/r/o/c.
+        Binding("t", "trigger", "trigger", show=False),
     ]
 
     class StageChanged(Message):
@@ -128,6 +136,13 @@ class StageRow(Static):
         def __init__(self, stage_index: int) -> None:
             super().__init__()
             self.stage_index = stage_index
+
+    class Trigger(Message):
+        """Posted by `t`: run the lane servicing the currently selected stage.
+
+        Carries nothing beyond "it happened" — the app reads the stage/repo
+        to act on straight off this same `StageRow` (`selected_stage`,
+        `detail.repo`), exactly as `StageChanged` above already does."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -142,6 +157,9 @@ class StageRow(Static):
 
     def action_next_stage(self) -> None:
         self._move(1)
+
+    def action_trigger(self) -> None:
+        self.post_message(self.Trigger())
 
     def _move(self, delta: int) -> None:
         if not self.detail or not self.detail.stages:
@@ -351,7 +369,8 @@ class CommandBar(Static):
     @staticmethod
     def _legend() -> str:
         return (
-            "↑↓ move · tab pane · ←→ stage · d dispatch · r resume · o open web · c chat · q quit"
+            "↑↓ move · tab pane · ←→ stage · d dispatch · r resume · o open web · c chat · "
+            "t trigger · q quit"
         )
 
     def set_preview(
@@ -379,6 +398,29 @@ class CommandBar(Static):
         if status_message:
             lines.append(status_message)
         self.update("\n".join(lines))
+
+
+@dataclass
+class _PendingTrigger:
+    """`t`'s in-progress choice (#253): which lane, then local or cloud.
+
+    Nothing here is guessed — `phase == "lane"` means more than one deployed
+    lane services the stage and a digit key must pick one; `phase ==
+    "destination"` means the lane is settled and a digit key picks local vs
+    cloud. `escape` cancels either phase. Digit keys are used for both (never
+    `l`/`c`) because `c` already means chat on the App's own global bindings —
+    reusing it here would make `_check_bindings` swallow the keystroke before
+    it ever reached this state.
+    """
+
+    repo: str
+    stage: data.FlowStage
+    phase: str  # "lane" | "destination"
+    lanes: tuple[str, ...] = ()
+    lane: str = ""
+    local_cmd: tuple[str, ...] = ()
+    cloud_cmd: tuple[str, ...] = ()
+    caller_file: str = ""
 
 
 class TuiApp(App[Path | None]):
@@ -445,19 +487,28 @@ class TuiApp(App[Path | None]):
         Binding("c", "chat", "chat"),
     ]
 
-    def __init__(self, project_root: Path, *, theme: str = "catppuccin-macchiato") -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        theme: str = "catppuccin-macchiato",
+        project_config: ProjectConfig | None = None,
+    ) -> None:
         super().__init__()
         self.project_root = project_root
         self._initial_theme = theme
         self.local_slug = github.remote_slug(project_root)
         self.config = registry.RegistryConfig()
-        self.project_config: ProjectConfig = load_project_config(project_root)
+        self.project_config: ProjectConfig = (
+            project_config if project_config is not None else load_project_config(project_root)
+        )
         self.fleet: list[data.FleetRepo | None] = []
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
         self.status_message = ""
         self.issue_detail_cache: dict[tuple[str, int], data.IssueDetail] = {}
         self._issue_detail_inflight: set[tuple[str, int]] = set()
+        self._pending_trigger: _PendingTrigger | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="body"):
@@ -555,6 +606,10 @@ class TuiApp(App[Path | None]):
     def _show_repo(self, index: int, *, reset_stage: bool) -> None:
         if not (0 <= index < len(self.fleet)):
             return
+        # A pending `t` choice (#253) names a specific stage/repo — switching
+        # repos out from under it would let a stray digit keypress run the
+        # wrong lane against the wrong repo.
+        self._pending_trigger = None
         fr = self.fleet[index]
         stage_row = self.query_one(StageRow)
         if fr is None:
@@ -662,11 +717,17 @@ class TuiApp(App[Path | None]):
             status_message=self.status_message,
         )
 
-    # --- StageRow's left/right posts a message we react to on the app --------
+    # --- StageRow's left/right/t post messages we react to on the app --------
 
     def on_stage_row_stage_changed(self, event: StageRow.StageChanged) -> None:
+        # Same reasoning as the repo-switch guard in `_show_repo`: a pending
+        # choice names a specific stage, so moving off it invalidates it.
+        self._pending_trigger = None
         self._refresh_issue_list()
         self._refresh_bar()
+
+    def on_stage_row_trigger(self, event: StageRow.Trigger) -> None:
+        self._begin_trigger()
 
     # --- actions ----------------------------------------------------------------
 
@@ -713,7 +774,7 @@ class TuiApp(App[Path | None]):
             else data.load_issue_detail(repo, issue, prs, prs_complete=prs_complete)
         )
         text = data.render_chat_handoff(repo, detail)
-        sink = sinks.pick(
+        sink = sinks.deliver(
             text, self.project_config.tui.chat_sink, dict(os.environ), self.project_root
         )
         if isinstance(sink, sinks.FileSink):
@@ -752,3 +813,239 @@ class TuiApp(App[Path | None]):
     def _set_status(self, message: str) -> None:
         self.status_message = message
         self._refresh_bar()
+
+    # --- `t`: trigger the lane servicing the focused stage (#253) ------------
+    #
+    # Local and cloud are both real entry points: local shells out to the
+    # exact same `agent <lane>` CLI `d`/`r` already use (or spawns it the same
+    # way `workflows/triage.py`'s own dispatch step does, for the lane-wide
+    # lanes that run start-to-finish rather than taking `--surface`), and
+    # cloud runs `gh workflow run` against the repo's own deployed caller —
+    # never a new dispatch mechanism, never a write under `.github/workflows/`.
+
+    # (stage.key, lane) pairs whose local command runs synchronously
+    # start-to-finish inside `agent <lane>` itself (no `--surface`) rather
+    # than spawning a surface and returning immediately the way `agent
+    # dispatch --surface orca` / `agent plan --surface orca` do — these must
+    # go through `surfaces.pick(...).spawn(...)` directly instead of
+    # `_exec`'s blocking `run_cmd`, or a multi-minute triage/groom/spec sweep
+    # would tie up a worker thread with no live output until it finished.
+    _STREAMED_LOCAL_LANES = frozenset(
+        {("untriaged", "triage"), ("backlog", "groom"), ("spec-requested", "spec")}
+    )
+
+    # Bound on the `gh run list` follow-up that tries to surface the queued
+    # run's URL. `gh workflow run` itself never returns a run id (a known `gh`
+    # CLI limitation) — this polls for the most recent run of that workflow
+    # file a few times, and gives up with a "check `gh run list`" pointer
+    # rather than blocking indefinitely for a run GitHub hasn't indexed yet.
+    _CLOUD_FOLLOWUP_ATTEMPTS = 3
+    _CLOUD_FOLLOWUP_DELAY_S = 2.0
+
+    def _fleet_repo(self, repo: str) -> data.FleetRepo | None:
+        return next((fr for fr in self.fleet if fr is not None and fr.repo == repo), None)
+
+    def _begin_trigger(self) -> None:
+        stage_row = self.query_one(StageRow)
+        stage = stage_row.selected_stage
+        detail = stage_row.detail
+        if stage is None or detail is None:
+            self._set_status("no stage selected")
+            return
+        if not stage.available_lanes:
+            self._set_status(
+                f"{stage.display}: nothing to trigger — {self._no_trigger_reason(stage)}"
+            )
+            return
+        lanes = list(stage.available_lanes)
+        if len(lanes) > 1:
+            self._prompt_lane_choice(detail.repo, stage, lanes)
+        else:
+            self._resolve_destination(detail.repo, stage, lanes[0])
+
+    @staticmethod
+    def _no_trigger_reason(stage: data.FlowStage) -> str:
+        if stage.count == 0:
+            return "empty"
+        if stage.key not in status.STAGE_CONSUMERS:
+            return "no CI lane ever consumes this stage"
+        return "unserviced — no deployed lane consumes this stage"
+
+    def _prompt_lane_choice(self, repo: str, stage: data.FlowStage, lanes: list[str]) -> None:
+        # Never `next(iter(...))` — a stage with more than one consumer lane
+        # (STAGE_CONSUMERS values are frozensets) must ask, not guess (#253).
+        self._pending_trigger = _PendingTrigger(
+            repo=repo, stage=stage, phase="lane", lanes=tuple(lanes)
+        )
+        options = "  ".join(f"[{i + 1}] {lane}" for i, lane in enumerate(lanes))
+        self._set_status(
+            f"trigger {stage.display}: more than one lane services this — which? "
+            f"{options}  (esc cancels)"
+        )
+
+    def _resolve_destination(self, repo: str, stage: data.FlowStage, lane: str) -> None:
+        fr = self._fleet_repo(repo)
+        if fr is None or fr.lanes is None or lane not in fr.lanes:
+            self._pending_trigger = None
+            self._set_status(f"{repo}: {lane} is no longer wired up — nothing to trigger")
+            return
+        caller_file = fr.lanes[lane].caller_file
+        desc = data.trigger_description(stage, lane)
+        cloud_cmd = data.cloud_trigger_command(repo, caller_file)
+        local_cmd = (
+            data.local_trigger_command(stage, lane, stage.oldest_number)
+            if repo == self.local_slug
+            else None
+        )
+        if local_cmd is not None:
+            # Both are viable — ask which rather than guessing (#253).
+            self._pending_trigger = _PendingTrigger(
+                repo=repo,
+                stage=stage,
+                phase="destination",
+                lane=lane,
+                local_cmd=tuple(local_cmd),
+                cloud_cmd=tuple(cloud_cmd),
+                caller_file=caller_file,
+            )
+            self._set_status(
+                f"trigger: {desc} — [1] local: {' '.join(local_cmd)}  "
+                f"[2] cloud: {' '.join(cloud_cmd)}  (esc cancels)"
+            )
+            return
+        # Only cloud is viable — not the local checkout, or this pairing has
+        # no local command mapping — so there is nothing to ask; run it.
+        self._pending_trigger = None
+        self._run_cloud_trigger(desc, repo, cloud_cmd, caller_file)
+
+    def _handle_trigger_key(self, key: str) -> None:
+        """Fallback key handler for the digits/escape `t`'s prompts use.
+
+        Textual only calls a `key_<name>` method like this once the normal
+        binding chain (the focused widget's own BINDINGS, then the App's)
+        has already passed on the key — digits and escape are bound nowhere
+        else in this app, so this only ever fires for `t`'s own prompts, and
+        is a complete no-op whenever none is open.
+        """
+        pending = self._pending_trigger
+        if pending is None:
+            return
+        if key == "escape":
+            self._pending_trigger = None
+            self._set_status("trigger cancelled")
+            return
+        if not key.isdigit():
+            return
+        index = int(key) - 1
+        if pending.phase == "lane":
+            if not (0 <= index < len(pending.lanes)):
+                return
+            lane = pending.lanes[index]
+            self._pending_trigger = None
+            self._resolve_destination(pending.repo, pending.stage, lane)
+            return
+        # phase == "destination": 1 = local, 2 = cloud; anything else no-ops.
+        if index == 0:
+            self._pending_trigger = None
+            self._run_local_trigger(pending.stage, pending.lane, list(pending.local_cmd))
+        elif index == 1:
+            desc = data.trigger_description(pending.stage, pending.lane)
+            self._pending_trigger = None
+            self._run_cloud_trigger(
+                desc, pending.repo, list(pending.cloud_cmd), pending.caller_file
+            )
+
+    def key_escape(self) -> None:
+        self._handle_trigger_key("escape")
+
+    def key_1(self) -> None:
+        self._handle_trigger_key("1")
+
+    def key_2(self) -> None:
+        self._handle_trigger_key("2")
+
+    def key_3(self) -> None:
+        self._handle_trigger_key("3")
+
+    def key_4(self) -> None:
+        self._handle_trigger_key("4")
+
+    def key_5(self) -> None:
+        self._handle_trigger_key("5")
+
+    def key_6(self) -> None:
+        self._handle_trigger_key("6")
+
+    def key_7(self) -> None:
+        self._handle_trigger_key("7")
+
+    def key_8(self) -> None:
+        self._handle_trigger_key("8")
+
+    def _run_local_trigger(self, stage: data.FlowStage, lane: str, cmd: list[str]) -> None:
+        if (stage.key, lane) in self._STREAMED_LOCAL_LANES:
+            self._set_status(f"running: {' '.join(cmd)}")
+            self.run_worker(partial(self._spawn_worker, f"agent-{lane}", cmd), thread=True)
+            return
+        self._exec(cmd)
+
+    def _spawn_worker(self, label: str, cmd: list[str]) -> None:
+        from agent_ops import surfaces  # local import: pulls in subprocess spawning
+
+        try:
+            spawned = surfaces.pick("auto").spawn(label, cmd, self.project_root)
+        except CommandError as exc:
+            self.call_from_thread(self._set_status, f"failed to start: {exc}")
+            return
+        self.call_from_thread(self._set_status, f"running: {spawned.where}")
+
+    def _run_cloud_trigger(self, desc: str, repo: str, cmd: list[str], caller_file: str) -> None:
+        self._set_status(f"queuing: {desc} → {' '.join(cmd)}")
+        self.run_worker(partial(self._cloud_worker, repo, cmd, caller_file), thread=True)
+
+    def _cloud_worker(self, repo: str, cmd: list[str], caller_file: str) -> None:
+        proc = run_cmd(cmd, cwd=self.project_root, check=False, timeout=60.0)
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            self.call_from_thread(self._set_status, f"failed to queue: {detail}")
+            return
+        url = self._await_run_url(repo, caller_file)
+        if url:
+            self.call_from_thread(self._set_status, f"queued: {' '.join(cmd)} → {url}")
+        else:
+            self.call_from_thread(
+                self._set_status,
+                f"queued: {' '.join(cmd)} — run not visible yet, check "
+                f"`gh run list --repo {repo} --workflow {caller_file}`",
+            )
+
+    def _await_run_url(self, repo: str, caller_file: str) -> str | None:
+        for attempt in range(self._CLOUD_FOLLOWUP_ATTEMPTS):
+            proc = run_cmd(
+                [
+                    "gh",
+                    "run",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--workflow",
+                    caller_file,
+                    "--limit",
+                    "1",
+                    "--json",
+                    "url,createdAt,event",
+                ],
+                cwd=self.project_root,
+                check=False,
+                timeout=30.0,
+            )
+            if proc.returncode == 0:
+                try:
+                    rows = json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    rows = []
+                if rows and rows[0].get("url"):
+                    return str(rows[0]["url"])
+            if attempt < self._CLOUD_FOLLOWUP_ATTEMPTS - 1:
+                time.sleep(self._CLOUD_FOLLOWUP_DELAY_S)
+        return None
