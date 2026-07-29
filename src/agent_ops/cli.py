@@ -92,10 +92,12 @@ def _main(ctx: typer.Context) -> None:
         from agent_ops.tui import run_tui
 
         try:
-            path = run_tui(Path("."))
+            path, sink_error = run_tui(Path("."))
         except (ValueError, CommandError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
+        if sink_error:
+            _err(f"! {sink_error}; wrote {path} instead")
         if path is not None:
             typer.echo(str(path))
 
@@ -1700,10 +1702,12 @@ def tui(project: ProjectOpt = Path(".")) -> None:
     from agent_ops.tui import run_tui
 
     try:
-        path = run_tui(project.resolve())
+        path, sink_error = run_tui(project.resolve())
     except (ValueError, CommandError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+    if sink_error:
+        _err(f"! {sink_error}; wrote {path} instead")
     if path is not None:
         typer.echo(str(path))
 

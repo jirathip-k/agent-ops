@@ -426,6 +426,7 @@ def test_command_sink_substitutes_text_as_one_argv_element(monkeypatch: pytest.M
 
     assert calls == [["mymux", "send", "--pane", "right", "--", text]]
     assert HEADER in calls[0][-1]
+    assert sink.failure_reason is None
 
 
 def test_command_sink_returns_false_rather_than_raise_on_an_unparseable_template(
@@ -443,6 +444,93 @@ def test_command_sink_returns_false_rather_than_raise_on_an_unparseable_template
 
     sink = sinks.CommandSink('mymux send --pane "right -- {text}')  # unbalanced quote
     assert sink.send("hi") is False
+    # #252: the reason must survive past the bare bool so `deliver()` can
+    # report it, and `run()` must never even be attempted for a template
+    # that couldn't be parsed (the `boom` stub above would raise if it were).
+    assert sink.failure_reason is not None
+    assert "invalid command" in sink.failure_reason
+
+
+def test_command_sink_returns_false_rather_than_raise_on_a_whitespace_only_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only template `shlex.split`s to `[]` without raising
+    `ValueError`, so the `except` above never fires for it. Left unguarded,
+    `argv` ends up `[]` and `utils.run([], check=False)` calls
+    `subprocess.run([])`, which raises `IndexError` before `utils.run`'s own
+    `except (TimeoutExpired, OSError)` handlers can catch it — breaking
+    `send()`'s "never raise" contract just as surely as an unparseable
+    template would. `CommandSink.send` must treat an empty parsed command the
+    same way: report a reason and return `False` without ever calling `run()`."""
+
+    def boom(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("must not shell out for a template that parses to an empty argv")
+
+    monkeypatch.setattr(sinks, "run", boom)
+
+    sink = sinks.CommandSink("   ")
+    assert sink.send("hi") is False
+    assert sink.failure_reason is not None
+    assert "empty" in sink.failure_reason.lower()
+
+
+def test_command_sink_failure_reason_is_stderr_on_non_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#252: a configured sink that exits non-zero with something on stderr
+    must surface that text as the reason, not just the bare exit code —
+    that's the detail an operator needs to fix their `tui.chat_sink`."""
+    monkeypatch.setattr(
+        sinks,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="no such pane: right\n"
+        ),
+    )
+    sink = sinks.CommandSink("mymux send --pane right -- {text}")
+    assert sink.send("hi") is False
+    assert sink.failure_reason == "no such pane: right"
+
+
+def test_command_sink_failure_reason_falls_back_to_exit_code_when_stderr_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#252: an ordinary non-zero exit with nothing on stderr still needs a
+    reason — falls back to `exit N`, same idiom as `app.py`'s `_exec_worker`."""
+    monkeypatch.setattr(
+        sinks,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 3, stdout="", stderr=""),
+    )
+    sink = sinks.CommandSink("mymux send --pane right -- {text}")
+    assert sink.send("hi") is False
+    assert sink.failure_reason == "exit 3"
+
+
+def test_command_sink_failure_reason_is_descriptive_on_spawn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#252 acceptance criterion #2: a missing binary must be distinguishable
+    from an ordinary non-zero exit — `utils.run`'s `check=False` contract
+    already puts a descriptive "could not be started" message on `stderr` for
+    a spawn failure, so the stderr-or-exit-code idiom above naturally reports
+    that message rather than the synthetic `exit 127`."""
+    monkeypatch.setattr(
+        sinks,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd,
+            SPAWN_FAILURE_RETURNCODE,
+            stdout="",
+            stderr="`mymux send --pane right -- x` could not be started: "
+            "[Errno 2] No such file or directory: 'mymux'",
+        ),
+    )
+    sink = sinks.CommandSink("mymux send --pane right -- {text}")
+    assert sink.send("hi") is False
+    assert sink.failure_reason is not None
+    assert "could not be started" in sink.failure_reason
+    assert sink.failure_reason != f"exit {SPAWN_FAILURE_RETURNCODE}"
 
 
 # --- deliver(): selection order, config override, and the file-sink floor ----------------
@@ -456,10 +544,11 @@ def test_deliver_config_override_wins_over_detection(
     text = _text()
     env = {"TMUX": "x"}  # would otherwise select tmux
 
-    sink = sinks.deliver(text, "mymux send -- {text}", env, tmp_path)
+    sink, error = sinks.deliver(text, "mymux send -- {text}", env, tmp_path)
 
     assert sink.name == "command"
     assert calls == [["mymux", "send", "--", text]]
+    assert error is None
 
 
 def test_deliver_probes_in_table_order_and_falls_through_to_file(
@@ -485,12 +574,15 @@ def test_deliver_probes_in_table_order_and_falls_through_to_file(
         "ORCA_TERMINAL_HANDLE": "term_a",
     }
 
-    sink = sinks.deliver("hi", None, env, tmp_path)
+    sink, error = sinks.deliver("hi", None, env, tmp_path)
 
     assert sink.name == "file"
     # tmux's own probe is `list-panes`, so its first call is still "tmux".
     assert order == ["tmux", "wezterm", "kitty", "orca"]
     assert (tmp_path / ".agent-runs" / "tui-selection.md").read_text() == "hi"
+    # Auto-probe exhausting the table and landing on the file sink is working
+    # as designed (#252) — must never be reported as a failure.
+    assert error is None
 
 
 def test_deliver_empty_env_selects_file_sink_without_shelling_out(
@@ -502,9 +594,10 @@ def test_deliver_empty_env_selects_file_sink_without_shelling_out(
     monkeypatch.setattr(sinks, "run", boom)
     monkeypatch.setattr(orca, "available", lambda: False)
 
-    sink = sinks.deliver("hi", None, {}, tmp_path)
+    sink, error = sinks.deliver("hi", None, {}, tmp_path)
 
     assert sink.name == "file"
+    assert error is None
 
 
 def test_deliver_degrades_silently_when_a_detected_multiplexer_binary_is_missing(
@@ -523,6 +616,51 @@ def test_deliver_degrades_silently_when_a_detected_multiplexer_binary_is_missing
     monkeypatch.setattr(sinks, "run", fake_run)
     monkeypatch.setattr(orca, "available", lambda: False)
 
-    sink = sinks.deliver("hi", None, {"TMUX": "x", "TMUX_PANE": "%1"}, tmp_path)
+    sink, error = sinks.deliver("hi", None, {"TMUX": "x", "TMUX_PANE": "%1"}, tmp_path)
 
     assert sink.name == "file"
+    assert error is None
+
+
+def test_deliver_reports_a_configured_sink_that_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#252: a configured `tui.chat_sink` failing must not degrade in
+    silence — the fallback to the file sink still happens (the payload is
+    never lost), but `error` must name the template and the reason so the
+    operator learns their sink is broken."""
+    monkeypatch.setattr(
+        sinks,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no such pane"),
+    )
+
+    sink, error = sinks.deliver("hi", "mymux send -- {text}", {}, tmp_path)
+
+    assert sink.name == "file"
+    assert (tmp_path / ".agent-runs" / "tui-selection.md").read_text() == "hi"
+    assert error is not None
+    assert "mymux send -- {text}" in error
+    assert "no such pane" in error
+
+
+def test_deliver_reports_a_configured_sink_whose_binary_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#252 acceptance criterion #2: a configured sink whose binary can't even
+    be spawned must be reported with a reason distinguishable from an
+    ordinary non-zero exit, not just folded into the same generic message."""
+    monkeypatch.setattr(
+        sinks,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, SPAWN_FAILURE_RETURNCODE, stdout="", stderr="could not be started: not found"
+        ),
+    )
+
+    sink, error = sinks.deliver("hi", "mymux send -- {text}", {}, tmp_path)
+
+    assert sink.name == "file"
+    assert error is not None
+    assert "could not be started" in error
+    assert f"exit {SPAWN_FAILURE_RETURNCODE}" not in error

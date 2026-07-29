@@ -506,6 +506,12 @@ class TuiApp(App[Path | None]):
         self.local_run_rows: list[runs.Run] = []
         self.load_error: str | None = None
         self.status_message = ""
+        # Set by `_chat_worker` only when a configured `tui.chat_sink` fails
+        # and this falls back to the file sink (issue #252) — `run_tui` reads
+        # this after `run()` returns so the CLI can report it. Stays `None`
+        # for an ordinary `q` quit and for auto-probe falling through with no
+        # `tui.chat_sink` configured at all.
+        self.chat_sink_error: str | None = None
         self.issue_detail_cache: dict[tuple[str, int], data.IssueDetail] = {}
         self._issue_detail_inflight: set[tuple[str, int]] = set()
         self._pending_trigger: _PendingTrigger | None = None
@@ -774,13 +780,17 @@ class TuiApp(App[Path | None]):
             else data.load_issue_detail(repo, issue, prs, prs_complete=prs_complete)
         )
         text = data.render_chat_handoff(repo, detail)
-        sink = sinks.deliver(
+        sink, error = sinks.deliver(
             text, self.project_config.tui.chat_sink, dict(os.environ), self.project_root
         )
         if isinstance(sink, sinks.FileSink):
             # The multiplexer already splits (#249 supersedes #240's
             # suspend-and-host-a-chat proposal) — only the file sink has
             # nowhere else to show its result, so only it ends the session.
+            # `error` is non-None only when a configured `tui.chat_sink` was
+            # the one that actually failed (#252) — auto-probe falling
+            # through to the file sink on its own stays silent, as before.
+            self.chat_sink_error = error
             self.call_from_thread(self.exit, data.chat_handoff_path(self.project_root))
             return
         self.call_from_thread(self._set_status, f"chat: sent #{issue} to a {sink.name} pane")
