@@ -36,8 +36,15 @@ triage pipeline. This repo manages itself with its own tooling.
 ## Commands
 
 - Test: `uv run pytest -q`
-- Lint: `uv run ruff check . && uv run ruff format --check .`
+- Lint: `uv run ruff check . && uv run ruff format --check . && actionlint -color -shellcheck=`
+  (CI also lints workflow files directly; a local checkout needs `actionlint`
+  on PATH to run the full lint gate)
 - Typecheck: `uv run pyright`
+
+An agent that finds a declared gate command unavailable in its environment
+must report that as an environment gap and stop, rather than retrying the
+gate or working around it — the gap is real signal, not a transient failure
+to paper over.
 
 ## Danger zones
 

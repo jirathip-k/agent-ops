@@ -202,12 +202,10 @@ Setup:
 
 ```sh
 uv sync --dev
-uv run pytest -q
-uv run ruff check . && uv run ruff format --check .
-uv run pyright
 ```
 
-CI runs the same four checks on every PR. Commit style:
+Gate commands (test, lint, typecheck) are defined once, in AGENTS.md's
+[Commands](AGENTS.md#commands) section — CI runs the same ones. Commit style:
 `component: imperative summary`.
 
 ## Repo map
