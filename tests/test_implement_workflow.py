@@ -942,6 +942,19 @@ def test_run_implement_resolves_grant_before_planning_and_passes_it_to_make_plan
     monkeypatch.setattr(
         implement_module, "run_task_loop", lambda *a, **k: LoopOutcome(False, 1, None, [])
     )
+    # `run_implement` builds the implementer request before the loop, and
+    # `role_request` refuses a runtime whose CLI isn't on PATH -- which is true
+    # of a CI runner and false of a dev machine with `claude` installed. Stub it
+    # the way the other tests in this file do, so the test asserts grant
+    # ordering rather than what happens to be installed where it runs.
+    monkeypatch.setattr(
+        implement_module,
+        "role_request",
+        lambda config, role_name, prompt, cwd, **kwargs: (
+            object(),
+            RunRequest(prompt=prompt, cwd=cwd),
+        ),
+    )
 
     grant_file = repo / "grant.yaml"
     grant_file.write_text(
