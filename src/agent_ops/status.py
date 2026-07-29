@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -246,6 +247,40 @@ def _deployed_lanes(repo: str) -> set[str] | None:
         workflows = _repo_workflows(repo)
     except CommandError:
         return None
+    return set(detect_lanes(workflows))
+
+
+def local_deployed_lanes(root: Path) -> set[str] | None:
+    """Lanes `root`'s own checkout has an actual CI caller wired up for, or
+    None if the workflow listing itself couldn't be read.
+
+    The local counterpart to `_deployed_lanes`: same fail-safe contract (None
+    is distinct from an empty set — a missing/empty `.github/workflows` is
+    genuinely "no lanes", but a directory listing or file read that raises is
+    "unknown", never "no lanes" — an unreadable listing must never be
+    reported the same as a healthy, empty repo), just reading the checkout on
+    disk instead of the GitHub API. Note the resulting local/remote skew this
+    implies for a caller like `agent init`: labels sync to the *remote* repo
+    (`github.sync_labels`), while this reads the *local* checkout, so a repo
+    whose workflow stubs haven't been pushed yet reads as unwired even though
+    the remote may already have them (or vice versa) — acceptable because the
+    caller only ever warns, never blocks, on this signal.
+    """
+    workflows_dir = root / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return set()
+    try:
+        paths = sorted(workflows_dir.iterdir())
+    except OSError:
+        return None
+    workflows: dict[str, str] = {}
+    for path in paths:
+        if not path.is_file() or path.suffix not in (".yml", ".yaml"):
+            continue
+        try:
+            workflows[path.name] = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
     return set(detect_lanes(workflows))
 
 
