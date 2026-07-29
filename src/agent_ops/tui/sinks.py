@@ -2,9 +2,10 @@
 
 Mirrors `agent_ops.surfaces.Surface`: a `ChatSink` protocol, one thin adapter
 per multiplexer, and `FileSink` as the always-works fallback selected by
-`available()`. `pick()` probes in table order; the file sink is last and
-never fails, so a bare terminal or an unlisted multiplexer loses nothing
-relative to before this issue.
+`available()`. `deliver()` sends through the first sink that can take the
+payload, probing in table order; the file sink is last and never fails, so a
+bare terminal or an unlisted multiplexer loses nothing relative to before
+this issue.
 
 Every sink receives the *same already-rendered* handoff text — the caller
 renders once via `agent_ops.tui.data.render_chat_handoff` — so the untrusted
@@ -318,7 +319,7 @@ class CommandSink:
 
     def send(self, text: str) -> bool:
         # `TuiConfig` already refuses a template `shlex.split` chokes on at
-        # config load — this catches `ValueError` again anyway so `pick()`
+        # config load — this catches `ValueError` again anyway so `deliver()`
         # can't crash the TUI if a template reaches here some other way
         # (a future caller that skips validation, a construction directly in
         # a test): "never raise" has to hold here even if load-time
@@ -331,8 +332,12 @@ class CommandSink:
         return run(argv, check=False).returncode == 0
 
 
-def pick(text: str, config_value: str | None, env: dict[str, str], project_root: Path) -> ChatSink:
-    """Send `text` through the right sink and return which one delivered it.
+def deliver(
+    text: str, config_value: str | None, env: dict[str, str], project_root: Path
+) -> ChatSink:
+    """Deliver `text` through the first sink that can take it and return the
+    sink that delivered it. The returned sink has already received the
+    payload — it is not meant for a second `send()`.
 
     An explicit `tui.chat_sink` wins outright; otherwise the table is probed
     in order (tmux, wezterm, kitty, Orca), actually attempting `send()` on

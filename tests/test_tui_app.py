@@ -1365,7 +1365,7 @@ def test_chat_through_a_live_sink_stays_running_and_names_the_sink(
     )
     monkeypatch.setattr(data, "load_issue_detail", lambda repo, number, prs, **kwargs: detail)
     monkeypatch.setattr(
-        sinks, "pick", lambda text, config_value, env, project_root: _StubLiveSink()
+        sinks, "deliver", lambda text, config_value, env, project_root: _StubLiveSink()
     )
 
     async def scenario() -> None:
