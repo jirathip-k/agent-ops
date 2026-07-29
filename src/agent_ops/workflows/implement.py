@@ -635,8 +635,18 @@ def _finish_run(
 
             pr_number = int(url.rstrip("/").rsplit("/", 1)[-1])
             log("auto-merge enabled — applying merge rules")
-            # never overrides: a blocked PR stays open for a human
-            run_merge(project_root, pr_number, log=log)
+            # never overrides: a blocked PR stays open for a human. force=True
+            # exempts auto-merge from the issue #258 in-flight-runs advisory:
+            # that check is for a human about to cost running agents a cycle,
+            # with batching as the way out — this call site has no human to
+            # advise and no batching decision available, it merges the one PR
+            # this run just produced, at the only moment it can. Deferring
+            # here would silently stop auto-merge under fan-out (each parallel
+            # implementer vetoes the others as they land, with nobody told
+            # why); exempt, it merges as it always has, at the same known cost
+            # of possibly staling another in-flight base. Whether auto-merge
+            # should defer under fan-out is tracked separately as #264.
+            run_merge(project_root, pr_number, force=True, log=log)
 
     # Durable record of success, written before the signals below are cleared:
     # `discover_runs` falls back to this once the worktree/feedback/open-PR

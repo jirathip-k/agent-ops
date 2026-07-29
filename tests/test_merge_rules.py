@@ -7,12 +7,18 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from agent_ops import github as github_module
+from agent_ops import runs as runs_module
+from agent_ops import worktree as worktree_module
 from agent_ops.config import ProjectConfig
+from agent_ops.runs import Run
+from agent_ops.utils import CommandError
 from agent_ops.workflows import merge as merge_module
 from agent_ops.workflows.merge import (
     _is_test_file,
     closable_issue_refs,
     evaluate_merge,
+    run_merge,
     run_merge_check,
 )
 
@@ -410,4 +416,270 @@ def test_check_blocked_label_pr_reports_violation(
     violations = run_merge_check(tmp_path, 4, log=lambda _msg: None)
 
     assert any("blocked label" in v and "human-merge-only" in v for v in violations)
+    assert any("labels" in c[-1] for c in calls if c[:3] == ["gh", "pr", "view"])
+
+
+# ---------- run_merge: in-flight-run advisory (issue #258) ----------
+
+
+def _stub_merge_gh(monkeypatch: pytest.MonkeyPatch, pr: dict[str, Any]) -> list[list[str]]:
+    """Fake every `gh`/`git` call `run_merge` makes; records each one."""
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], *, cwd: Path | None = None, check: bool = True, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr), stderr="")
+        if cmd[:3] == ["gh", "pr", "checks"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(merge_module, "run", fake_run)
+    monkeypatch.setattr(merge_module, "load_project_config", lambda root: _config())
+    return calls
+
+
+def _open_pr() -> dict[str, Any]:
+    pr = _pr([{"path": "src/app.ts", "additions": 1, "deletions": 0}])
+    pr["state"] = "OPEN"
+    pr["title"] = "a change"
+    pr["headRefName"] = "fix/issue-1"
+    return pr
+
+
+def test_in_flight_runs_block_without_force_or_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+    monkeypatch.setattr(
+        merge_module, "discover_runs", lambda root, log: ([Run(217, "running", "pid 1")], True)
+    )
+    messages: list[str] = []
+
+    ok = run_merge(tmp_path, 1, log=messages.append)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert any("217" in m for m in messages)
+    assert any("batch" in m for m in messages)
+    assert any("--force" in m for m in messages)
+
+
+def test_in_flight_runs_with_confirm_accepted_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+    monkeypatch.setattr(
+        merge_module, "discover_runs", lambda root, log: ([Run(217, "running", "pid 1")], True)
+    )
+
+    ok = run_merge(tmp_path, 1, confirm=lambda _msg: True, log=lambda _msg: None)
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_in_flight_runs_with_confirm_declined_does_not_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+    monkeypatch.setattr(
+        merge_module, "discover_runs", lambda root, log: ([Run(217, "running", "pid 1")], True)
+    )
+
+    ok = run_merge(tmp_path, 1, confirm=lambda _msg: False, log=lambda _msg: None)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_force_merges_without_consulting_confirm_or_run_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+
+    def _boom(root: Path, log: Any) -> Any:
+        raise AssertionError("--force must not consult run state at all")
+
+    monkeypatch.setattr(merge_module, "discover_runs", _boom)
+
+    ok = run_merge(
+        tmp_path,
+        1,
+        force=True,
+        confirm=lambda _msg: (_ for _ in ()).throw(AssertionError("must not prompt")),
+        log=lambda _msg: None,
+    )
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_no_runs_in_flight_merges_with_output_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing running: behaves exactly as before this feature existed."""
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+    monkeypatch.setattr(merge_module, "discover_runs", lambda root, log: ([], True))
+    messages: list[str] = []
+
+    ok = run_merge(tmp_path, 1, log=messages.append)
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert not any("running" in m.lower() for m in messages)
+
+
+def test_own_run_still_showing_as_running_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`discover_runs` reporting only the merged PR's own issue as `running`
+
+    (its implementer process hasn't fully exited yet) must not be treated as
+    a run this merge would stale — it is the run that produced this PR.
+    """
+    calls = _stub_merge_gh(monkeypatch, _open_pr())  # headRefName: fix/issue-1
+    monkeypatch.setattr(
+        merge_module, "discover_runs", lambda root, log: ([Run(1, "running", "pid 1")], True)
+    )
+    messages: list[str] = []
+
+    ok = run_merge(
+        tmp_path,
+        1,
+        confirm=lambda _msg: (_ for _ in ()).throw(AssertionError("must not prompt")),
+        log=messages.append,
+    )
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert not any("running" in m.lower() for m in messages)
+
+
+def test_own_run_excluded_through_the_real_discover_runs_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every other test in this file stubs `discover_runs` wholesale, which is
+    exactly why an earlier version of the own-run exclusion didn't catch a bug
+    in what `discover_runs` actually returns for the calling process: it never
+    ran. This one leaves `discover_runs` itself alone and only fakes the
+    signals it reads (worktree list, `ps`, open PRs) — a `fix/issue-1`
+    worktree that still looks live must not block PR #1's own merge.
+    """
+    calls = _stub_merge_gh(monkeypatch, _open_pr())  # headRefName: fix/issue-1
+    wt_path = tmp_path / ".worktrees" / "issue-1"
+    wt_path.mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree_module,
+        "list_worktrees",
+        lambda root: [worktree_module.Worktree(wt_path, "fix/issue-1")],
+    )
+    monkeypatch.setattr(runs_module, "_ps_output", lambda log: "1 00:06:00 agent implement 1\n")
+    monkeypatch.setattr(github_module, "open_prs", lambda cwd: [])
+
+    ok = run_merge(
+        tmp_path,
+        1,
+        confirm=lambda _msg: (_ for _ in ()).throw(AssertionError("must not prompt")),
+        log=lambda _msg: None,
+    )
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+
+def test_unreadable_run_registry_warns_and_proceeds_never_claims_nothing_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+
+    def _raises(root: Path, log: Any) -> Any:
+        log("warning: could not list worktrees (boom); runs may be misreported as stopped")
+        raise CommandError("boom")
+
+    monkeypatch.setattr(merge_module, "discover_runs", _raises)
+    messages: list[str] = []
+
+    ok = run_merge(tmp_path, 1, log=messages.append)
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert any("warning" in m.lower() for m in messages)
+    assert not any("nothing running" in m.lower() for m in messages)
+
+
+def test_untrustworthy_run_state_warns_and_proceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`discover_runs` degrading to untrustworthy (its own gh/git outage path)
+
+    must fail open the same as an outright exception: unknown, not "nothing
+    running".
+    """
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+
+    def _degraded(root: Path, log: Any) -> Any:
+        log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+        return [], False
+
+    monkeypatch.setattr(merge_module, "discover_runs", _degraded)
+    messages: list[str] = []
+
+    ok = run_merge(tmp_path, 1, log=messages.append)
+
+    assert ok is True
+    assert any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert not any("nothing running" in m.lower() for m in messages)
+
+
+def test_degraded_poll_with_running_row_still_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded poll (`trustworthy=False`) only ever under-reports runs as
+
+    stopped, never invents one — so a `running` row it does surface is real
+    positive evidence and must still block/prompt, not be discarded because
+    other signals this round were degraded (issue #116's Orca-unreachable
+    scenario).
+    """
+    calls = _stub_merge_gh(monkeypatch, _open_pr())
+
+    def _degraded(root: Path, log: Any) -> Any:
+        log("warning: could not list open PRs (boom); runs may be misreported as stopped")
+        return [Run(217, "running", "pid 1")], False
+
+    monkeypatch.setattr(merge_module, "discover_runs", _degraded)
+    messages: list[str] = []
+
+    ok = run_merge(tmp_path, 1, log=messages.append)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+    assert any("217" in m for m in messages)
+
+
+def test_violations_checked_before_run_state_is_consulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked PR is refused on rule violations alone — run state is never asked."""
+    pr = _pr([{"path": "package-lock.json", "additions": 1, "deletions": 0}])
+    pr["state"] = "OPEN"
+    pr["title"] = "a change"
+    calls = _stub_merge_gh(monkeypatch, pr)
+
+    def _boom(root: Path, log: Any) -> Any:
+        raise AssertionError("run state must not be consulted when violations already block")
+
+    monkeypatch.setattr(merge_module, "discover_runs", _boom)
+
+    ok = run_merge(tmp_path, 1, log=lambda _msg: None)
+
+    assert ok is False
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in calls)
     assert any("labels" in c[-1] for c in calls if c[:3] == ["gh", "pr", "view"])

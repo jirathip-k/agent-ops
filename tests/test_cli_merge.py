@@ -53,3 +53,51 @@ def test_check_and_override_together_is_rejected(
     )
 
     assert result.exit_code == 1
+
+
+def test_check_and_force_together_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*a: object, **k: object) -> object:
+        raise AssertionError("neither run_merge nor run_merge_check should run")
+
+    monkeypatch.setattr(cli, "run_merge_check", _boom)
+    monkeypatch.setattr(cli, "run_merge", _boom)
+
+    result = runner.invoke(app, ["merge", "45", "--project", str(tmp_path), "--check", "--force"])
+
+    assert result.exit_code == 1
+
+
+def test_force_flag_is_passed_through_to_run_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_merge(root: Path, pr: int, **kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(cli, "run_merge", fake_run_merge)
+
+    result = runner.invoke(app, ["merge", "45", "--project", str(tmp_path), "--force"])
+
+    assert result.exit_code == 0
+    assert captured["force"] is True
+
+
+def test_default_invocation_passes_force_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_merge(root: Path, pr: int, **kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(cli, "run_merge", fake_run_merge)
+
+    result = runner.invoke(app, ["merge", "45", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["force"] is False

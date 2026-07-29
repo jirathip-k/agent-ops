@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from agent_ops import github, grants, orca, runs, worktree
-from agent_ops.config import ProjectConfig
+from agent_ops.config import LoopConfig, ProjectConfig
 from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import RunRequest, RunResult
 from agent_ops.utils import run
@@ -800,6 +800,51 @@ def test_finish_run_clears_a_persisted_grant_on_success(
 
     assert ok is True
     assert not grants.persist_path(tmp_path, 7).exists()
+
+
+def test_finish_run_auto_merge_is_exempt_from_the_in_flight_runs_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #258's in-flight-runs advisory is for a human who can batch merges;
+    `_finish_run`'s auto-merge has no human to advise and no batching option — it
+    merges the one PR this run just produced, at the only moment it can. So it
+    must pass `force=True` through to `run_merge` and merge even with other runs
+    reported in flight, rather than silently going dark under fan-out."""
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(implement_module.github, "create_pr", lambda *a, **k: "https://x/pull/76")
+
+    from agent_ops.workflows import merge as merge_module
+
+    captured: dict[str, object] = {}
+
+    def fake_run_merge(project_root: Path, pr_number: int, **kwargs: object) -> bool:
+        captured["pr_number"] = pr_number
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(merge_module, "run_merge", fake_run_merge)
+
+    ok = implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(loop=LoopConfig(auto_merge=True)),
+        _fake_issue(76, tmp_path),
+        76,
+        "issue-76",
+        "fix/issue-76",
+        tmp_path / "wt",
+        RunRequest(prompt="p", cwd=tmp_path / "wt"),
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 1, RunResult(ok=True, text="done"), []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    assert captured["pr_number"] == 76
+    assert captured["force"] is True
 
 
 def test_run_implement_fails_loudly_when_the_diff_exceeds_the_granted_scope(
