@@ -23,6 +23,7 @@ Labels: {issue_labels}
 
 {feedback}
 
+{ci_status}
 ## Authorization
 
 {authorization}
