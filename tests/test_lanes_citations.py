@@ -43,34 +43,34 @@ def _evolve_pipeline_line(n: int) -> str:
 
 
 def test_merge_shell_out_citation_matches_orchestrator() -> None:
-    assert "prompts/orchestrator.md:148" in LANES
-    assert "agent merge <PR_NUMBER> --project target --check" in _line(148)
+    assert "prompts/orchestrator.md:144" in LANES
+    assert "agent merge <PR_NUMBER> --project target --check" in _line(144)
 
 
 def test_auto_merge_range_citation_matches_orchestrator() -> None:
-    assert "prompts/orchestrator.md:160-171" in LANES
-    assert "AUTO_MERGE" in _line(160)
-    assert "Any condition failed" in _line(171)
+    assert "prompts/orchestrator.md:156-167" in LANES
+    assert "AUTO_MERGE" in _line(156)
+    assert "Any condition failed" in _line(167)
 
 
 def test_failure_handling_range_citation_matches_orchestrator() -> None:
-    assert "lines 105-113" in LANES
-    assert "Failure handling:" in _line(105)
-    assert "VERDICT: REQUEST CHANGES" in _line(108)
-    assert "reviewer feedback for the Implementer to act on." in _line(113)
+    assert "lines 101-109" in LANES
+    assert "Failure handling:" in _line(101)
+    assert "VERDICT: REQUEST CHANGES" in _line(104)
+    assert "reviewer feedback for the Implementer to act on." in _line(109)
 
 
 def test_review_gate_range_citation_matches_orchestrator() -> None:
-    assert "prompts/orchestrator.md:89-100,108-113,164-165" in LANES
-    assert "REVIEW GATE" in _line(89)
-    assert "same rule Step 3 applies to a failed" in _line(100)
-    assert "Tester verdict PASS and the Step 2A" in _line(164)
-    assert "VERDICT: APPROVE" in _line(165)
+    assert "prompts/orchestrator.md:85-96,104-109,160-161" in LANES
+    assert "REVIEW GATE" in _line(85)
+    assert "same rule Step 3 applies to a failed" in _line(96)
+    assert "Tester verdict PASS and the Step 2A" in _line(160)
+    assert "VERDICT: APPROVE" in _line(161)
 
 
 def test_step2b_reviewer_repair_citation_matches_orchestrator() -> None:
-    assert "prompts/orchestrator.md:124-125" in LANES
-    assert "REVIEWER (prompts/agents/reviewer.md)" in _line(125)
+    assert "prompts/orchestrator.md:120-121" in LANES
+    assert "REVIEWER (prompts/agents/reviewer.md)" in _line(121)
 
 
 def test_evolve_pipeline_citation_matches_workflow() -> None:

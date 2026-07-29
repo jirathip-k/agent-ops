@@ -51,7 +51,7 @@ from agent_ops.workflows.implement import make_plan, task_identifiers
 from agent_ops.workflows.merge import run_merge, run_merge_check, run_promote
 from agent_ops.workflows.review import DEFAULT_JOBS, FAILED_STATUSES, ReviewOutcome
 from agent_ops.workflows.spawn import REPORT_STATES
-from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS, TRIAGE_DONE_LABEL
+from agent_ops.workflows.triage import GATE_LABELS, LABEL_COLORS
 
 app = typer.Typer(
     name="agent",
@@ -106,7 +106,6 @@ ONBOARDING_LABELS: dict[str, Label] = {
         "1d76db", "Human go-ahead for an enhancement/idea to enter the normal lane"
     ),
     "blocked": Label("b60205", "Skipped by every lane until a human clears the blocker"),
-    TRIAGE_DONE_LABEL: Label("ededed", "The CI triage lane has already classified this issue"),
     "ready-to-merge": Label("0e8a16", "Passed every gate; held for merge (report-only mode)"),
     "hotfix-ready": Label("d93f0b", "Hotfix passed PASS+APPROVE; held for maintainer review"),
     "hotfix-backmerge": Label("5319e7", "Back-merge PR carrying a hotfix from stable to base"),

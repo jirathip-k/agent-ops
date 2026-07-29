@@ -5,12 +5,19 @@ from typing import Any
 
 import pytest
 
-from agent_ops import github, worktree
+from agent_ops import claims, github, worktree
 from agent_ops.config import ProjectConfig
+from agent_ops.prompts import render_task
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import PLATFORM_ROOT, CommandError
 from agent_ops.workflows import triage as triage_module
-from agent_ops.workflows.triage import GATE_LABELS, parse_triage, run_triage
+from agent_ops.workflows.triage import (
+    BUCKET_LABELS,
+    GATE_LABELS,
+    TRIAGE_DONE_LABEL,
+    parse_triage,
+    run_triage,
+)
 
 
 def _label_created_in(workflow: str, label: str) -> tuple[str, str]:
@@ -76,6 +83,32 @@ def test_uses_last_marker_and_ignores_junk_lines() -> None:
 
 def test_no_marker_returns_empty() -> None:
     assert parse_triage("no block here") == []
+
+
+def test_parses_a_reason_naming_bug_priority() -> None:
+    """#257: bug priority (P0/P1/P2) lives in the reasoning, not a fourth
+    bucket -- the reason line must still parse when it names one."""
+    text = "TRIAGE RESULTS:\n#9 agent-ready — P0: production is down, fix is a one-line revert\n"
+    results = parse_triage(text)
+    assert [(r.number, r.verdict) for r in results] == [(9, "agent-ready")]
+    assert results[0].reason.startswith("P0:")
+
+
+def test_triage_prompt_covers_every_behaviour_moved_from_the_orchestrator() -> None:
+    """#257: prompts/tasks/triage.md is now the single definition of
+    classification, so the behaviours that used to live only in
+    prompts/orchestrator.md Step 1 must render here. Brace-safety (`.format()`
+    doesn't choke on a stray `{`/`}`) is covered by `test_task_templates_render`
+    in test_prompts.py; this pins the content itself."""
+    rendered = render_task("triage", issues="### #1: t")
+    for marker in (
+        "agent:claimed",
+        "gh api repos/<owner>/<repo>/issues/<N>/events",
+        "production down",
+        "duplicate",
+        "triage:done",
+    ):
+        assert marker in rendered, marker
 
 
 class _FakeRuntime:
@@ -212,6 +245,194 @@ def test_run_triage_survives_gh_not_being_installed(
 
     assert [(r.number, r.verdict) for r in results] == [(12, "agent-ready")]
     assert any("could not sync labels" in line for line in logged)
+
+
+def test_run_triage_skips_issues_settled_with_a_bucket_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#257 follow-up: settled means carrying any bucket label, `triage:done`
+    or not -- an issue carrying a bucket alongside the stamp is still not
+    sent to the prompt again."""
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(
+                json.dumps(
+                    [
+                        _issue(12),
+                        {
+                            **_issue(13),
+                            "labels": [{"name": TRIAGE_DONE_LABEL}, {"name": "backlog"}],
+                        },
+                    ]
+                )
+            )
+            if cmd[:3] == ["gh", "issue", "list"]
+            else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime("TRIAGE RESULTS:\n#12 agent-ready — clear repro\n"), RunRequest(
+            prompt=prompt, cwd=cwd
+        )
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    results = run_triage(tmp_path, log=lambda _msg: None)
+
+    assert [(r.number, r.verdict) for r in results] == [(12, "agent-ready")]
+    assert "#13" not in prompts[0]
+
+
+def test_run_triage_skips_a_bucket_label_without_triage_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a `needs-human` issue with no `triage:done` stamp -- a
+    human's hold, or a legacy bucket applied before the stamp existed --
+    must never reach the classification prompt. The model classifying below
+    never sees existing labels (only number, title and body reach it), so it
+    cannot be trusted to honor the hold; the old `triage:done`-AND-bucket
+    predicate let this fall through, get reclassified, and stack a
+    contradicting verdict on top of the hold instead of respecting it."""
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(json.dumps([_issue(12), {**_issue(13), "labels": [{"name": "needs-human"}]}]))
+            if cmd[:3] == ["gh", "issue", "list"]
+            else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime("TRIAGE RESULTS:\n#12 agent-ready — clear repro\n"), RunRequest(
+            prompt=prompt, cwd=cwd
+        )
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    results = run_triage(tmp_path, log=lambda _msg: None)
+
+    assert [(r.number, r.verdict) for r in results] == [(12, "agent-ready")]
+    assert "#13" not in prompts[0]
+
+
+def test_run_triage_reprocesses_a_legacy_triage_done_only_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#257 follow-up: `triage:done` with no bucket -- a legacy issue from
+    before Housekeeping applied one alongside the stamp, or one that would
+    exist if that ever regressed -- is picked back up and bucketed normally
+    rather than left orphaned forever."""
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(json.dumps([{**_issue(13), "labels": [{"name": TRIAGE_DONE_LABEL}]}]))
+            if cmd[:3] == ["gh", "issue", "list"]
+            else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime(
+            "TRIAGE RESULTS:\n#13 backlog — idea, no acceptance criteria\n"
+        ), RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    results = run_triage(tmp_path, log=lambda _msg: None)
+
+    assert prompts and "#13" in prompts[0]
+    assert [(r.number, r.verdict) for r in results] == [(13, "backlog")]
+
+
+def test_run_triage_skips_agent_claimed_issues_outright(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#257 follow-up: an issue a local agent is actively implementing must
+    never reach a triage pass, or a read-only classification could stamp it
+    `needs-human` + `triage:done` underneath the live run."""
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        triage_module,
+        "run",
+        lambda cmd, **kwargs: (
+            _FakeProc(
+                json.dumps([_issue(12), {**_issue(14), "labels": [{"name": claims.CLAIM_LABEL}]}])
+            )
+            if cmd[:3] == ["gh", "issue", "list"]
+            else _FakeProc("")
+        ),
+    )
+
+    def fake_role_request(
+        config: ProjectConfig, role_name: str, prompt: str, cwd: Path, **kwargs: object
+    ) -> tuple[object, RunRequest]:
+        prompts.append(prompt)
+        return _FakeRuntime("TRIAGE RESULTS:\n#12 agent-ready — clear repro\n"), RunRequest(
+            prompt=prompt, cwd=cwd
+        )
+
+    monkeypatch.setattr(triage_module, "role_request", fake_role_request)
+    monkeypatch.setattr(worktree, "create_detached", lambda *args, **kwargs: tmp_path / "wt")
+    monkeypatch.setattr(worktree, "remove", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    results = run_triage(tmp_path, log=lambda _msg: None)
+
+    assert [(r.number, r.verdict) for r in results] == [(12, "agent-ready")]
+    assert "#14" not in prompts[0]
+
+
+def test_run_triage_stamps_triage_done_alongside_the_bucket_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#257: local both respects and now writes `triage:done`, matching what
+    the shared prompt expects both surfaces to do."""
+    calls = _stub_triage_run(
+        monkeypatch,
+        tmp_path,
+        "TRIAGE RESULTS:\n#12 agent-ready — clear repro\n",
+        [_issue(12)],
+    )
+    monkeypatch.setattr(github, "sync_labels", lambda *a, **k: github.LabelSync([], [], [], []))
+
+    run_triage(tmp_path, log=lambda _msg: None)
+
+    edit_calls = [c for c in calls if c[:3] == ["gh", "issue", "edit"]]
+    assert len(edit_calls) == 1
+    edit = edit_calls[0]
+    assert edit[3] == "12"
+    add_labels = [edit[i + 1] for i, arg in enumerate(edit) if arg == "--add-label"]
+    assert set(add_labels) == {"agent-ready", TRIAGE_DONE_LABEL}
+
+
+def test_bucket_labels_and_triage_done_never_overlap() -> None:
+    assert TRIAGE_DONE_LABEL not in BUCKET_LABELS
 
 
 def test_run_triage_logs_a_single_label_failure_without_aborting(

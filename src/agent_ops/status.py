@@ -32,7 +32,12 @@ GATE_STAGES = ("plan-requested", "spec-requested")
 # issue (`agent-ready` + `agent:claimed`) counts once, at the furthest-along
 # stage — `agent:claimed` beats every gate label (it's being worked, not
 # merely requested), the buckets keep triage's own order, and `triage:done`
-# (classified but left bucketless) sits last, just above "untriaged".
+# sits last, just above "untriaged": a bucketed issue is stamped too but
+# counts under its bucket first, so only issues triage stamped without a
+# bucket land here. `stage_counts` only ever sees open issues, so a
+# terminally handled issue (closed as a duplicate/invalid, or answered) is
+# never counted here — a nonzero count is an open, bucketless stamp: the
+# legacy/regression case the local lane re-triages (see triage.py).
 STAGE_PRECEDENCE: tuple[str, ...] = (CLAIM_LABEL, *GATE_STAGES, *BUCKETS, TRIAGE_DONE_LABEL)
 
 # Which lane(s) consume each stage — a stage held here with none of its lanes

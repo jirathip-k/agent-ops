@@ -24,8 +24,11 @@ from agent_ops.utils import CommandError
 # `status.STAGE_PRECEDENCE` for "what stage is this issue at", ending with the
 # claimed ("run") stage. `needs-human` and `triage:done` are deliberately
 # excluded — `needs-human` surfaces in the waiting-on-you row instead, and
-# `triage:done` (classified but left bucketless) does not read as a step an
-# issue moves through on its way to a PR.
+# `triage:done` (stamped on every processed issue, but only counted here when
+# open and bucketless — a terminally handled issue is closed and never
+# reaches this data) does not read as a step an issue moves through on its
+# way to a PR; a nonzero count is the legacy/regression case the local lane
+# re-triages, not progress.
 FLOW_ORDER: tuple[tuple[str, str], ...] = (
     ("untriaged", "untriaged"),
     ("backlog", "backlog"),

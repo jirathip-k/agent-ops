@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_ops import github, messages, worktree
+from agent_ops import claims, github, messages, worktree
 from agent_ops.config import load_project_config
 from agent_ops.fallback import run_with_fallback
 from agent_ops.github import Label
@@ -14,14 +14,31 @@ from agent_ops.prompts import render_task
 from agent_ops.utils import SLOW_GIT_TIMEOUT_S, CommandError, run
 from agent_ops.workflows.implement import role_request
 
-# An issue is classified only when it carries a bucket label. The CI lane
-# stamps `triage:done` on everything it processes but (report-only) leaves
-# bugs bucketless — those must still be triaged here, or the queue starves.
+# An issue is settled -- skipped by future runs -- once it carries ANY
+# bucket label, regardless of `triage:done`. A bucket label is authoritative
+# no matter who applied it or when: a human's go-ahead (docs/workflow.md), a
+# human's `needs-human`, and every issue this lane already bucketed are all
+# settled the same way. The model classifying issues below never sees an
+# issue's existing labels -- only number, title and body reach the prompt
+# (see `issues_text` below) -- so it cannot be trusted to honor one it can't
+# see: any rule that depends on an issue's existing labels has to be
+# enforced here, in the query, never in the prompt. (A prior version of this
+# guard required `triage:done` alongside the bucket, which let a bucket a
+# human applied by hand -- or one this lane applied before `triage:done`
+# existed -- fall through to be reclassified and, worst case, dispatched
+# out from under a `needs-human` hold; see #257.)
+#
+# `triage:done` with no bucket is the one case NOT settled: it means
+# Housekeeping stamped the issue without ever bucketing it (a legacy issue
+# from before that pairing was guaranteed, prompts/tasks/triage.md, #257, or
+# one that would exist if it ever regressed) -- picked back up and bucketed
+# normally rather than left orphaned.
 BUCKET_LABELS = {"agent-ready", "needs-human", "backlog"}
 
-# The CI lane's "processed but not yet bucketed" marker (see the comment
-# above). Named here, not just inline where it's used, so `agent status
-# --pipeline` can list it as a pipeline stage without retyping the string.
+# Stamped by both surfaces on every processed issue (see the comment above).
+# Named here, not just inline where it's used, so `agent status --pipeline`
+# can list it as a pipeline stage without retyping the string, and so
+# LABEL_COLORS can sync it before either surface ever writes it.
 TRIAGE_DONE_LABEL = "triage:done"
 
 LABEL_COLORS: dict[str, Label] = {
@@ -30,6 +47,9 @@ LABEL_COLORS: dict[str, Label] = {
     "backlog": Label("c5def5", "Idea without acceptance criteria yet — not actionable"),
     "found-by-audit": Label("fbca04", "Filed by an agent auditing the codebase, never fixed by it"),
     "proposed-by-agent": Label("bfd4f2", "Filed by the scout lane from a mined signal"),
+    TRIAGE_DONE_LABEL: Label(
+        "ededed", "Triage has processed this issue — bucketed, or handled without one"
+    ),
 }
 
 # The labels the spec/plan CI lanes select on. Not verdict labels for triage,
@@ -94,10 +114,17 @@ def run_triage(
         ],
         cwd=project_root,
     )
+    # `agent:claimed` means a run is actively implementing this issue right
+    # now (see claims.py) -- a triage pass must never stamp it `needs-human` +
+    # `triage:done` underneath that run, so it is skipped outright rather
+    # than handed to the prompt's stale-claim check, which this surface lacks
+    # the tools (`gh api ... /events`, `gh issue edit`) to act on anyway.
+    always_skip = {claims.CLAIM_LABEL}
     issues = [
         i
         for i in json.loads(proc.stdout)
-        if not BUCKET_LABELS & {lbl["name"] for lbl in i.get("labels", [])}
+        if not (labels := {lbl["name"] for lbl in i.get("labels", [])}) & always_skip
+        and not (BUCKET_LABELS & labels)
     ]
     if not issues:
         log("nothing to triage — every open issue is already classified")
@@ -151,7 +178,19 @@ def run_triage(
             log(f"could not sync label {name}: {reason}")
 
     for r in results:
-        run(["gh", "issue", "edit", str(r.number), "--add-label", r.verdict], cwd=project_root)
+        run(
+            [
+                "gh",
+                "issue",
+                "edit",
+                str(r.number),
+                "--add-label",
+                r.verdict,
+                "--add-label",
+                TRIAGE_DONE_LABEL,
+            ],
+            cwd=project_root,
+        )
         run(
             [
                 "gh",

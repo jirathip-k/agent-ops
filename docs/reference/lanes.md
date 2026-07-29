@@ -28,31 +28,84 @@ that is this page falling out of date — fix the page, don't route around it.
 | spec | `agent spec` — `src/agent_ops/cli.py` (`spec`) → `workflows/spec.py` | `uv run agent spec` — `.github/workflows/spec-pipeline.yml:155` | yes |
 | plan | `agent plan --post` — `src/agent_ops/cli.py` (`plan`) | `uv run agent plan --post` — `.github/workflows/plan-pipeline.yml:154` | yes |
 | evolve | `agent evolve <lane>` — `src/agent_ops/cli.py` (`evolve`) → `src/agent_ops/workflows/evolve.py` (`run_evolve`) | `uv run agent evolve "$LANE"` — `.github/workflows/evolve-pipeline.yml:160`, one call per lane via the weekly sweep matrix in `evolve.yml` (#153) | yes |
-| triage | `src/agent_ops/cli.py` (`triage`) → `src/agent_ops/workflows/triage.py` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-80) | **no** |
-| implement | `src/agent_ops/cli.py` (`implement`) → `src/agent_ops/workflows/implement.py` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 86, role file `prompts/agents/implementer.md` | **no** |
-| review | `src/agent_ops/cli.py` (`review`) → `src/agent_ops/workflows/review.py` (`run_review`), fan-out at `src/agent_ops/workflows/review.py` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 89 | **yes** (#171) |
-| merge | `agent merge --check` — `src/agent_ops/cli.py` (`merge`) → `src/agent_ops/workflows/merge.py` (`run_merge`) / `src/agent_ops/workflows/merge.py` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 148, shells out to `src/agent_ops/workflows/merge.py` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
+| triage | `src/agent_ops/cli.py` (`triage`) → `src/agent_ops/workflows/triage.py` (`run_triage`) | `.github/workflows/triage-pipeline.yml:196` (`claude-code-action` step) running `prompts/orchestrator.md` Step 1 (lines 46-74), which defers to `prompts/tasks/triage.md` for classification | **partially** (#257) |
+| implement | `src/agent_ops/cli.py` (`implement`) → `src/agent_ops/workflows/implement.py` (`run_implement`) | `prompts/orchestrator.md` Step 2A item 2, line 82, role file `prompts/agents/implementer.md` | **no** |
+| review | `src/agent_ops/cli.py` (`review`) → `src/agent_ops/workflows/review.py` (`run_review`), fan-out at `src/agent_ops/workflows/review.py` (`run_reviews`) | `uv run --project agent-ops agent review <PR_NUMBER> --project target --post --check` — `prompts/orchestrator.md` Step 2A item 4, line 85 | **yes** (#171) |
+| merge | `agent merge --check` — `src/agent_ops/cli.py` (`merge`) → `src/agent_ops/workflows/merge.py` (`run_merge`) / `src/agent_ops/workflows/merge.py` (`evaluate_merge`) | `prompts/orchestrator.md` Step 3, line 144, shells out to `src/agent_ops/workflows/merge.py` (`run_merge_check`) for the same `evaluate_merge` | **partially** (#150) |
 
 ## The three diverged lanes
 
-**triage.** Local `src/agent_ops/workflows/triage.py` (`run_triage`) renders
-`prompts/tasks/triage.md`, parses a `TRIAGE RESULTS:` block out of the model's
-reply, and classifies unbucketed issues into `agent-ready` / `needs-human` /
-`backlog`, with an optional `--dispatch` to hand qualifying issues straight to
-implement. CI triage is `prompts/orchestrator.md` Step 1 (lines 46-80), run by
-`claude-code-action` inside `.github/workflows/triage-pipeline.yml` (the step
-starts at line 196; the prompt is assembled at lines 219-227, with
-`AUTO_MERGE` passed at line 222). It does
-everything the local lane does, plus things the local lane does not: it routes
-P0 bugs to a hotfix lane (Step 2B), clears stale `agent:claimed` labels older
-than 8 hours, closes duplicates, answers verifiable questions, caps selection
-at 3 issues per run, and stamps `triage:done` — a label the local lane never
-writes or reads (see the comment above `src/agent_ops/workflows/triage.py` (`BUCKET_LABELS`),
-which exists precisely so the local lane keeps triaging issues the CI lane
-marked done but left bucketless). `agent status --pipeline` counts how many
-open issues carry each of these stage labels, fleet-wide, and how long the
-oldest one in each stage has sat there (issue #227) — the thing this table
-of labels doesn't show on its own.
+**triage — partially converged (#257).** Both surfaces now render the exact
+same classification definition, `prompts/tasks/triage.md`: local `run_triage`
+(`src/agent_ops/workflows/triage.py` (`run_triage`)) renders it via
+`src/agent_ops/prompts.py` (`render_task`), parses a `TRIAGE RESULTS:` block
+out of the model's reply, and applies the verdict in code; CI's
+`prompts/orchestrator.md` Step 1 (lines 46-74, run by `claude-code-action`
+inside `.github/workflows/triage-pipeline.yml` — the step starts at line 196;
+the prompt is assembled at lines 219-227, with `AUTO_MERGE` passed at line
+222) lists issues and then tells the orchestrator model to apply the same task
+prompt in full, rather than restating its buckets, bug-priority rule,
+stale-claim clearing, duplicate/question handling, or `triage:done` stamp.
+Buckets, priorities, and the label itself no longer drift between the two.
+
+What still differs is what wraps the shared definition, not the definition
+itself. CI's Step 1 keeps its own orchestration prose — the skip-label
+listing, the `agent-ready`/`approved-for-agent` override, the P0-hotfix vs.
+normal-lane routing map, and the cap of 3 issues per run — none of which is
+classification. More importantly, CI grants the orchestrator model
+issue-write tools, so the shared prompt's Housekeeping section — applying the
+bucket label and posting the `**Triage: <bucket>** — <reason>` comment,
+clearing a stale `agent:claimed` past 8 hours, closing duplicates/invalids,
+answering and closing verifiable questions — actually executes there,
+performed by the model itself. The local surface's prompt invocation grants
+only `gh issue create/list` and `gh search issues` (for filing audit
+findings) — no `gh issue edit`/`close`/`api`/`comment` — so the model there
+only classifies; local `src/agent_ops/workflows/triage.py` (`run_triage`)
+applies the bucket label and posts the same comment in code afterward, and the
+same gating rule means local never clears claims, closes duplicates, or
+answers questions itself.
+
+**What counts as settled differs between the two surfaces, and this is a
+real, accepted divergence, not an oversight.** Local (`run_triage`) treats
+ANY bucket label as settled, regardless of `triage:done` — see the comment
+above `src/agent_ops/workflows/triage.py` (`BUCKET_LABELS`), #257 follow-up:
+a bucket label is authoritative no matter who applied it or when, because the
+classifying model never sees an issue's existing labels — only number, title
+and body reach the prompt — so it cannot be trusted to honor one it can't see.
+An earlier version of this guard required `triage:done` alongside the bucket,
+which let a human-applied or pre-#257 bucket fall through to be
+reclassified — the local lane's own `gh issue edit` could then have stacked a
+contradicting verdict on top of a `needs-human` hold. `triage:done` with no
+bucket is the one case NOT settled by this rule, and it only ever reaches
+`run_triage` as a still-*open* issue: a legacy issue stamped before the
+bucket-alongside-stamp pairing was guaranteed, or one that would appear if
+that pairing ever regressed (a closed duplicate/invalid or an answered
+question is also `triage:done` with no bucket, but `--state open` already
+excludes it, so it is never a candidate to re-pick up). That one case is
+picked back up and bucketed normally rather than left orphaned. CI's Step 1
+item 1 (`prompts/orchestrator.md:47-64`, unchanged by this pass) still
+requires `triage:done` together with a bucket label as its own skip
+condition. That is not the same blind spot local had: Step 1 lists issues
+itself before classifying them, so — unlike local's classification prompt —
+it does see the labels it is skipping on, and it doubles as CI's dispatch
+selector (its `agent-ready`/`approved-for-agent` exception re-enters the
+normal lane on every run so an already-approved issue keeps getting
+implemented), a job local's `agent triage` does not do. Converging Step 1's
+skip wording onto the same bucket-alone rule is tracked under #171 rather
+than folded into this pass, which scoped its code change to the local lane
+the reviewed regression was found in.
+
+Local additionally skips `agent:claimed` issues outright before they ever
+reach the prompt, in the same `src/agent_ops/workflows/triage.py`
+(`run_triage`) query: it holds none of the tools (`gh api .../events`,
+`gh issue edit`) the shared prompt's stale-claim procedure needs, so leaving
+that call to a read-only classification could stamp `needs-human` +
+`triage:done` over an issue a run is actively implementing. CI still hands
+`agent:claimed` issues to the prompt, since it has those tools and can act on
+the stale-claim result itself. `agent status --pipeline` counts how many open
+issues carry each of these stage labels, fleet-wide, and how long the oldest
+one in each stage has sat there (issue #227) — the thing this table of labels
+doesn't show on its own.
 
 **implement.** Local `src/agent_ops/workflows/implement.py` (`run_implement`)
 works in an isolated git worktree, runs a plan stage, then a gate loop that
@@ -60,10 +113,10 @@ retries up to `loop.max_attempts` (default 3, `src/agent_ops/config.py` (`LoopCo
 times with a fresh context on failure, plus a coded self-review pass and
 claim/release bookkeeping (#131) so two runs can't collide on the same issue.
 CI implement is a single subagent inside the Actions workspace
-(`prompts/orchestrator.md` Step 2A item 2, line 86, role file
+(`prompts/orchestrator.md` Step 2A item 2, line 82, role file
 `prompts/agents/implementer.md`): no worktree, no coded gate loop — the only
 retry is the orchestrator's one prose-driven revision round after a Tester
-FAIL (Step 2A, "Failure handling", lines 105-113).
+FAIL (Step 2A, "Failure handling", lines 101-109).
 
 **merge — partially converged.** This row differs from the issue that
 prompted this page: #150 ("CI lane and `agent merge` now disagree on what a
@@ -73,11 +126,11 @@ converged the *cap evaluation* itself. Diff-size and blocked-path caps are now
 judged by one function, `src/agent_ops/workflows/merge.py` (`evaluate_merge`),
 on both sides: local `agent merge` calls it via
 `src/agent_ops/workflows/merge.py` (`run_merge`), and CI Step 3
-(`prompts/orchestrator.md:148`) shells out to
+(`prompts/orchestrator.md:144`) shells out to
 `uv run --project agent-ops agent merge <PR> --project target --check`, which
 is `src/agent_ops/workflows/merge.py` (`run_merge_check`) wrapping the same
 `evaluate_merge`. What is still diverged is the merge *decision and action*:
-on CI that remains orchestrator prose (`prompts/orchestrator.md:160-171`) —
+on CI that remains orchestrator prose (`prompts/orchestrator.md:156-167`) —
 the Tester PASS + `agent review --check` gate, the open-ended "no infra files
 the check doesn't cover" rule, the `AUTO_MERGE` report-only toggle, and the
 squash itself are all judged and performed by the orchestrator model, not by
@@ -101,7 +154,7 @@ Step 2A item 4 now shells out to `agent review --check`
 (`src/agent_ops/cli.py` (`review`)), which runs the exact same `run_review` /
 `verdict_of` code path as the local lane, honours its exit code and printed
 `VERDICT:` line, and feeds that into both the Step 2A revision-round rule and
-the Step 3 merge gate (`prompts/orchestrator.md:89-100,108-113,164-165`).
+the Step 3 merge gate (`prompts/orchestrator.md:85-96,104-109,160-161`).
 `prompts/agents/reviewer.md` was also anchored to require the same `VERDICT:`
 line, since it is still the role file Step 2B's hotfix lane spawns as a
 subagent — that lane is unconverged and out of scope for #171 (see below for
@@ -111,7 +164,7 @@ Converting Step 2A's item 4 from a subagent to a shelled-out check removed the
 orchestrator's only other reference to `prompts/agents/reviewer.md`, so Step
 2B's "run the same four agents" (which named no agents) stopped resolving to
 anything — the hotfix lane's review step had gone undefined. Step 2B item 2
-(`prompts/orchestrator.md:124-125`) now names all four agents explicitly,
+(`prompts/orchestrator.md:120-121`) now names all four agents explicitly,
 including `REVIEWER (prompts/agents/reviewer.md)`, restoring what the
 reference used to resolve to. This is a repair of the reference broken by the
 review-lane convergence, not a change to Step 2B's behavior: its overrides,
@@ -170,8 +223,10 @@ convergence work. Tracked as a follow-up rather than folded into this file.
 ## What happens next
 
 - [#171](https://github.com/jirathip-k/agent-ops/issues/171) — converge
-  triage, review, and implement onto one implementation instead of two. The
-  review row above is the first to flip; triage and implement remain "no."
+  triage, review, and implement onto one implementation instead of two. Review
+  flipped first; triage's classification definition converged in #257, though
+  its CI wrapper and issue-write actions still diverge (see the triage row
+  above); implement remains "no."
 - [#150](https://github.com/jirathip-k/agent-ops/issues/150) — closed; the
   merge-cap convergence documented in the merge row above.
 - [#139](https://github.com/jirathip-k/agent-ops/issues/139) — open, not yet
