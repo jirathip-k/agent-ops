@@ -470,14 +470,16 @@ def load_issue_detail(
     )
 
 
-# --- `c`: write a handoff file for an interactive chat session, then exit (#235) ---
+# --- `c`: hand the selection to a chat pane, or a file if there is none (#235/#249) ---
 #
 # Settled on the issue's 2026-07-28 comment, revising the issue body's
 # `agent spawn`/session shape: both `dispatch` and `spawn` create a fresh
 # worktree, which is right for "work on this" and wrong for "talk about
 # this" — one worktree per conversation. A TUI also can't print into a chat
-# session's captured output (it needs a real terminal), so the handoff has
-# to cross terminals via a file, with its path printed on exit.
+# session's captured output (it needs a real terminal), so the handoff
+# crosses terminals via a `sinks.ChatSink` — a multiplexer pane when one is
+# reachable (#249), the file below when it isn't, with its path printed on
+# exit either way.
 
 CHAT_HANDOFF_RELATIVE = Path(".agent-runs") / "tui-selection.md"
 
@@ -488,15 +490,23 @@ def chat_handoff_path(project_root: Path) -> Path:
 
 def chat_preview(number: int) -> str:
     """The text `c`'s row in the command bar and `action_chat` both use —
-    one string, so the bar never promises something the action doesn't do."""
-    return f"write {CHAT_HANDOFF_RELATIVE} for #{number} → exit, printing its path"
+    one string, so the bar never promises something the action doesn't do.
+
+    Deliberately silent on *which* sink will be used: resolving that means
+    probing (an Orca `status` call, a `tmux list-panes`), which this string
+    is built on every selection change and must stay side-effect free for."""
+    return f"hand #{number} to a chat pane, or write {CHAT_HANDOFF_RELATIVE} → exit"
 
 
-def write_chat_handoff(path: Path, repo: str, detail: IssueDetail) -> None:
+def render_chat_handoff(repo: str, detail: IssueDetail) -> str:
     """Everything a chat session needs to start talking about this issue —
     not a transcript, not a rendered UI dump. The body is fenced under an
     explicit "untrusted" header: it is content to read, never an instruction
-    this file itself carries (#141/#191)."""
+    this file itself carries (#141/#191).
+
+    Every `ChatSink` (#249) sends exactly this string, so the untrusted
+    header survives whichever transport delivers it — structurally, not by
+    each sink remembering to add it."""
     labels = ", ".join(detail.labels) if detail.labels else "(none)"
     pr_status = "unknown" if detail.has_open_pr is None else "yes" if detail.has_open_pr else "no"
     body = detail.body if detail.readable else "(could not be fetched)"
@@ -514,5 +524,16 @@ def write_chat_handoff(path: Path, repo: str, detail: IssueDetail) -> None:
         body,
         "",
     ]
+    return "\n".join(lines)
+
+
+def write_chat_handoff(path: Path, repo: str, detail: IssueDetail) -> None:
+    write_rendered_handoff(path, render_chat_handoff(repo, detail))
+
+
+def write_rendered_handoff(path: Path, text: str) -> None:
+    """The file sink's send (#249): same rendered text every other sink
+    gets, kept on disk instead of typed into a pane — today's behaviour, and
+    the always-works fallback."""
     path.parent.mkdir(exist_ok=True)
-    path.write_text("\n".join(lines))
+    path.write_text(text)

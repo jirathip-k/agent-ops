@@ -81,7 +81,7 @@ def _main(ctx: typer.Context) -> None:
 
         try:
             path = run_tui(Path("."))
-        except ValueError as exc:
+        except (ValueError, CommandError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
         if path is not None:
@@ -1559,7 +1559,7 @@ def tui(project: ProjectOpt = Path(".")) -> None:
 
     try:
         path = run_tui(project.resolve())
-    except ValueError as exc:
+    except (ValueError, CommandError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
     if path is not None:

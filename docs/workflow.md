@@ -619,3 +619,54 @@ comment and status from the PR's check results.
 - First run for a new lane pauses ~15-30s: Orca notices external worktrees on
   a periodic rescan, so the sync waits once per batch. If it still reports
   `not indexed by Orca yet`, just re-run it.
+
+## Pipeline TUI chat handoff (`c`)
+
+`agent tui`'s `c` key hands the selected issue to a chat session instead of
+dispatching it — for "talk about this" rather than "work on this" (issue
+#235). It renders the issue under an explicit untrusted-content header, then
+sends that text through whichever `ChatSink` is reachable, probed in order:
+
+| Sink | Detected via |
+|---|---|
+| tmux | `$TMUX`, exactly one other pane in the window |
+| wezterm | `$WEZTERM_PANE`, exactly one other pane in the tab |
+| kitty | `$KITTY_WINDOW_ID`, exactly one other window in the tab |
+| Orca | `orca status` ok, exactly one other terminal on this worktree's card |
+| file | always — writes `.agent-runs/tui-selection.md` and exits, printing its path |
+
+Zellij is not in this auto-probe table: `zellij action write-chars` hits
+whichever pane is currently focused, and there is no race-free way to target
+a specific *other* pane the way every sink above does — reachable instead
+through `tui.chat_sink` (below) for anyone who wants it, focus-dependent risk
+accepted deliberately.
+
+A live sink hands the text to the neighbouring pane wrapped in bracketed-paste
+escape sequences (`ESC[200~...ESC[201~`) instead of typing it keystroke by
+keystroke, and never sends a trailing Enter — the TUI keeps running (the
+multiplexer already split the screen). Only the file sink — the fallback for
+a bare terminal, ssh/mosh, or an unlisted multiplexer — ends the session.
+
+**That "arrives staged, not executed" guarantee only holds if the receiving
+program understands bracketed paste.** A modern shell (zsh, recent bash,
+fish) or a paste-aware chat CLI enables it, sees the escape sequences, and
+holds the whole payload — embedded newlines included — as unsubmitted input
+until a human presses Enter. `dash`, older `bash`, and plain REPLs never
+enable it: to them the escape bytes are just more input, and they read and
+execute the payload line by line as it arrives, exactly as if it had been
+typed. The sink verifies a pane exists and is not the TUI's own, but it
+**cannot verify what program is running in that pane or whether it has
+bracketed paste on** — the operator is trusting the neighbour is a
+bracketed-paste-aware receiver, the same trust they'd place in a terminal
+they were about to paste untrusted clipboard content into by hand.
+
+Set `tui.chat_sink` in `.agent/config.yaml` to force a sink or reach a
+multiplexer not in the table above:
+
+    tui:
+      chat_sink: "mymux send --pane right -- {text}"
+
+`{text}` is substituted as a single argument, never through a shell, so a
+body with backticks or `$(...)` arrives as characters rather than being
+executed. The template must be non-blank and contain `{text}` — config load
+refuses it otherwise, naming `tui.chat_sink` in the error.
