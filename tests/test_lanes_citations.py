@@ -35,6 +35,12 @@ DISTILL_PIPELINE_LINES = (
 CLASSIFY_PIPELINE_LINES = (
     (PLATFORM_ROOT / ".github" / "workflows" / "classify-pipeline.yml").read_text().splitlines()
 )
+IMPLEMENT_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "implement-pipeline.yml").read_text().splitlines()
+)
+IMPLEMENT_STUB_LINES = (
+    (PLATFORM_ROOT / "stubs" / "managed-repo-implement.yml").read_text().splitlines()
+)
 
 
 def _line(n: int) -> str:
@@ -98,6 +104,23 @@ def test_distill_pipeline_citation_matches_pipeline() -> None:
 def test_classify_pipeline_citation_matches_pipeline() -> None:
     assert ".github/workflows/classify-pipeline.yml:118" in LANES
     assert "uv run agent triage" in CLASSIFY_PIPELINE_LINES[118 - 1]
+
+
+def test_implement_pipeline_citations_match_workflow() -> None:
+    assert ".github/workflows/implement-pipeline.yml:138" in LANES
+    assert 'uv run agent implement "$ISSUE"' in IMPLEMENT_PIPELINE_LINES[138 - 1]
+    assert ".github/workflows/implement-pipeline.yml:109-117" in LANES
+    assert "openai/codex-action@v1" in IMPLEMENT_PIPELINE_LINES[113 - 1]
+    assert "safety-strategy: drop-sudo" in IMPLEMENT_PIPELINE_LINES[117 - 1]
+    assert ".github/workflows/implement-pipeline.yml:123-138" in LANES
+    assert "unset CLAUDE_CODE_OAUTH_TOKEN" in IMPLEMENT_PIPELINE_LINES[136 - 1]
+
+
+def test_implement_stub_citation_matches_required_dispatch_input() -> None:
+    assert "stubs/managed-repo-implement.yml:14-20" in LANES
+    assert "workflow_dispatch:" in IMPLEMENT_STUB_LINES[15 - 1]
+    assert "required: true" in IMPLEMENT_STUB_LINES[19 - 1]
+    assert "type: number" in IMPLEMENT_STUB_LINES[20 - 1]
 
 
 def test_classify_override_citation_matches_orchestrator() -> None:

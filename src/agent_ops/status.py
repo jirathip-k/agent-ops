@@ -55,7 +55,9 @@ STAGE_CONSUMERS: dict[str, frozenset[str]] = {
     # label, so it never picks up a plain backlog issue — listing it here
     # would have rendered backlog serviced by a lane that can't reach it.
     "backlog": frozenset({"groom"}),
-    "agent-ready": frozenset({"triage"}),  # triage pipeline's implement step
+    # The manual implement lane does not scan this stage; triage remains the
+    # automatic queue consumer until #296's lane graduates from dispatch-only.
+    "agent-ready": frozenset({"triage"}),
     **{stage: frozenset({stage.removesuffix("-requested")}) for stage in GATE_STAGES},
 }
 
@@ -65,7 +67,18 @@ STAGE_CONSUMERS: dict[str, frozenset[str]] = {
 # stub with a `schedule:`. Both are still listed so `agent status` and lane
 # validation treat them as real lanes rather than accidentally-valid names
 # that merely happen to have a prompt file.
-LANES = ("triage", "classify", "groom", "promote", "spec", "plan", "scout", "evolve", "distill")
+LANES = (
+    "triage",
+    "classify",
+    "implement",
+    "groom",
+    "promote",
+    "spec",
+    "plan",
+    "scout",
+    "evolve",
+    "distill",
+)
 
 # Name of the control repo hosting the reusable pipelines. Detection accepts
 # any owner prefix (`<owner>/agent-ops/...`) so forks keep working, plus the

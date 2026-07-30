@@ -39,6 +39,7 @@ from agent_ops.gates import missing_requirements
 from agent_ops.github import Label
 from agent_ops.runs import issue_from_branch
 from agent_ops.runtimes import get_runtime, runtime_names
+from agent_ops.runtimes.credentials import capture_ci_credentials
 from agent_ops.status import STAGE_CONSUMERS, local_deployed_lanes
 from agent_ops.utils import PLATFORM_ROOT, CommandError, run
 from agent_ops.workflows import (
@@ -369,6 +370,9 @@ def implement(
 ) -> None:
     """Implement a GitHub issue: worktree → agent loop → gates → self-review → PR."""
     try:
+        # CI may hand provider auth to the adapters through one-shot carriers.
+        # Consume them before setup or gates can inherit those credentials.
+        capture_ci_credentials()
         ok = run_implement(
             project.resolve(),
             issue,
@@ -382,6 +386,44 @@ def implement(
     except (CommandError, FileExistsError, RuntimeError, FileNotFoundError) as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command("runtime-preflight")
+def runtime_preflight(project: ProjectOpt = Path(".")) -> None:
+    """Resolve every configured role and require each runtime CLI before a run."""
+    try:
+        config = load_project_config(project.resolve())
+    except Exception as exc:  # noqa: BLE001 — the diagnostic must name any bad config value
+        _err(f"runtime preflight: config invalid: {exc}")
+        raise typer.Exit(1) from exc
+
+    ok = True
+    checked: set[str] = set()
+    for report in role_reports(config):
+        if report.error:
+            _err(f"runtime preflight: {report.name}: {report.error}")
+            ok = False
+            continue
+        typer.echo(
+            f"runtime preflight: {report.name}: {report.runtime} / "
+            f"{report.model or 'runtime default'}"
+        )
+        if report.runtime in checked:
+            continue
+        checked.add(report.runtime)
+        try:
+            runtime = get_runtime(report.runtime)
+        except ValueError as exc:
+            _err(f"runtime preflight: {exc}")
+            ok = False
+            continue
+        if not runtime.available():
+            _err(
+                f"runtime preflight: {report.runtime} CLI missing "
+                f"(required by configured role {report.name})"
+            )
+            ok = False
     raise typer.Exit(0 if ok else 1)
 
 

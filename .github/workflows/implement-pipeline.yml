@@ -1,0 +1,138 @@
+# Reusable manual implementation pipeline (#296).
+#
+# The target repo's .agent/config.yaml remains authoritative: this invokes
+# `agent implement` without `--runtime`, so planner/implementer/reviewer may
+# resolve to different adapters and model tiers.
+#
+# Credential boundary:
+# - openai/codex-action starts its protected Responses API proxy. The raw
+#   OPENAI_API_KEY is never placed in job env or passed to agent-ops.
+# - the Claude token is staged only for the implementation step, then consumed
+#   and unlinked by agent-ops before target setup or gates run.
+# - the proxy-backed Codex home is likewise captured before target commands.
+#
+# This first lane is workflow_dispatch-only in the managed-repo stub and
+# requires one issue number. It shares triage's lock so the old and new
+# implementation paths cannot work the same repo concurrently.
+
+name: Reusable · Hybrid Implement Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo containing the issue and project config"
+        required: true
+        type: string
+      issue:
+        description: "Exact GitHub issue number to implement"
+        required: true
+        type: number
+      runner:
+        description: "Runner label for the job"
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      OPENAI_API_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo containing the issue and project config"
+        required: true
+        type: string
+      issue:
+        description: "Exact GitHub issue number to implement"
+        required: true
+        type: number
+      runner:
+        description: "Runner label for the job"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  implement:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    concurrency:
+      group: agent-triage-${{ inputs.target_repo }}
+      cancel-in-progress: false
+    timeout-minutes: 55
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Validate provider credentials
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "::error title=Missing Anthropic credential::CLAUDE_CODE_OAUTH_TOKEN is required"
+            exit 1
+          fi
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error title=Missing OpenAI credential::OPENAI_API_KEY is required"
+            exit 1
+          fi
+
+      - name: Checkout control repo
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Supplying only the key intentionally runs codex-action's proxy/setup
+      # path but not its prompt-gated `codex exec` step. agent-ops invokes the
+      # installed CLI later, against this proxy-backed home.
+      - name: Start protected Codex proxy
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-home: ${{ runner.temp }}/agent-ops-codex-${{ github.run_id }}
+          safety-strategy: drop-sudo
+
+      - name: Preflight resolved runtime fleet
+        working-directory: agent-ops
+        run: uv run agent runtime-preflight -C "$GITHUB_WORKSPACE/target"
+
+      - name: Implement exact issue
+        env:
+          AGENT_CODEX_HOME: ${{ runner.temp }}/agent-ops-codex-${{ github.run_id }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ inputs.issue }}
+        working-directory: agent-ops
+        run: |
+          set -euo pipefail
+          token_file="$(mktemp "${RUNNER_TEMP}/agent-claude-token.XXXXXX")"
+          trap 'rm -f "$token_file"' EXIT
+          chmod 600 "$token_file"
+          printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" > "$token_file"
+          unset CLAUDE_CODE_OAUTH_TOKEN
+          export AGENT_CLAUDE_CODE_OAUTH_TOKEN_FILE="$token_file"
+          uv run agent implement "$ISSUE" -C "$GITHUB_WORKSPACE/target"
