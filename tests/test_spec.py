@@ -126,7 +126,7 @@ def test_run_spec_happy_path_posts_comment_and_removes_worktree(
     number, body = posted[0]
     assert number == 7
     assert body.startswith("## Agent spec")
-    assert "_agent-ops · model:" in body
+    assert "_agent-ops · provider: fake, model:" in body
     assert removed == [("spec-7-tmp", True)]
     assert runtime.received_prompt is not None
     assert "#7" in runtime.received_prompt

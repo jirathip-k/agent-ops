@@ -26,6 +26,13 @@ _UNAVAILABLE_MARKERS = (
     "no access",
 )
 _TRANSIENT_STATUSES = (408, 409, 425, 429)
+_PROVIDER_UNAVAILABLE_MARKERS = (
+    "usage limit reached",
+    "hit your usage limit",
+    "quota exceeded",
+    "insufficient_quota",
+    "credits exhausted",
+)
 
 # Codex has no `--permission-mode`. It splits the same question in two: a
 # sandbox policy (what a command may touch) and an approval policy (when it
@@ -144,6 +151,9 @@ def classify_failure(result: RunResult) -> FailureKind:
     """Read Codex's JSON error envelope into a provider-neutral failure kind."""
     raw = result.raw or {}
     blobs = [result.text, str(raw.get("stderr", "")), str(raw.get("stdout", ""))]
+    haystack = "\n".join(blobs).lower()
+    if any(marker in haystack for marker in _PROVIDER_UNAVAILABLE_MARKERS):
+        return FailureKind.PROVIDER_UNAVAILABLE
     for status, message in _error_envelopes(blobs):
         if status in _TRANSIENT_STATUSES or (status is not None and 500 <= status < 600):
             return FailureKind.TRANSIENT

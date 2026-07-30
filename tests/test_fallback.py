@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from agent_ops.config import ProjectConfig
-from agent_ops.fallback import artifact_footer, model_note, pin_to_model, run_with_fallback
+from agent_ops.fallback import (
+    ProviderRuntime,
+    RuntimeChain,
+    artifact_footer,
+    model_note,
+    pin_to_model,
+    run_with_fallback,
+)
 from agent_ops.loop import run_task_loop
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 
@@ -133,10 +140,203 @@ def test_pin_to_model_ignores_a_model_outside_the_ladder(tmp_path: Path) -> None
 def test_model_note_flags_a_substitution(tmp_path: Path) -> None:
     request = _request(tmp_path, model="fable")
 
-    assert model_note(request, RunResult(ok=True, text="", model="fable")) == "model: fable"
-    substituted = model_note(request, RunResult(ok=True, text="", model="opus"))
+    configured = RunResult(
+        ok=True,
+        text="",
+        model="fable",
+        provider="claude_code",
+        configured_provider="claude_code",
+        configured_model="fable",
+    )
+    assert model_note(request, configured) == "provider: claude_code, model: fable"
+    substituted_result = RunResult(
+        ok=True,
+        text="",
+        model="opus",
+        provider="claude_code",
+        configured_provider="claude_code",
+        configured_model="fable",
+    )
+    substituted = model_note(request, substituted_result)
     assert "opus" in substituted and "FALLBACK" in substituted and "fable" in substituted
-    assert "model: opus" in artifact_footer(request, RunResult(ok=True, text="", model="opus"))
+    footer = artifact_footer(request, substituted_result)
+    assert "provider: claude_code, model: opus" in footer
+
+
+class ProviderFake:
+    """Executable fake adapter with provider-specific models and classifications."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        unavailable_models: set[str] | None = None,
+        failure_kind: FailureKind = FailureKind.MODEL_UNAVAILABLE,
+        installed: bool = True,
+        success_text: str = "done",
+    ) -> None:
+        self.name = name
+        self.unavailable_models = unavailable_models or set()
+        self.failure_kind = failure_kind
+        self.installed = installed
+        self.success_text = success_text
+        self.models: list[str | None] = []
+
+    def available(self) -> bool:
+        return self.installed
+
+    def run(self, request: RunRequest) -> RunResult:
+        self.models.append(request.model)
+        if request.model in self.unavailable_models:
+            return RunResult(ok=False, text=f"{self.name}/{request.model} refused")
+        return RunResult(ok=True, text=self.success_text)
+
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        return self.failure_kind
+
+
+def _chain(*providers: ProviderRuntime) -> RuntimeChain:
+    return RuntimeChain(list(providers))
+
+
+def test_provider_fallback_exhausts_primary_model_ladder_then_uses_own_tier(
+    tmp_path: Path,
+) -> None:
+    claude = ProviderFake("claude_code", unavailable_models={"fable", "opus"})
+    codex = ProviderFake("codex")
+    chain = _chain(
+        ProviderRuntime(claude, "fable", ("opus",)),
+        ProviderRuntime(codex, "gpt-smart", ("gpt-small",)),
+    )
+    events: list[str] = []
+
+    result = run_with_fallback(chain, _request(tmp_path, model="fable"), events.append)
+
+    assert result.ok
+    assert (result.provider, result.model) == ("codex", "gpt-smart")
+    assert (result.configured_provider, result.configured_model) == ("claude_code", "fable")
+    assert claude.models == ["fable", "opus"]
+    assert codex.models == ["gpt-smart"]
+    assert any("PROVIDER FALLBACK" in event and "claude_code" in event for event in events)
+    note = model_note(_request(tmp_path, model="fable"), result)
+    assert "provider: codex, model: gpt-smart" in note and "claude_code / fable" in note
+
+
+def test_explicit_provider_unavailability_skips_its_remaining_models(tmp_path: Path) -> None:
+    claude = ProviderFake(
+        "claude_code",
+        unavailable_models={"fable"},
+        failure_kind=FailureKind.PROVIDER_UNAVAILABLE,
+    )
+    codex = ProviderFake("codex")
+    chain = _chain(
+        ProviderRuntime(claude, "fable", ("opus",)),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+
+    result = run_with_fallback(chain, _request(tmp_path, model="fable"))
+
+    assert result.ok and result.provider == "codex"
+    assert claude.models == ["fable"]
+    assert codex.models == ["gpt-smart"]
+
+
+def test_missing_primary_cli_is_an_explicit_provider_fallback(tmp_path: Path) -> None:
+    claude = ProviderFake("claude_code", installed=False)
+    codex = ProviderFake("codex")
+    events: list[str] = []
+    chain = _chain(
+        ProviderRuntime(claude, "fable"),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+
+    result = run_with_fallback(chain, _request(tmp_path, model="fable"), events.append)
+
+    assert result.ok and result.provider == "codex"
+    assert claude.models == []
+    assert codex.models == ["gpt-smart"]
+    assert any("is unavailable" in event and "codex" in event for event in events)
+
+
+def test_agent_failure_never_switches_provider(tmp_path: Path) -> None:
+    claude = ProviderFake(
+        "claude_code",
+        unavailable_models={"fable"},
+        failure_kind=FailureKind.AGENT_FAILURE,
+    )
+    codex = ProviderFake("codex")
+    chain = _chain(
+        ProviderRuntime(claude, "fable", ("opus",)),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+    config = ProjectConfig.model_validate({"loop": {"max_attempts": 3, "gates": []}})
+
+    outcome = run_task_loop(chain, _request(tmp_path, model="fable"), config, tmp_path)
+
+    assert not outcome.ok
+    assert claude.models == ["fable", "fable", "fable"]
+    assert codex.models == []
+
+
+def test_transient_throttling_never_switches_provider(tmp_path: Path) -> None:
+    claude = ProviderFake(
+        "claude_code",
+        unavailable_models={"fable"},
+        failure_kind=FailureKind.TRANSIENT,
+    )
+    codex = ProviderFake("codex")
+    chain = _chain(
+        ProviderRuntime(claude, "fable"),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+    config = ProjectConfig.model_validate({"loop": {"max_attempts": 3, "gates": []}})
+
+    outcome = run_task_loop(chain, _request(tmp_path, model="fable"), config, tmp_path)
+
+    assert not outcome.ok
+    assert claude.models == ["fable", "fable", "fable"]
+    assert codex.models == []
+
+
+def test_rejected_output_never_switches_provider(tmp_path: Path) -> None:
+    claude = ProviderFake("claude_code", success_text="VERDICT: REQUEST CHANGES")
+    codex = ProviderFake("codex")
+    chain = _chain(
+        ProviderRuntime(claude, "fable"),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+
+    result = run_with_fallback(chain, _request(tmp_path, model="fable"))
+
+    assert result.ok and "REQUEST CHANGES" in result.text
+    assert claude.models == ["fable"]
+    assert codex.models == []
+
+
+def test_gate_feedback_retries_pin_provider_and_model(tmp_path: Path) -> None:
+    claude = ProviderFake("claude_code", unavailable_models={"fable"})
+    codex = ProviderFake("codex", unavailable_models={"gpt-smart"})
+    chain = _chain(
+        ProviderRuntime(claude, "fable"),
+        ProviderRuntime(codex, "gpt-smart", ("gpt-fast",)),
+    )
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": f"test -f {tmp_path / 'never'}"},
+            "loop": {"max_attempts": 3, "gates": ["test"]},
+        }
+    )
+
+    outcome = run_task_loop(chain, _request(tmp_path, model="fable"), config, tmp_path)
+
+    assert not outcome.ok
+    assert claude.models == ["fable"]
+    assert codex.models == ["gpt-smart", "gpt-fast", "gpt-fast", "gpt-fast"]
+    assert outcome.last_result is not None
+    assert (outcome.last_result.configured_provider, outcome.last_result.configured_model) == (
+        "claude_code",
+        "fable",
+    )
 
 
 class LimitedThenGateFailingRuntime:

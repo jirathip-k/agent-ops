@@ -238,6 +238,11 @@ def test_rate_limit_classifies_as_transient() -> None:
     assert classify_failure(result) is FailureKind.TRANSIENT
 
 
+def test_explicit_missing_auth_classifies_as_provider_unavailable() -> None:
+    result = RunResult(ok=False, text="Authentication required. Please log in.")
+    assert classify_failure(result) is FailureKind.PROVIDER_UNAVAILABLE
+
+
 def test_overload_classifies_as_transient() -> None:
     result = parse_result(_proc('{"result": "API Error: 529 overloaded_error", "is_error": true}'))
     assert classify_failure(result) is FailureKind.TRANSIENT

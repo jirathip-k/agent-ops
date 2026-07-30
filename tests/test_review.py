@@ -333,7 +333,7 @@ def test_run_reviews_post_comment_posts_once_per_pr_with_footer(
     run_reviews(tmp_path, [1, 2], jobs=2, post_comment=True)
 
     assert sorted(number for number, _ in posted) == [1, 2]
-    assert all("_agent-ops · model:" in body for _, body in posted)
+    assert all("_agent-ops · provider: fake, model:" in body for _, body in posted)
 
 
 def test_run_reviews_forces_stream_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -387,7 +387,7 @@ def test_run_review_post_comment_true_comments_on_the_pr(
     number, body = posted[0]
     assert number == 42
     assert body.startswith("## Agent review")
-    assert "_agent-ops · model:" in body
+    assert "_agent-ops · provider: fake, model:" in body
 
 
 def test_run_review_default_does_not_comment(

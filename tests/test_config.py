@@ -136,6 +136,84 @@ def test_runtime_override_resolves_tiers_against_the_overridden_runtime(tmp_path
     assert config.resolve_role("reviewer", runtime_override="codex").runtime == "codex"
 
 
+def test_ordered_runtimes_resolve_each_provider_tier_and_ladder(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "model_tiers:\n"
+        "  codex:\n"
+        "    smart: gpt-smart\n"
+        "    fast: gpt-fast\n"
+        "model_fallbacks:\n"
+        "  codex:\n"
+        "    smart: [gpt-smart, gpt-backup]\n"
+        "agents:\n"
+        "  planner:\n"
+        "    runtimes: [claude_code, codex]\n"
+        "    model: smart\n",
+    )
+
+    role = load_project_config(tmp_path).resolve_role("planner")
+
+    assert [provider.runtime for provider in role.providers] == ["claude_code", "codex"]
+    assert [provider.model for provider in role.providers] == ["fable", "gpt-smart"]
+    assert role.providers[0].fallbacks == ["opus", "sonnet"]
+    assert role.providers[1].fallbacks == ["gpt-backup"]
+    # The compatibility fields remain the first provider, exactly like scalar runtime.
+    assert (role.runtime, role.model, role.fallbacks) == (
+        "claude_code",
+        "fable",
+        ["opus", "sonnet"],
+    )
+
+
+def test_runtime_override_replaces_an_ordered_chain_with_one_provider(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "model_tiers:\n  codex:\n    smart: gpt-smart\n"
+        "agents:\n  planner:\n    runtimes: [claude_code, codex]\n",
+    )
+
+    role = load_project_config(tmp_path).resolve_role("planner", runtime_override="codex")
+
+    assert [provider.runtime for provider in role.providers] == ["codex"]
+    assert role.model == "gpt-smart"
+
+
+def test_role_rejects_ambiguous_scalar_and_ordered_runtime_config(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "agents:\n  implementer:\n    runtime: claude_code\n    runtimes: [claude_code, codex]\n",
+    )
+
+    with pytest.raises(
+        pydantic.ValidationError, match="runtime and runtimes are mutually exclusive"
+    ):
+        load_project_config(tmp_path)
+
+
+def test_role_rejects_an_empty_or_duplicate_runtime_chain(tmp_path: Path) -> None:
+    _write_config(tmp_path, "agents:\n  implementer:\n    runtimes: []\n")
+    with pytest.raises(pydantic.ValidationError, match="at least one provider"):
+        load_project_config(tmp_path)
+
+    _write_config(
+        tmp_path,
+        "agents:\n  implementer:\n    runtimes: [claude_code, claude_code]\n",
+    )
+    with pytest.raises(pydantic.ValidationError, match="must not repeat"):
+        load_project_config(tmp_path)
+
+
+def test_cross_provider_chain_rejects_a_concrete_model_slug(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "agents:\n  reviewer:\n    runtimes: [claude_code, codex]\n    model: claude-opus-5\n",
+    )
+
+    with pytest.raises(RuntimeError, match="must use a model tier"):
+        load_project_config(tmp_path).resolve_role("reviewer")
+
+
 def test_missing_tier_for_the_effective_runtime_raises(tmp_path: Path) -> None:
     """Better a clear error here than a foreign model name reaching the CLI."""
     config = load_project_config(tmp_path)  # defaults define claude_code tiers only

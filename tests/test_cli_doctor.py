@@ -404,7 +404,8 @@ def test_doctor_fails_when_the_configured_runtimes_cli_is_missing(
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
     assert result.exit_code == 1
-    assert "✗ claude_code (missing; it is this project's runtime.name)" in result.output
+    assert "! claude_code (missing; configured for planner, implementer, reviewer)" in result.output
+    assert "✗ planner: no configured provider has an available CLI" in result.output
 
 
 def test_doctor_tolerates_a_missing_cli_for_a_runtime_the_project_does_not_use(
@@ -417,6 +418,75 @@ def test_doctor_tolerates_a_missing_cli_for_a_runtime_the_project_does_not_use(
 
     assert result.exit_code == 0
     assert "- codex (optional)" in result.output
+
+
+def test_doctor_lists_every_provider_ladder_in_a_role_chain(tmp_path: Path, monkeypatch) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_project_config(
+        tmp_path,
+        "model_tiers:\n"
+        "  codex:\n"
+        "    smart: gpt-smart\n"
+        "    fast: gpt-fast\n"
+        "model_fallbacks:\n"
+        "  codex:\n"
+        "    smart: [gpt-smart, gpt-small]\n"
+        "agents:\n"
+        "  planner:\n"
+        "    runtimes: [claude_code, codex]\n",
+    )
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert (
+        "planner: claude_code / fable (fallbacks: opus → sonnet) → "
+        "codex / gpt-smart (fallbacks: gpt-small)"
+    ) in result.output
+
+
+def test_doctor_reports_a_missing_chain_cli_but_allows_an_installed_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_project_config(
+        tmp_path,
+        "model_tiers:\n  codex:\n    smart: gpt-smart\n    fast: gpt-fast\n"
+        "agents:\n"
+        "  planner:\n    runtimes: [claude_code, codex]\n"
+        "  implementer:\n    runtimes: [claude_code, codex]\n"
+        "  reviewer:\n    runtimes: [claude_code, codex]\n",
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda tool: None if tool == "claude" else f"/bin/{tool}",
+    )
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "planner: claude_code / fable" in result.output
+    assert "[CLI missing]" in result.output
+    assert "codex / gpt-smart" in result.output
+    assert "✗ planner: no configured provider" not in result.output
+
+
+def test_doctor_fails_a_chain_with_a_missing_provider_tier(tmp_path: Path, monkeypatch) -> None:
+    runner.invoke(app, ["init", "--project", str(tmp_path)])
+    _write_project_config(
+        tmp_path,
+        "agents:\n  planner:\n    runtimes: [claude_code, codex]\n",
+    )
+    _all_clis_present(monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "planner: claude_code / fable" in result.output
+    assert "codex / INVALID" in result.output
+    assert "model_tiers.codex" in result.output
 
 
 def test_doctor_flags_a_ladder_that_could_step_up_into_a_costlier_model(

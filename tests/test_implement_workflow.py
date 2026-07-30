@@ -714,6 +714,52 @@ def test_finish_run_adds_the_authorization_section_when_granted(
     assert "supplied via `--grant-file` this invocation" in body  # default: not carried over
 
 
+def test_finish_run_pr_body_names_actual_fallback_provider_and_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, str] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/297"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+    request = RunRequest(prompt="p", cwd=tmp_path / "wt", model="fable")
+    result = RunResult(
+        ok=True,
+        text="done",
+        model="gpt-smart",
+        provider="codex",
+        configured_provider="claude_code",
+        configured_model="fable",
+    )
+
+    ok = implement_module._finish_run(
+        tmp_path,
+        ProjectConfig(),
+        _fake_issue(297, tmp_path),
+        297,
+        "issue-297",
+        "fix/issue-297",
+        tmp_path / "wt",
+        request,
+        implement_module.get_runtime("claude_code"),
+        LoopOutcome(True, 2, result, []),
+        card=implement_module._CardReporter(tmp_path, tmp_path / "wt", lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    assert "(codex, model gpt-smart, 2 attempt(s), gates passed)" in captured["body"]
+    assert "**Provider/model fallback:**" in captured["body"]
+    assert "`claude_code` / `fable`" in captured["body"]
+    assert "`codex` / `gpt-smart`" in captured["body"]
+
+
 def test_finish_run_marks_a_carried_over_grant_distinctly_in_the_pr_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

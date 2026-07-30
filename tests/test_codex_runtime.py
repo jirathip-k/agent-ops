@@ -55,6 +55,14 @@ def test_rate_limit_classifies_as_transient() -> None:
     assert classify_failure(_result(stderr=stderr)) is FailureKind.TRANSIENT
 
 
+def test_exhausted_usage_allowance_classifies_as_provider_unavailable() -> None:
+    stderr = (
+        '{"type":"error","status":429,"error":{"type":"usage_limit_error",'
+        '"message":"You have hit your usage limit. Upgrade or try again later."}}'
+    )
+    assert classify_failure(_result(stderr=stderr)) is FailureKind.PROVIDER_UNAVAILABLE
+
+
 def test_server_error_classifies_as_transient() -> None:
     stderr = (
         '{"type":"error","status":503,"error":{"type":"server_error",'

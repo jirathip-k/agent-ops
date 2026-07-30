@@ -7,7 +7,7 @@ from typing import Any
 
 from agent_ops import claims, github, grants, messages, orca, runs, surfaces, worktree
 from agent_ops.config import ProjectConfig, load_project_config
-from agent_ops.fallback import model_note, run_with_fallback
+from agent_ops.fallback import ProviderRuntime, RuntimeChain, model_note, run_with_fallback
 from agent_ops.gates import (
     GateResult,
     format_missing_gate,
@@ -234,9 +234,21 @@ def role_request(
     hands codex a Claude model name.
     """
     role = config.resolve_role(role_name, runtime_override=runtime_override)
-    runtime = get_runtime(role.runtime)
-    if not runtime.available():
-        raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
+    providers = [
+        ProviderRuntime(
+            runtime=get_runtime(provider.runtime),
+            model=provider.model,
+            fallback_models=tuple(provider.fallbacks),
+        )
+        for provider in role.providers
+    ]
+    runtime: Runtime
+    if len(providers) == 1:
+        runtime = providers[0].runtime
+        if not runtime.available():
+            raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
+    else:
+        runtime = RuntimeChain(providers)
     request = RunRequest(
         prompt=prompt,
         cwd=cwd,
@@ -644,17 +656,29 @@ def _finish_run(
     pr_url: str | None = None
     if open_pr:
         run(["git", "push", "-u", "origin", branch], cwd=wt_path, timeout=SLOW_GIT_TIMEOUT_S)
-        used_model = (outcome.last_result.model if outcome.last_result else None) or request.model
+        last_result = outcome.last_result
+        used_model = (last_result.model if last_result else None) or request.model
+        used_provider = (last_result.provider if last_result else None) or runtime.name
+        configured_provider = (
+            last_result.configured_provider if last_result else None
+        ) or runtime.name
+        configured_model = (
+            last_result.configured_model
+            if last_result is not None and last_result.configured_provider is not None
+            else request.model
+        )
         body = (
             f"Closes #{issue_number}.\n\n"
             f"Automated implementation via agent-ops "
-            f"({runtime.name}, model {used_model or 'runtime default'}, "
+            f"({used_provider}, model {used_model or 'runtime default'}, "
             f"{outcome.attempts} attempt(s), gates passed)."
         )
-        if used_model != request.model:
+        if used_provider != configured_provider or used_model != configured_model:
             body += (
-                f"\n\n> **Model fallback:** the configured model `{request.model}` was "
-                f"unavailable, so this was implemented by `{used_model}` instead."
+                f"\n\n> **Provider/model fallback:** the configured "
+                f"`{configured_provider}` / `{configured_model or 'runtime default'}` was "
+                f"unavailable, so this was implemented by `{used_provider}` / "
+                f"`{used_model or 'runtime default'}` instead."
             )
         if grant is not None:
             body += _authorization_pr_section(grant, carried_over=grant_carried_over)

@@ -28,6 +28,7 @@ from agent_ops import (
 from agent_ops import runs as runs_mod
 from agent_ops.config import (
     PROJECT_CONFIG_REL,
+    ROLE_NAMES,
     ProjectConfig,
     ladder_warnings,
     load_project_config,
@@ -1368,17 +1369,22 @@ def doctor(project: ProjectOpt = Path(".")) -> None:
         typer.echo(f"{'✓' if found else '✗'} {tool}{'' if found else ' (missing)'}")
         ok = ok and found
 
+    configured_runtimes: dict[str, list[str]] = {}
+    if config is not None:
+        for role_name in ROLE_NAMES:
+            for name in config.effective_runtimes(role_name):
+                configured_runtimes.setdefault(name, []).append(role_name)
+
     # Runtime CLIs answer for themselves through the registry, rather than this
-    # command carrying a list of vendor binary names: a new adapter shows up
-    # here without `doctor` learning anything about it. Only the configured
-    # runtime is required — an install that never reaches for `--runtime codex`
-    # should not be told it is unhealthy for not having Codex.
+    # command carrying vendor binary names. A missing entry in a configured
+    # chain is reported here; whether it makes a role unable to start is decided
+    # by _report_roles after considering the rest of that role's chain.
     for name in runtime_names():
         if get_runtime(name).available():
             typer.echo(f"✓ {name}")
-        elif config is not None and name == config.runtime.name:
-            typer.echo(f"✗ {name} (missing; it is this project's runtime.name)")
-            ok = False
+        elif name in configured_runtimes:
+            roles = ", ".join(dict.fromkeys(configured_runtimes[name]))
+            typer.echo(f"! {name} (missing; configured for {roles})")
         else:
             typer.echo(f"- {name} (optional)")
 
@@ -1562,17 +1568,34 @@ def _report_roles(config: ProjectConfig) -> bool:
     ok = True
     reports = role_reports(config)
     for report in reports:
+        rendered: list[str] = []
+        usable = 0
+        for provider in report.providers:
+            if provider.error:
+                rendered.append(f"{provider.runtime} / INVALID ({provider.error})")
+                continue
+            ladder = " → ".join(provider.fallbacks) if provider.fallbacks else "none configured"
+            suffix = ""
+            if provider.runtime not in runtime_names():
+                suffix = " [unknown provider]"
+            elif not get_runtime(provider.runtime).available():
+                suffix = " [CLI missing]"
+            else:
+                usable += 1
+            rendered.append(
+                f"{provider.runtime} / {provider.model or 'runtime default'} "
+                f"(fallbacks: {ladder}){suffix}"
+            )
+        typer.echo(f"  {report.name}: {' → '.join(rendered)}")
         if report.error:
             _err(f"✗ {report.name}: {report.error}")
             ok = False
             continue
-        ladder = " → ".join(report.fallbacks) if report.fallbacks else "none configured"
-        typer.echo(
-            f"  {report.name}: {report.runtime} / "
-            f"{report.model or 'runtime default'} (fallbacks: {ladder})"
-        )
+        if usable == 0:
+            _err(f"✗ {report.name}: no configured provider has an available CLI")
+            ok = False
 
-    in_use = {report.runtime for report in reports}
+    in_use = {provider.runtime for report in reports for provider in report.providers}
     others = [name for name in runtime_names() if name not in in_use]
     for other in runtime_reports(config, others):
         gaps = other.missing_tiers()

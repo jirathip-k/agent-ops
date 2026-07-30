@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from agent_ops.utils import PLATFORM_ROOT
 
@@ -34,6 +34,10 @@ class ModelTierError(RuntimeError):
         self.runtime = runtime
         self.tier = tier
         self.role = role
+
+
+class RuntimeChainConfigError(RuntimeError):
+    """An ordered provider chain cannot be resolved safely."""
 
 
 class Commands(BaseModel):
@@ -92,9 +96,21 @@ class RoleConfig(BaseModel):
     """Per-role overrides; unset fields fall back to the project's runtime config."""
 
     runtime: str | None = None
+    runtimes: list[str] | None = None
     model: str | None = None
     permission_mode: str | None = None
     max_turns: int | None = None
+
+    @model_validator(mode="after")
+    def _one_runtime_shape(self) -> RoleConfig:
+        if self.runtime is not None and self.runtimes is not None:
+            raise ValueError("runtime and runtimes are mutually exclusive; configure only one")
+        if self.runtimes is not None:
+            if not self.runtimes:
+                raise ValueError("runtimes must contain at least one provider")
+            if len(self.runtimes) != len(set(self.runtimes)):
+                raise ValueError("runtimes must not repeat a provider")
+        return self
 
 
 class AgentsConfig(BaseModel):
@@ -103,14 +119,22 @@ class AgentsConfig(BaseModel):
     reviewer: RoleConfig = Field(default_factory=RoleConfig)
 
 
+class ResolvedProvider(BaseModel):
+    runtime: str
+    model: str | None
+    # Models to try, in order, only if `model` turns out to be unavailable.
+    fallbacks: list[str] = Field(default_factory=list)
+
+
 class ResolvedRole(BaseModel):
+    # The first provider is repeated here to preserve the scalar resolution
+    # interface used by spawn and existing callers.
     runtime: str
     model: str | None
     permission_mode: str
     max_turns: int | None
-    # Models to try, in order, only if `model` turns out to be unavailable.
-    # Empty unless the project configures a ladder — no ladder, no change.
     fallbacks: list[str] = Field(default_factory=list)
+    providers: list[ResolvedProvider] = Field(default_factory=list)
 
 
 class MergeConfig(BaseModel):
@@ -313,20 +337,51 @@ class ProjectConfig(BaseModel):
 
     def effective_runtime(self, role_name: str, runtime_override: str | None = None) -> str:
         """The runtime a role will actually run on: CLI override, role, then base."""
+        return self.effective_runtimes(role_name, runtime_override)[0]
+
+    def effective_runtimes(self, role_name: str, runtime_override: str | None = None) -> list[str]:
+        """Ordered providers for a role; a CLI override remains a scalar override."""
+        if runtime_override is not None:
+            return [runtime_override]
         role: RoleConfig = getattr(self.agents, role_name)
-        return runtime_override or role.runtime or self.runtime.name
+        if role.runtimes is not None:
+            return list(role.runtimes)
+        return [role.runtime or self.runtime.name]
 
     def resolve_role(self, role_name: str, *, runtime_override: str | None = None) -> ResolvedRole:
-        """Merge a role's overrides over the base runtime config, mapping model tiers.
+        """Merge role overrides and resolve one model ladder per provider.
 
-        Tiers resolve against the *effective* runtime, so `--runtime codex`
-        looks up `smart` in the codex table rather than handing codex a Claude
-        model name.
+        Tiers resolve independently against every provider in the ordered chain,
+        so a Codex CLI can never receive a Claude model slug (or vice versa).
+        The scalar `runtime` path still produces a one-provider list.
         """
         role: RoleConfig = getattr(self.agents, role_name)
-        runtime = self.effective_runtime(role_name, runtime_override)
-        tiers = self.model_tiers.get(runtime, {})
+        runtimes = self.effective_runtimes(role_name, runtime_override)
         requested = role.model or self.runtime.model
+        if len(runtimes) > 1 and requested is not None and requested not in self.tier_names():
+            raise RuntimeChainConfigError(
+                f"role {role_name!r} configures runtimes {runtimes!r} with concrete model "
+                f"{requested!r}; an ordered cross-provider chain must use a model tier "
+                "(such as 'smart' or 'fast') or the runtime default"
+            )
+        providers = [
+            self._resolve_provider(role_name, runtime, requested=requested) for runtime in runtimes
+        ]
+        primary = providers[0]
+        return ResolvedRole(
+            runtime=primary.runtime,
+            model=primary.model,
+            permission_mode=role.permission_mode or self.runtime.permission_mode,
+            max_turns=role.max_turns if role.max_turns is not None else self.runtime.max_turns,
+            fallbacks=primary.fallbacks,
+            providers=providers,
+        )
+
+    def _resolve_provider(
+        self, role_name: str, runtime: str, *, requested: str | None
+    ) -> ResolvedProvider:
+        """Resolve `requested` and its fallback ladder for one provider."""
+        tiers = self.model_tiers.get(runtime, {})
 
         model = requested
         if requested is not None:
@@ -345,11 +400,9 @@ class ProjectConfig(BaseModel):
                     role=role_name,
                 )
 
-        return ResolvedRole(
+        return ResolvedProvider(
             runtime=runtime,
             model=model,
-            permission_mode=role.permission_mode or self.runtime.permission_mode,
-            max_turns=role.max_turns if role.max_turns is not None else self.runtime.max_turns,
             fallbacks=self._fallbacks_for(runtime, requested, model),
         )
 
@@ -381,6 +434,18 @@ class ProjectConfig(BaseModel):
 
 
 @dataclass(frozen=True)
+class ProviderReport:
+    """One provider entry in a role's ordered chain."""
+
+    runtime: str
+    model: str | None = None
+    fallbacks: list[str] = field(default_factory=list)
+    error: str | None = None
+    # Set only when `error` is a missing tier: the tier that has no entry.
+    missing_tier: str | None = None
+
+
+@dataclass(frozen=True)
 class RoleReport:
     """What one role would run with — or why it cannot run at all."""
 
@@ -389,8 +454,8 @@ class RoleReport:
     model: str | None = None
     fallbacks: list[str] = field(default_factory=list)
     error: str | None = None
-    # Set only when `error` is a missing tier: the tier that has no entry.
     missing_tier: str | None = None
+    providers: list[ProviderReport] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -422,20 +487,46 @@ def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[R
     """
     reports: list[RoleReport] = []
     for name in ROLE_NAMES:
-        effective = config.effective_runtime(name, runtime)
-        try:
-            resolved = config.resolve_role(name, runtime_override=runtime)
-        except ModelTierError as exc:
-            reports.append(
-                RoleReport(name=name, runtime=effective, error=str(exc), missing_tier=exc.tier)
+        effective = config.effective_runtimes(name, runtime)
+        role: RoleConfig = getattr(config.agents, name)
+        requested = role.model or config.runtime.model
+        provider_rows: list[ProviderReport] = []
+        for provider in effective:
+            try:
+                resolved = config._resolve_provider(name, provider, requested=requested)
+            except ModelTierError as exc:
+                provider_rows.append(
+                    ProviderReport(
+                        runtime=provider,
+                        error=str(exc),
+                        missing_tier=exc.tier,
+                    )
+                )
+                continue
+            provider_rows.append(
+                ProviderReport(
+                    runtime=resolved.runtime,
+                    model=resolved.model,
+                    fallbacks=resolved.fallbacks,
+                )
             )
-            continue
+        first = provider_rows[0]
+        chain_error: str | None = next((row.error for row in provider_rows if row.error), None)
+        if len(effective) > 1 and requested is not None and requested not in config.tier_names():
+            chain_error = (
+                f"role {name!r} configures runtimes {effective!r} with concrete model "
+                f"{requested!r}; an ordered cross-provider chain must use a model tier "
+                "(such as 'smart' or 'fast') or the runtime default"
+            )
         reports.append(
             RoleReport(
                 name=name,
-                runtime=resolved.runtime,
-                model=resolved.model,
-                fallbacks=resolved.fallbacks,
+                runtime=first.runtime,
+                model=first.model,
+                fallbacks=first.fallbacks,
+                error=chain_error,
+                missing_tier=first.missing_tier,
+                providers=provider_rows,
             )
         )
     return reports

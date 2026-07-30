@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, Runtime
 
@@ -15,6 +15,104 @@ class ModelUnavailableError(RuntimeError):
     """
 
 
+@dataclass(frozen=True)
+class ProviderRuntime:
+    """One provider and its independently resolved model ladder."""
+
+    runtime: Runtime
+    model: str | None
+    fallback_models: tuple[str, ...] = ()
+
+
+class RuntimeChain:
+    """A per-run ordered provider chain that stays pinned after failover.
+
+    The object implements Runtime so workflows and the feedback loop keep
+    depending on the same protocol. Routing still lives in run_with_fallback:
+    calling an adapter directly never gains hidden fallback behaviour.
+    """
+
+    def __init__(self, providers: list[ProviderRuntime]) -> None:
+        if not providers:
+            raise ValueError("a runtime chain needs at least one provider")
+        self.providers = tuple(providers)
+        self._active_index = 0
+        self._configured_provider = providers[0].runtime.name
+        self._configured_model = providers[0].model
+
+    @property
+    def name(self) -> str:
+        return self.providers[self._active_index].runtime.name
+
+    @property
+    def configured_provider(self) -> str:
+        return self._configured_provider
+
+    @property
+    def configured_model(self) -> str | None:
+        return self._configured_model
+
+    @property
+    def active_provider(self) -> ProviderRuntime:
+        return self.providers[self._active_index]
+
+    @property
+    def active_index(self) -> int:
+        return self._active_index
+
+    def pin(self, index: int) -> None:
+        self._active_index = index
+
+    def pin_model(self, provider_name: str | None, model: str | None) -> None:
+        """Keep a model substitution on the selected provider for later retries."""
+        for index, provider in enumerate(self.providers):
+            if provider.runtime.name != provider_name:
+                continue
+            ladder = [provider.model, *provider.fallback_models]
+            if model not in ladder:
+                return
+            remaining = tuple(
+                rung for rung in ladder[ladder.index(model) + 1 :] if rung is not None
+            )
+            updated = replace(provider, model=model, fallback_models=remaining)
+            self.providers = (
+                *self.providers[:index],
+                updated,
+                *self.providers[index + 1 :],
+            )
+            return
+
+    def available(self) -> bool:
+        return any(provider.runtime.available() for provider in self.providers)
+
+    def request_for(self, request: RunRequest, index: int) -> RunRequest:
+        provider = self.providers[index]
+        return replace(
+            request,
+            model=provider.model,
+            fallback_models=provider.fallback_models,
+        )
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Run only the pinned provider; callers use run_with_fallback for routing."""
+        provider = self.active_provider
+        return provider.runtime.run(self.request_for(request, self._active_index))
+
+    def classify_failure(self, result: RunResult) -> FailureKind:
+        raw = result.raw or {}
+        if raw.get("failure_kind") == FailureKind.PROVIDER_UNAVAILABLE:
+            return FailureKind.PROVIDER_UNAVAILABLE
+        provider = next(
+            (
+                candidate
+                for candidate in self.providers
+                if candidate.runtime.name == result.provider
+            ),
+            self.active_provider,
+        )
+        return provider.runtime.classify_failure(result)
+
+
 def model_ladder(request: RunRequest) -> list[str | None]:
     """The configured model first, then each fallback rung in order."""
     return [request.model, *request.fallback_models]
@@ -25,21 +123,107 @@ def run_with_fallback(
     request: RunRequest,
     on_event: Callable[[str], None] = lambda _: None,
 ) -> RunResult:
-    """Run `request`, stepping down the model ladder when a model is unavailable.
+    """Run `request`, walking model ladders and then an ordered provider chain.
 
     Adaptation on failure, not a downgrade: with no ladder configured, or with
     a model that answers, this is exactly one `runtime.run` call and nothing
-    else happens. Only FailureKind.MODEL_UNAVAILABLE advances a rung — a
+    else happens. Only explicit model/provider unavailability advances — a
     transient error or an ordinary agent failure is returned untouched so the
     caller's own retry policy (and the CLI's own backoff) decides what to do.
 
-    The returned result carries the model that actually produced it, so callers
-    can attribute whatever artifact they publish.
+    The returned result carries the provider and model that actually produced
+    it, so callers can attribute whatever artifact they publish.
     """
+    if isinstance(runtime, RuntimeChain):
+        return _run_chain(runtime, request, on_event)
+    return _run_provider(
+        runtime,
+        request,
+        configured_provider=runtime.name,
+        configured_model=request.model,
+        on_event=on_event,
+    )
+
+
+def _run_chain(
+    chain: RuntimeChain,
+    request: RunRequest,
+    on_event: Callable[[str], None],
+) -> RunResult:
+    configured_provider = chain.configured_provider
+    configured_model = chain.configured_model
+    for index in range(chain.active_index, len(chain.providers)):
+        provider = chain.providers[index]
+        provider_name = provider.runtime.name
+        chain.pin(index)
+        if not provider.runtime.available():
+            result = RunResult(
+                ok=False,
+                text=f"Runtime {provider_name!r} CLI is not installed/on PATH",
+                raw={"failure_kind": FailureKind.PROVIDER_UNAVAILABLE},
+                model=provider.model,
+                provider=provider_name,
+                configured_provider=configured_provider,
+                configured_model=configured_model,
+            )
+            if index + 1 >= len(chain.providers):
+                on_event(
+                    f"PROVIDER FALLBACK exhausted: {provider_name!r} is unavailable and "
+                    "no provider is left"
+                )
+                return result
+            next_name = chain.providers[index + 1].runtime.name
+            on_event(f"PROVIDER FALLBACK: {provider_name!r} is unavailable — trying {next_name!r}")
+            continue
+
+        result = _run_provider(
+            provider.runtime,
+            chain.request_for(request, index),
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+            on_event=on_event,
+        )
+        kind = provider.runtime.classify_failure(result) if not result.ok else None
+        if result.ok or kind not in {
+            FailureKind.MODEL_UNAVAILABLE,
+            FailureKind.PROVIDER_UNAVAILABLE,
+        }:
+            chain.pin_model(result.provider, result.model)
+            return result
+        if index + 1 >= len(chain.providers):
+            on_event(
+                f"PROVIDER FALLBACK exhausted: {provider_name!r} is unavailable and "
+                "no provider is left"
+            )
+            return result
+        next_name = chain.providers[index + 1].runtime.name
+        on_event(
+            f"PROVIDER FALLBACK: {provider_name!r} exhausted its model ladder — "
+            f"trying {next_name!r}. Output will come from a different provider."
+        )
+    raise AssertionError("unreachable: a runtime chain always has an active provider")
+
+
+def _run_provider(
+    runtime: Runtime,
+    request: RunRequest,
+    *,
+    configured_provider: str,
+    configured_model: str | None,
+    on_event: Callable[[str], None],
+) -> RunResult:
     ladder = model_ladder(request)
     for index, model in enumerate(ladder):
         attempt = request if model == request.model else replace(request, model=model)
-        result = replace(runtime.run(attempt), model=model)
+        result = replace(
+            runtime.run(attempt),
+            model=model,
+            provider=runtime.name,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+        )
+        # A provider-wide refusal skips the rest of this provider immediately;
+        # only model-specific unavailability has a meaningful next model rung.
         if result.ok or runtime.classify_failure(result) is not FailureKind.MODEL_UNAVAILABLE:
             return result
 
@@ -48,13 +232,14 @@ def run_with_fallback(
             # Loud on the way out too: an exhausted ladder is a config gap, and
             # the operator needs to see which rungs were actually tried.
             on_event(
-                f"MODEL FALLBACK exhausted: {_name(model)} is unavailable and no rung is left "
+                f"MODEL FALLBACK [{runtime.name}] exhausted: {_name(model)} is unavailable "
+                "and no rung is left "
                 f"(tried {', '.join(_name(m) for m in ladder)})"
             )
             return result
         on_event(
-            f"MODEL FALLBACK: {_name(model)} is unavailable — retrying on {_name(remaining[0])}. "
-            "Output will come from a different model than configured."
+            f"MODEL FALLBACK [{runtime.name}]: {_name(model)} is unavailable — retrying on "
+            f"{_name(remaining[0])}. Output will come from a different model than configured."
         )
     raise AssertionError("unreachable: the ladder always has at least one rung")
 
@@ -74,17 +259,25 @@ def pin_to_model(request: RunRequest, model: str | None) -> RunRequest:
 
 
 def model_note(request: RunRequest, result: RunResult) -> str:
-    """One line naming the model that produced `result`, flagging substitutions.
+    """Name the provider/model that produced `result`, flagging substitutions.
 
     A review written by a fallback model is a materially different review, so
     every artifact a run publishes says which model wrote it.
     """
     used = result.model or request.model
-    if used is None:
-        return "model: runtime default"
-    if request.model and used != request.model:
-        return f"model: {used} (FALLBACK — configured {request.model} was unavailable)"
-    return f"model: {used}"
+    provider = result.provider or result.configured_provider or "unknown"
+    configured_provider = result.configured_provider or provider
+    configured_model = (
+        result.configured_model if result.configured_provider is not None else request.model
+    )
+    model = used or "runtime default"
+    if provider != configured_provider or used != configured_model:
+        configured = configured_model or "runtime default"
+        return (
+            f"provider: {provider}, model: {model} "
+            f"(FALLBACK — configured {configured_provider} / {configured} was unavailable)"
+        )
+    return f"provider: {provider}, model: {model}"
 
 
 def artifact_footer(request: RunRequest, result: RunResult) -> str:

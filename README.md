@@ -92,6 +92,11 @@ override per project or per role under `agents:` in `.agent/config.yaml`.
 A tier the effective runtime does not define is a named error rather than a
 foreign model name handed to a CLI — `agent doctor` lists what each runtime
 resolves to and flags the gaps.
+Roles may keep the existing scalar `runtime:` override or opt into ordered
+cross-provider fallback with `runtimes: [claude_code, codex]`. Each provider
+resolves the tier through its own table and exhausts its own model ladder;
+only explicit unavailability advances the chain, and the chosen provider stays
+pinned across gate-feedback retries.
 A planner `ESCALATE:` stops the workflow before anything is changed. Agent
 activity streams live (tool calls + text) by default; set
 `runtime.stream: false` for quiet runs.

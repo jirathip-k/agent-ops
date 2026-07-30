@@ -450,7 +450,7 @@ This repo is public; the names of the repos it manages are not. The split:
 - History was scrubbed (git-filter-repo) before the repo went public, so old
   revisions of these files are gone from every branch.
 
-## Model fallback (when a tier goes unavailable mid-run)
+## Model and provider fallback (when a tier or provider goes unavailable)
 
 Roles reference tiers (`smart`, `fast`), and `model_tiers` maps each tier to a
 concrete model **per runtime**. When a run fails because that model cannot
@@ -462,22 +462,43 @@ model_tiers:
   claude_code:
     smart: fable
     fast: sonnet
+  codex:
+    smart: codex-smart-model
+    fast: codex-fast-model
 model_fallbacks:            # the full ladder, best first
   claude_code:
     smart: [fable, opus, sonnet]
     fast: [sonnet, haiku]
+  codex:
+    smart: [codex-smart-model, codex-smart-backup]
+    fast: [codex-fast-model, codex-fast-backup]
+agents:
+  planner:
+    runtimes: [claude_code, codex]
+    model: smart
 ```
 
 Rules worth knowing:
 
-- **Only availability advances a rung.** A rate limit or an overload retries
-  the *same* model (the CLIs already back off internally); a failing gate or a
-  bad agent run never changes the model at all.
-- **Substitutions are loud.** The log says `MODEL FALLBACK: …`, and every
+- **`runtime` remains scalar and unchanged.** A role opts into provider fallback
+  with ordered `runtimes:`. Configuring both on one role is a validation error,
+  and `--runtime` remains a one-provider override.
+- **Each provider owns its model names.** `smart` / `fast` resolve separately
+  through each provider's `model_tiers` and `model_fallbacks` tables. A
+  cross-provider chain must use a tier (or each runtime's default), never one
+  provider's concrete model slug.
+- **Only explicit availability advances.** A provider exhausts its model ladder
+  before the next provider is tried. An absent CLI or an explicit
+  provider/allowance refusal may advance the provider chain. A transient rate
+  limit or overload, a failing gate, rejected output, or an ordinary agent
+  failure never changes provider.
+- **Substitutions are loud.** The log says `MODEL FALLBACK: …` or
+  `PROVIDER FALLBACK: …`, and every
   artifact the run posts — PR review comment, plan/spec comment, PR body —
-  names the model that produced it.
-- **A substitution holds for the rest of the run**, so a retry after a failed
-  gate does not walk back into a model that just refused.
+  names the provider and model that produced it.
+- **A substitution holds for the rest of the run**, so feedback after a failed
+  gate stays on the chosen provider/model and does not rediscover an exhausted
+  allowance.
 - **Inert unless a rung is unavailable.** `config/defaults.yaml` ships a
   ladder for the `claude_code` runtime out of the box; a project can override
   or clear it via its own `model_fallbacks`, and a run that never hits an
@@ -495,7 +516,8 @@ Rules worth knowing:
   onto its own models. A tier the *effective* runtime does not define is a
   named error at resolution, never a foreign model name handed to a CLI; that
   is what `--runtime codex` used to do (#39).
-- `agent doctor` prints the resolved model and ladder for every role, and then,
+- `agent doctor` prints every provider/model ladder in each role's chain,
+  annotates missing CLIs, and fails when no configured provider can start. Then,
   for each runtime the project is *not* using, either what that runtime would
   resolve to or which tiers it is missing:
 

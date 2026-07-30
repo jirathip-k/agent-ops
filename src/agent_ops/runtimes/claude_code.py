@@ -48,6 +48,12 @@ _TRANSIENT_MARKERS = (
     "service unavailable",
     "503",
 )
+_PROVIDER_UNAVAILABLE_MARKERS = (
+    "authentication required",
+    "not logged in",
+    "please log in",
+    "no credentials",
+)
 
 # What `claude --permission-mode` accepts, as of CLI 2.1.x. `default` is the
 # legacy spelling of `manual` — still accepted, no longer advertised in
@@ -471,8 +477,9 @@ def result_from_json(data: dict[str, Any], returncode: int) -> RunResult:
 def classify_failure(result: RunResult) -> FailureKind:
     """Read Claude Code's prose error into a provider-neutral failure kind.
 
-    Transient markers win over model-availability ones: a rate-limited call
-    should wait for the same model, never spend the ladder on a hiccup.
+    Provider-wide auth failures are explicit failover signals. Transient
+    markers still win over model-availability ones: a rate-limited call should
+    wait for the same model, never spend the ladder on a hiccup.
     """
     haystack = " ".join(
         [
@@ -481,6 +488,8 @@ def classify_failure(result: RunResult) -> FailureKind:
             str((result.raw or {}).get("error", "")),
         ]
     ).lower()
+    if any(marker in haystack for marker in _PROVIDER_UNAVAILABLE_MARKERS):
+        return FailureKind.PROVIDER_UNAVAILABLE
     if any(marker in haystack for marker in _TRANSIENT_MARKERS):
         return FailureKind.TRANSIENT
     if any(marker in haystack for marker in _MODEL_UNAVAILABLE_MARKERS):

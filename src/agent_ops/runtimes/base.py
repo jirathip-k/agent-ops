@@ -55,6 +55,12 @@ class RunResult:
     # The model that actually produced this result — may differ from the one
     # the role resolved to if the ladder was walked. Artifacts must report it.
     model: str | None = None
+    # The provider that actually produced this result, plus the provider/model
+    # configured at the head of the chain. Set by agent_ops.fallback rather than
+    # adapters so vendor integrations remain unaware of routing policy.
+    provider: str | None = None
+    configured_provider: str | None = None
+    configured_model: str | None = None
 
 
 class FailureKind(StrEnum):
@@ -68,6 +74,10 @@ class FailureKind(StrEnum):
     # hit, model unsupported for the auth in use, model retired. Another model
     # would work, so it is worth retrying down the ladder.
     MODEL_UNAVAILABLE = "model_unavailable"
+    # The provider itself cannot be invoked (for example its CLI is absent or
+    # its account allowance is explicitly exhausted). An ordered runtime chain
+    # may advance; ordinary failures and transient throttling may not.
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     # Rate limited or overloaded. The same model will work shortly; swapping
     # models would be a needless downgrade.
     TRANSIENT = "transient"
@@ -79,7 +89,8 @@ class FailureKind(StrEnum):
 class Runtime(Protocol):
     """Adapter over a coding-agent CLI. Workflows and loops depend only on this."""
 
-    name: str
+    @property
+    def name(self) -> str: ...
 
     def available(self) -> bool: ...
 

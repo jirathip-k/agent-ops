@@ -29,7 +29,11 @@ commands:
 #   planner:
 #     model: opus
 #   implementer:
-#     model: sonnet
+#     # Ordered provider fallback is opt-in. Use `runtime: codex` for the
+#     # unchanged scalar override, or `runtimes:` for a chain, never both. Each
+#     # provider in a chain needs its own `model_tiers` entry for `fast`.
+#     runtimes: [claude_code, codex]
+#     model: fast
 #   reviewer:
 #     model: opus
 
