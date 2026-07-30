@@ -446,7 +446,7 @@ def test_doctor_stays_quiet_about_lanes_the_repo_has_not_wired(tmp_path: Path, m
     assert result.exit_code == 0
     assert (
         "✓ CI lane callers in sync: triage "
-        "(not wired: distill, evolve, groom, plan, promote, scout, spec)"
+        "(not wired: classify, distill, evolve, groom, plan, promote, scout, spec)"
     ) in result.output
     assert "is behind" not in result.output
 

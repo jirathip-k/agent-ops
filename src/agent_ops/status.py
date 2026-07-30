@@ -49,7 +49,7 @@ STAGE_PRECEDENCE: tuple[str, ...] = (CLAIM_LABEL, *GATE_STAGES, *BUCKETS, TRIAGE
 # deliberately absent: a human is `needs-human`'s servicing lane, not a CI
 # lane, and flagging it would swamp 28-of-67-open-issues worth of signal.
 STAGE_CONSUMERS: dict[str, frozenset[str]] = {
-    "untriaged": frozenset({"triage"}),
+    "untriaged": frozenset({"triage", "classify"}),
     # groom only: it's what promotes a backlog item to agent-ready or applies
     # a gate label. spec-pipeline.yml selects solely on the spec-requested
     # label, so it never picks up a plain backlog issue — listing it here
@@ -65,7 +65,7 @@ STAGE_CONSUMERS: dict[str, frozenset[str]] = {
 # stub with a `schedule:`. Both are still listed so `agent status` and lane
 # validation treat them as real lanes rather than accidentally-valid names
 # that merely happen to have a prompt file.
-LANES = ("triage", "groom", "promote", "spec", "plan", "scout", "evolve", "distill")
+LANES = ("triage", "classify", "groom", "promote", "spec", "plan", "scout", "evolve", "distill")
 
 # Name of the control repo hosting the reusable pipelines. Detection accepts
 # any owner prefix (`<owner>/agent-ops/...`) so forks keep working, plus the

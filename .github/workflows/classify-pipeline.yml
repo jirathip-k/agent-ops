@@ -1,0 +1,118 @@
+# Reusable classify pipeline workflow.
+# Runs the real `agent triage` CLI against a managed repo — the same code
+# path as local triage. Managed repos call this via workflow_call (see
+# stubs/managed-repo-classify.yml).
+#
+# Why this exists (#262): triage-pipeline.yml's classification step shares a
+# concurrency lock and a 55-minute budget with a four-agent implement
+# pipeline in the same job — a long implement run holds the lock, so the
+# next tick queues behind it and `untriaged` ages even while that pipeline
+# is "running". This lane runs only classification, in its own lock.
+#
+# Deliberately reduced scope: `run_triage` does write to issues — it applies
+# a bucket label and posts a `**Triage: <bucket>**` comment for every issue
+# it classifies, in code (workflows/triage.py, lines 214-239). What it does
+# NOT do is close duplicates, answer verifiable questions, or clear a stale
+# `agent:claimed` label: those are the CI orchestrator's Housekeeping actions,
+# performed by a model holding `gh issue edit`/`close`/`comment`. `run_triage`
+# grants its own model only `gh issue create/list` and `gh search issues`
+# (workflows/triage.py, `extra_allowed_tools`) — nothing that model call could
+# do would perform them even if it wanted to. See docs/reference/lanes.md.
+
+name: Reusable · Classify Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "owner/repo to classify"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to classify"
+        required: true
+        type: string
+      runner:
+        description: "Runner label for the job (e.g. blacksmith-2vcpu-ubuntu-2404)"
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  classify:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    # Own lock, keyed by lane AND repo (#262): sharing agent-triage-<repo>
+    # would put this right back behind the implement-pipeline budget it
+    # exists to escape. Keying more coarsely than lane+repo once collided
+    # across an evolve matrix's five legs — never repeat that.
+    concurrency:
+      group: agent-classify-${{ inputs.target_repo }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      # No id-token: unlike triage-pipeline.yml this job never runs
+      # claude-code-action itself — `agent triage` authenticates with
+      # CLAUDE_CODE_OAUTH_TOKEN, same as every other CLI-shaped lane.
+    steps:
+      # Idle guard: no unclassified issue → skip the (token-costing) Claude
+      # session. Mirrors run_triage's own selection (BUCKET_LABELS plus
+      # agent:claimed), so this can only under-count what the CLI picks up.
+      - name: Check for unclassified issues
+        id: precheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Via env, not inline interpolation — keeps caller input out of the script.
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          COUNT=$(gh issue list --repo "$TARGET_REPO" --state open --limit 50 \
+            --json labels --jq '[.[] | select(([.labels[].name] | any(
+              . == "agent-ready" or . == "needs-human" or . == "backlog" or . == "agent:claimed"
+            )) | not)] | length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Unclassified issues: $COUNT"
+
+      - name: Checkout control repo (CLI + prompts)
+        if: steps.precheck.outputs.count != '0'
+        uses: actions/checkout@v7
+        with:
+          repository: jirathip-k/agent-ops
+          path: agent-ops
+
+      - name: Checkout target repo
+        if: steps.precheck.outputs.count != '0'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target
+          fetch-depth: 0
+
+      - name: Install uv
+        if: steps.precheck.outputs.count != '0'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code CLI
+        if: steps.precheck.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run classify
+        if: steps.precheck.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        working-directory: agent-ops
+        run: uv run agent triage -C "$GITHUB_WORKSPACE/target"
