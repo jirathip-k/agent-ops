@@ -38,6 +38,13 @@ class LoopOutcome:
     unchanged. `None` in every other outcome, including a plain gate failure
     — that path is unchanged and still retries via `gate_failures`.
     """
+    gate_results: tuple[GateResult, ...] = ()
+    """Latest complete gate observation, including passes.
+
+    Self-review runs only after a successful loop, so retaining the passing
+    results lets the parent workflow give the reviewer the commands and
+    verdicts it actually observed. A tuple keeps that handoff frozen.
+    """
 
 
 def run_task_loop(
@@ -56,6 +63,7 @@ def run_task_loop(
     feedback: str | None = None
     last_result: RunResult | None = None
     failures: list[GateResult] = []
+    latest_gate_results: tuple[GateResult, ...] = ()
     current = request
 
     for attempt in range(1, config.loop.max_attempts + 1):
@@ -80,6 +88,7 @@ def run_task_loop(
             continue
 
         results = run_gates(config, cwd)
+        latest_gate_results = tuple(results)
         missing = next((g for g in results if g.status is GateStatus.MISSING), None)
         if missing is not None:
             # A binary that isn't on PATH is an environment gap the implementer
@@ -91,14 +100,27 @@ def run_task_loop(
                 f"gate {missing.name!r} did not run — {binary} not on PATH; "
                 "aborting without retrying"
             )
-            return LoopOutcome(False, attempt, last_result, [], missing_gate=missing)
+            return LoopOutcome(
+                False,
+                attempt,
+                last_result,
+                [],
+                missing_gate=missing,
+                gate_results=latest_gate_results,
+            )
 
         failures = [g for g in results if g.status is GateStatus.FAILED]
         if not failures:
             on_event(f"all gates passed on attempt {attempt}")
-            return LoopOutcome(True, attempt, last_result, [])
+            return LoopOutcome(True, attempt, last_result, [], gate_results=latest_gate_results)
 
         feedback = format_failures(failures)
         on_event(f"gates failed: {', '.join(f.name for f in failures)}")
 
-    return LoopOutcome(False, config.loop.max_attempts, last_result, failures)
+    return LoopOutcome(
+        False,
+        config.loop.max_attempts,
+        last_result,
+        failures,
+        gate_results=latest_gate_results,
+    )

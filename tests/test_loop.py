@@ -51,6 +51,10 @@ def test_loop_retries_until_gates_pass(tmp_path: Path) -> None:
     assert outcome.ok
     assert outcome.attempts == 3
     assert outcome.missing_gate is None
+    assert len(outcome.gate_results) == 1
+    assert outcome.gate_results[0].name == "test"
+    assert outcome.gate_results[0].command == f"test -f {runtime.marker}"
+    assert outcome.gate_results[0].ok is True
     # retry prompts carry the original task plus the gate failure report
     assert "fix the bug" in runtime.prompts[1]
     assert "Verification failures" in runtime.prompts[1]

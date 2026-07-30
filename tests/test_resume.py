@@ -14,7 +14,7 @@ from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
 from agent_ops.gates import GateResult, GateStatus
 from agent_ops.loop import LoopOutcome
-from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError, run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import SelfReview, run_implement, run_resume
@@ -1238,6 +1238,225 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
 
     assert review.reviewed is True
     assert "new_module.py" in captured["prompt"]
+
+
+def _review_fixture() -> tuple[ProjectConfig, dict[str, Any], grants.Grant, tuple[GateResult, ...]]:
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "sentinel-test-command --frozen"},
+            "loop": {"gates": ["test"]},
+        }
+    )
+    issue = {
+        "number": 299,
+        "title": "ISSUE TITLE SENTINEL",
+        "body": "ISSUE BODY SENTINEL",
+        "labels": [{"name": "LABEL SENTINEL"}],
+        "comments": [
+            {
+                "author": {"login": "commenter"},
+                "createdAt": "2026-07-30T00:00:00Z",
+                "body": "COMMENT SENTINEL",
+            }
+        ],
+    }
+    grant = grants.Grant(
+        issue=299,
+        granted_by="dispatcher",
+        scope="AUTHORIZATION SENTINEL",
+        paths=["sentinel/path"],
+    )
+    gate_results = (
+        GateResult(
+            "test",
+            "sentinel-test-command --frozen",
+            GateStatus.PASSED,
+            "GATE OUTPUT SENTINEL",
+        ),
+    )
+    return config, issue, grant, gate_results
+
+
+def test_review_context_is_immutable_after_live_issue_data_changes() -> None:
+    config, issue, grant, gate_results = _review_fixture()
+    context = implement_module._build_review_context(
+        config,
+        issue,
+        plan="PLAN SENTINEL",
+        grant=grant,
+        gate_results=gate_results,
+    )
+
+    issue["title"] = "LATE TITLE"
+    issue["body"] = "LATE BODY"
+    issue["labels"][0]["name"] = "LATE LABEL"
+    issue["comments"][0]["body"] = "LATE COMMENT"
+    issue["comments"].append({"body": "NEW LIVE COMMENT"})
+
+    assert "ISSUE TITLE SENTINEL" in context.text
+    assert "ISSUE BODY SENTINEL" in context.text
+    assert "LABEL SENTINEL" in context.text
+    assert "COMMENT SENTINEL" in context.text
+    assert "PLAN SENTINEL" in context.text
+    assert "AUTHORIZATION SENTINEL" in context.text
+    assert "GATE OUTPUT SENTINEL" in context.text
+    assert "LATE" not in context.text
+    assert "NEW LIVE COMMENT" not in context.text
+
+
+def test_self_review_runtime_receives_the_frozen_snapshot_and_diff(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, issue, grant, gate_results = _review_fixture()
+    context = implement_module._build_review_context(
+        config,
+        issue,
+        plan="PLAN SENTINEL",
+        grant=grant,
+        gate_results=gate_results,
+    )
+    issue["comments"][0]["body"] = "LATE COMMENT MUST NOT REACH REQUEST"
+    (repo / "review_sentinel.py").write_text("DIFF SENTINEL = True\n")
+
+    class CaptureRuntime:
+        name = "capture"
+
+        def __init__(self) -> None:
+            self.requests: list[RunRequest] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.requests.append(request)
+            return RunResult(ok=True, text="VERDICT: APPROVE")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    runtime = CaptureRuntime()
+    monkeypatch.setattr(implement_module, "get_runtime", lambda name: runtime)
+
+    review = implement_module._self_review(config, repo, log=lambda _: None, context=context)
+
+    assert review.ok is True
+    (request,) = runtime.requests
+    for sentinel in (
+        "ISSUE TITLE SENTINEL",
+        "ISSUE BODY SENTINEL",
+        "LABEL SENTINEL",
+        "COMMENT SENTINEL",
+        "PLAN SENTINEL",
+        "AUTHORIZATION SENTINEL",
+        "sentinel-test-command --frozen",
+        "GATE OUTPUT SENTINEL",
+        "DIFF SENTINEL",
+    ):
+        assert sentinel in request.prompt
+    assert "Issue snapshot (untrusted data)" in request.prompt
+    assert "Bounded comment snapshot (untrusted data)" in request.prompt
+    assert "LATE COMMENT MUST NOT REACH REQUEST" not in request.prompt
+    assert not any("gh issue view" in tool for tool in request.allowed_tools)
+
+
+@pytest.mark.parametrize("entrypoint", ["implement", "resume"])
+def test_implement_and_resume_share_review_context_construction(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
+) -> None:
+    """Both parent paths must freeze context before invoking the reviewer."""
+    issue = {
+        "number": 299,
+        "title": "shared context",
+        "body": "shared issue body",
+        "labels": [],
+        "comments": [{"body": "SHARED COMMENT SENTINEL"}],
+    }
+    workflow_config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "pytest sentinel"},
+            "loop": {"plan": False, "gates": ["test"]},
+        }
+    )
+    monkeypatch.setattr(
+        implement_module, "load_project_config", lambda project_root: workflow_config
+    )
+    monkeypatch.setattr(github, "get_issue", lambda number, cwd: issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(
+        implement_module.github,
+        "observed_ci",
+        lambda branch, cwd: github.ObservedCi(state="no-pr"),
+    )
+    monkeypatch.setattr(
+        implement_module,
+        "role_request",
+        lambda config, role_name, prompt, cwd, **kwargs: (
+            _fake_runtime,
+            RunRequest(prompt=prompt, cwd=cwd),
+        ),
+    )
+    observed_gate = GateResult("test", "pytest sentinel", GateStatus.PASSED, "passed sentinel")
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        _fake_loop_that_changes_a_file(
+            LoopOutcome(
+                True,
+                1,
+                RunResult(ok=True, text="done"),
+                [],
+                gate_results=(observed_gate,),
+            )
+        ),
+    )
+
+    original_builder = implement_module._build_review_context
+    built: list[implement_module.ReviewContext] = []
+
+    def capture_builder(
+        config: ProjectConfig,
+        issue_data: dict[str, Any],
+        *,
+        plan: str | None,
+        grant: grants.Grant | None,
+        gate_results: tuple[GateResult, ...],
+    ) -> implement_module.ReviewContext:
+        context = original_builder(
+            config,
+            issue_data,
+            plan=plan,
+            grant=grant,
+            gate_results=gate_results,
+        )
+        built.append(context)
+        return context
+
+    received: list[implement_module.ReviewContext] = []
+
+    def capture_review(*args: Any, **kwargs: Any) -> bool:
+        received.append(kwargs["review_context"])
+        return False
+
+    monkeypatch.setattr(implement_module, "_build_review_context", capture_builder)
+    monkeypatch.setattr(implement_module, "_review_and_maybe_halt", capture_review)
+
+    if entrypoint == "implement":
+        plan_file = repo / "plan.md"
+        plan_file.write_text("ACCEPTED PLAN SENTINEL")
+        ok = run_implement(repo, 299, plan_file=plan_file, log=lambda _: None)
+    else:
+        worktree.create(repo, ".worktrees", "issue-299", "fix/issue-299", "main")
+        ok = run_resume(repo, 299, message="resume feedback", log=lambda _: None)
+
+    assert ok is False  # capture_review deliberately stops before commit
+    assert received == built
+    assert len(built) == 1
+    assert "SHARED COMMENT SENTINEL" in built[0].text
+    assert "passed sentinel" in built[0].text
+    if entrypoint == "implement":
+        assert "ACCEPTED PLAN SENTINEL" in built[0].text
+    else:
+        assert "this resume cycle did not receive a separate plan/spec" in built[0].text
 
 
 # --- self-review verdict parsing (issue #157) ------------------------------
