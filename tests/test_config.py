@@ -3,9 +3,11 @@ from pathlib import Path
 import pydantic
 import pytest
 
+from agent_ops import config as config_mod
 from agent_ops.config import (
     ROLE_NAMES,
     ModelTierError,
+    RuntimeChainConfigError,
     ladder_warnings,
     load_project_config,
     role_reports,
@@ -212,6 +214,40 @@ def test_cross_provider_chain_rejects_a_concrete_model_slug(tmp_path: Path) -> N
 
     with pytest.raises(RuntimeError, match="must use a model tier"):
         load_project_config(tmp_path).resolve_role("reviewer")
+
+
+def test_execution_and_doctor_share_chain_shape_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        "agents:\n  reviewer:\n    runtimes: [claude_code, codex]\n    model: claude-opus-5\n",
+    )
+    config = load_project_config(tmp_path)
+    calls: list[tuple[str, list[str]]] = []
+    real_validate = config_mod._validate_runtime_chain_shape
+
+    def spy(
+        role_name: str,
+        runtimes: list[str],
+        requested: str | None,
+        tier_names: set[str],
+    ) -> None:
+        if len(runtimes) > 1:
+            calls.append((role_name, runtimes))
+        real_validate(role_name, runtimes, requested, tier_names)
+
+    monkeypatch.setattr(config_mod, "_validate_runtime_chain_shape", spy)
+
+    with pytest.raises(RuntimeChainConfigError) as exc:
+        config.resolve_role("reviewer")
+    report = {row.name: row for row in role_reports(config)}["reviewer"]
+
+    assert calls == [
+        ("reviewer", ["claude_code", "codex"]),
+        ("reviewer", ["claude_code", "codex"]),
+    ]
+    assert report.error == str(exc.value)
 
 
 def test_missing_tier_for_the_effective_runtime_raises(tmp_path: Path) -> None:

@@ -221,6 +221,21 @@ SPEND_LIMIT_OUTPUT = (
     "keep using Fable 5 or switch models to continue this chat."
 )
 
+# Classifier-relevant fields captured from Claude Code 2.1.220 on 2026-07-30.
+# Both commands used `--bare --no-session-persistence -p --output-format json`
+# so the first could not read OAuth/keychain auth. The first had no
+# ANTHROPIC_API_KEY; the second used ANTHROPIC_API_KEY=invalid-fixture.
+LOGGED_OUT_OUTPUT = (
+    '{"is_error":true,"session_id":"9d01fe5e-13e5-4d94-adb5-a255510ff2c1",'
+    '"terminal_reason":"api_error","api_error_status":null,'
+    '"result":"Not logged in · Please run /login","type":"result"}'
+)
+INVALID_API_KEY_OUTPUT = (
+    '{"is_error":true,"session_id":"3f927a84-1e82-4e58-a18e-c2fb2cf0a76c",'
+    '"terminal_reason":"api_error","api_error_status":401,'
+    '"result":"Invalid API key · Fix external API key","type":"result"}'
+)
+
 
 def test_spend_limit_prose_classifies_as_model_unavailable() -> None:
     result = parse_result(_proc(SPEND_LIMIT_OUTPUT, returncode=1))
@@ -238,21 +253,13 @@ def test_rate_limit_classifies_as_transient() -> None:
     assert classify_failure(result) is FailureKind.TRANSIENT
 
 
-def test_explicit_missing_auth_classifies_as_provider_unavailable() -> None:
-    result = RunResult(ok=False, text="Authentication required. Please log in.")
-    assert classify_failure(result) is FailureKind.PROVIDER_UNAVAILABLE
+@pytest.mark.parametrize("output", [LOGGED_OUT_OUTPUT, INVALID_API_KEY_OUTPUT])
+def test_observed_auth_refusals_with_a_session_are_not_provider_unavailability(
+    output: str,
+) -> None:
+    result = parse_result(_proc(output, returncode=1))
 
-
-def test_auth_markers_in_an_agent_session_are_not_provider_unavailability() -> None:
-    result = parse_result(
-        _proc(
-            '{"result": "gh says you are not logged in, and I could not finish", '
-            '"is_error": true, "session_id": "session-123"}',
-            returncode=1,
-        )
-    )
-
-    assert result.session_id == "session-123"
+    assert result.session_id is not None
     assert classify_failure(result) is FailureKind.AGENT_FAILURE
 
 

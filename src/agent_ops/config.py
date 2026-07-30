@@ -40,6 +40,21 @@ class RuntimeChainConfigError(RuntimeError):
     """An ordered provider chain cannot be resolved safely."""
 
 
+def _validate_runtime_chain_shape(
+    role_name: str,
+    runtimes: list[str],
+    requested: str | None,
+    tier_names: set[str],
+) -> None:
+    """Reject a concrete model slug shared across more than one provider."""
+    if len(runtimes) > 1 and requested is not None and requested not in tier_names:
+        raise RuntimeChainConfigError(
+            f"role {role_name!r} configures runtimes {runtimes!r} with concrete model "
+            f"{requested!r}; an ordered cross-provider chain must use a model tier "
+            "(such as 'smart' or 'fast') or the runtime default"
+        )
+
+
 class Commands(BaseModel):
     setup: str | None = None  # run once in each fresh worktree before gates (e.g. npm install)
     test: str | None = None
@@ -358,12 +373,7 @@ class ProjectConfig(BaseModel):
         role: RoleConfig = getattr(self.agents, role_name)
         runtimes = self.effective_runtimes(role_name, runtime_override)
         requested = role.model or self.runtime.model
-        if len(runtimes) > 1 and requested is not None and requested not in self.tier_names():
-            raise RuntimeChainConfigError(
-                f"role {role_name!r} configures runtimes {runtimes!r} with concrete model "
-                f"{requested!r}; an ordered cross-provider chain must use a model tier "
-                "(such as 'smart' or 'fast') or the runtime default"
-            )
+        _validate_runtime_chain_shape(role_name, runtimes, requested, self.tier_names())
         providers = [
             self._resolve_provider(role_name, runtime, requested=requested) for runtime in runtimes
         ]
@@ -490,10 +500,15 @@ def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[R
         effective = config.effective_runtimes(name, runtime)
         role: RoleConfig = getattr(config.agents, name)
         requested = role.model or config.runtime.model
+        chain_error: str | None = None
+        try:
+            _validate_runtime_chain_shape(name, effective, requested, config.tier_names())
+        except RuntimeChainConfigError as exc:
+            chain_error = str(exc)
         provider_rows: list[ProviderReport] = []
         for provider in effective:
             try:
-                resolved = config._resolve_provider(name, provider, requested=requested)
+                resolved_role = config.resolve_role(name, runtime_override=provider)
             except ModelTierError as exc:
                 provider_rows.append(
                     ProviderReport(
@@ -503,6 +518,7 @@ def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[R
                     )
                 )
                 continue
+            resolved = resolved_role.providers[0]
             provider_rows.append(
                 ProviderReport(
                     runtime=resolved.runtime,
@@ -511,20 +527,14 @@ def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[R
                 )
             )
         first = provider_rows[0]
-        chain_error: str | None = next((row.error for row in provider_rows if row.error), None)
-        if len(effective) > 1 and requested is not None and requested not in config.tier_names():
-            chain_error = (
-                f"role {name!r} configures runtimes {effective!r} with concrete model "
-                f"{requested!r}; an ordered cross-provider chain must use a model tier "
-                "(such as 'smart' or 'fast') or the runtime default"
-            )
+        error = chain_error or next((row.error for row in provider_rows if row.error), None)
         reports.append(
             RoleReport(
                 name=name,
                 runtime=first.runtime,
                 model=first.model,
                 fallbacks=first.fallbacks,
-                error=chain_error,
+                error=error,
                 missing_tier=first.missing_tier,
                 providers=provider_rows,
             )

@@ -48,11 +48,15 @@ _TRANSIENT_MARKERS = (
     "service unavailable",
     "503",
 )
+# Observed from Claude Code 2.1.220 with `claude --bare -p
+# --output-format json`: no configured credential reports "Not logged in ·
+# Please run /login"; an invalid ANTHROPIC_API_KEY reports "Invalid API key ·
+# Fix external API key". Both current envelopes include a session_id, so the
+# pre-session guard in classify_failure intentionally prevents failover for
+# those shapes. Tests keep the observed envelopes and this guard in step.
 _PROVIDER_UNAVAILABLE_MARKERS = (
-    "authentication required",
-    "not logged in",
-    "please log in",
-    "no credentials",
+    "not logged in · please run /login",
+    "invalid api key · fix external api key",
 )
 
 # What `claude --permission-mode` accepts, as of CLI 2.1.x. `default` is the

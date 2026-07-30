@@ -131,7 +131,10 @@ def run_review(
         request = replace(request, stream=stream)
     result = run_with_fallback(runtime, request, on_event=log)
     if not result.ok:
-        if runtime.classify_failure(result) is FailureKind.MODEL_UNAVAILABLE:
+        if runtime.classify_failure(result) in {
+            FailureKind.MODEL_UNAVAILABLE,
+            FailureKind.PROVIDER_UNAVAILABLE,
+        }:
             raise ModelUnavailableError(f"Review run failed: {result.text}")
         raise RuntimeError(f"Review run failed: {result.text}")
     log(f"review complete ({model_note(request, result)})")
@@ -150,7 +153,7 @@ _SUMMARY_LABELS = {
     "request_changes": "REQUEST CHANGES",
     "unknown": "unknown verdict",
     "failed": "run failed",
-    "skipped": "skipped (queue aborted after a model-unavailable failure)",
+    "skipped": "skipped (queue aborted after a model/provider-unavailable failure)",
 }
 
 # Statuses that mean "this PR does not have a review to show" — either the
@@ -167,15 +170,15 @@ def run_reviews(
     runtime_name: str | None = None,
     log: Callable[[str], None] = flush_print,
 ) -> list[ReviewOutcome]:
-    """Review multiple PRs concurrently; abort the queue if the model ladder is exhausted.
+    """Review multiple PRs concurrently; abort if no configured model/provider can run.
 
     Each worker buffers its own log lines and flushes them as one block under
     a lock when it finishes, so concurrent runs never interleave. A
-    `ModelUnavailableError` from any run means the model ladder itself is
-    spent — a config-wide gap, not a per-PR problem — so it sets an abort flag
-    and every PR still queued comes back `"skipped"` rather than burning a run
-    on the same wall. Runs already in flight when the flag is set still finish.
-    Results are returned in input order, not completion order.
+    `ModelUnavailableError` from any run means its model ladder or provider
+    chain is spent — a config-wide gap, not a per-PR problem — so it sets an
+    abort flag and every PR still queued comes back `"skipped"` rather than
+    burning a run on the same wall. Runs already in flight when the flag is set
+    still finish. Results are returned in input order, not completion order.
     """
     abort = threading.Event()
     log_lock = threading.Lock()

@@ -308,6 +308,22 @@ def test_run_reviews_aborts_queue_on_model_unavailable(
     assert 3 not in runtime.calls
 
 
+def test_run_reviews_aborts_queue_on_provider_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _MultiRuntime(
+        {2: (False, "every provider refused")},
+        classify=FailureKind.PROVIDER_UNAVAILABLE,
+    )
+    _stub_multi(monkeypatch, runtime)
+
+    outcomes = run_reviews(tmp_path, [1, 2, 3], jobs=1)
+
+    assert [o.pr for o in outcomes] == [1, 2, 3]
+    assert [o.status for o in outcomes] == ["approve", "failed", "skipped"]
+    assert 3 not in runtime.calls
+
+
 def test_run_reviews_ordinary_failure_does_not_abort_the_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
