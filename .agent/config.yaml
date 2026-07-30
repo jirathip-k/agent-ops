@@ -8,4 +8,14 @@ commands:
   typecheck: uv run pyright
   requires: [actionlint, uv]
 
+model_tiers:
+  codex:
+    smart: gpt-5.6-sol
+    fast: gpt-5.6-terra
+
+model_fallbacks:
+  codex:
+    smart: [gpt-5.6-sol, gpt-5.6-terra]
+    fast: [gpt-5.6-terra, gpt-5.6-luna]
+
 skills: [coding, testing, documentation]
