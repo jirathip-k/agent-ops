@@ -151,13 +151,12 @@ def classify_failure(result: RunResult) -> FailureKind:
     """Read Codex's JSON error envelope into a provider-neutral failure kind."""
     raw = result.raw or {}
     blobs = [result.text, str(raw.get("stderr", "")), str(raw.get("stdout", ""))]
-    haystack = "\n".join(blobs).lower()
-    if any(marker in haystack for marker in _PROVIDER_UNAVAILABLE_MARKERS):
-        return FailureKind.PROVIDER_UNAVAILABLE
     for status, message in _error_envelopes(blobs):
+        lowered = message.lower()
+        if any(marker in lowered for marker in _PROVIDER_UNAVAILABLE_MARKERS):
+            return FailureKind.PROVIDER_UNAVAILABLE
         if status in _TRANSIENT_STATUSES or (status is not None and 500 <= status < 600):
             return FailureKind.TRANSIENT
-        lowered = message.lower()
         if any(m in lowered for m in _MODEL_MARKERS) and any(
             m in lowered for m in _UNAVAILABLE_MARKERS
         ):

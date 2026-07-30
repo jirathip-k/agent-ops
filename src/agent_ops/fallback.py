@@ -267,9 +267,9 @@ def model_note(request: RunRequest, result: RunResult) -> str:
     used = result.model or request.model
     provider = result.provider or result.configured_provider or "unknown"
     configured_provider = result.configured_provider or provider
-    configured_model = (
-        result.configured_model if result.configured_provider is not None else request.model
-    )
+    configured_model = request.model
+    if provider != configured_provider and result.configured_provider is not None:
+        configured_model = result.configured_model
     model = used or "runtime default"
     if provider != configured_provider or used != configured_model:
         configured = configured_model or "runtime default"

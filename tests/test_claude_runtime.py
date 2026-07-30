@@ -243,6 +243,19 @@ def test_explicit_missing_auth_classifies_as_provider_unavailable() -> None:
     assert classify_failure(result) is FailureKind.PROVIDER_UNAVAILABLE
 
 
+def test_auth_markers_in_an_agent_session_are_not_provider_unavailability() -> None:
+    result = parse_result(
+        _proc(
+            '{"result": "gh says you are not logged in, and I could not finish", '
+            '"is_error": true, "session_id": "session-123"}',
+            returncode=1,
+        )
+    )
+
+    assert result.session_id == "session-123"
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
+
+
 def test_overload_classifies_as_transient() -> None:
     result = parse_result(_proc('{"result": "API Error: 529 overloaded_error", "is_error": true}'))
     assert classify_failure(result) is FailureKind.TRANSIENT

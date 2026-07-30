@@ -339,6 +339,39 @@ def test_gate_feedback_retries_pin_provider_and_model(tmp_path: Path) -> None:
     )
 
 
+def test_loop_stops_after_every_provider_refuses(tmp_path: Path) -> None:
+    claude = ProviderFake(
+        "claude_code",
+        unavailable_models={"fable"},
+        failure_kind=FailureKind.PROVIDER_UNAVAILABLE,
+    )
+    codex = ProviderFake(
+        "codex",
+        unavailable_models={"gpt-smart"},
+        failure_kind=FailureKind.PROVIDER_UNAVAILABLE,
+    )
+    chain = _chain(
+        ProviderRuntime(claude, "fable"),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+    config = ProjectConfig.model_validate({"loop": {"max_attempts": 3, "gates": []}})
+    events: list[str] = []
+
+    outcome = run_task_loop(
+        chain,
+        _request(tmp_path, model="fable"),
+        config,
+        tmp_path,
+        on_event=events.append,
+    )
+
+    assert not outcome.ok
+    assert outcome.attempts == 1
+    assert claude.models == ["fable"]
+    assert codex.models == ["gpt-smart"]
+    assert any("no fallback provider left" in event for event in events)
+
+
 class LimitedThenGateFailingRuntime:
     """First model is spend-limited; the replacement runs but never fixes the gate."""
 
@@ -379,6 +412,9 @@ def test_loop_keeps_the_substitute_across_retries(tmp_path: Path) -> None:
     assert not outcome.ok
     # fable is tried once, then every remaining attempt goes straight to opus
     assert runtime.models == ["fable", "opus", "opus", "opus"]
+    assert outcome.last_result is not None
+    note = model_note(request, outcome.last_result)
+    assert "FALLBACK" in note and "fable" in note and "opus" in note
 
 
 def test_loop_stops_when_the_ladder_is_exhausted(tmp_path: Path) -> None:

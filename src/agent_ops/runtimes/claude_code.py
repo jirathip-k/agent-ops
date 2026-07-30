@@ -488,7 +488,9 @@ def classify_failure(result: RunResult) -> FailureKind:
             str((result.raw or {}).get("error", "")),
         ]
     ).lower()
-    if any(marker in haystack for marker in _PROVIDER_UNAVAILABLE_MARKERS):
+    if result.session_id is None and any(
+        marker in haystack for marker in _PROVIDER_UNAVAILABLE_MARKERS
+    ):
         return FailureKind.PROVIDER_UNAVAILABLE
     if any(marker in haystack for marker in _TRANSIENT_MARKERS):
         return FailureKind.TRANSIENT

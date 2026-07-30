@@ -84,6 +84,12 @@ def test_plain_agent_output_is_an_agent_failure() -> None:
     assert classify_failure(_result(stdout="could not fix it")) is FailureKind.AGENT_FAILURE
 
 
+def test_provider_markers_in_plain_agent_output_are_not_provider_unavailability() -> None:
+    result = _result(stdout="The fixture says quota exceeded, but I could not fix the test.")
+
+    assert classify_failure(result) is FailureKind.AGENT_FAILURE
+
+
 # --- CodexRuntime.run --------------------------------------------------------
 
 

@@ -79,9 +79,15 @@ def run_task_loop(
         current = pin_to_model(current, last_result.model)
 
         if not last_result.ok:
-            if runtime.classify_failure(last_result) is FailureKind.MODEL_UNAVAILABLE:
-                # The ladder is spent — more attempts would hit the same wall.
-                on_event("no fallback model left; giving up without further attempts")
+            failure_kind = runtime.classify_failure(last_result)
+            if failure_kind in {
+                FailureKind.MODEL_UNAVAILABLE,
+                FailureKind.PROVIDER_UNAVAILABLE,
+            }:
+                # The model ladder or provider chain is spent — more attempts
+                # would hit the same wall.
+                exhausted = "model" if failure_kind is FailureKind.MODEL_UNAVAILABLE else "provider"
+                on_event(f"no fallback {exhausted} left; giving up without further attempts")
                 return LoopOutcome(False, attempt, last_result, failures)
             feedback = f"The agent runtime itself failed:\n{last_result.text}"
             on_event("runtime reported an error; retrying")

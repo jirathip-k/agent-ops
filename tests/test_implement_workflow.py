@@ -6,7 +6,7 @@ import pytest
 from agent_ops import github, grants, orca, runs, worktree
 from agent_ops.config import LoopConfig, ProjectConfig, load_project_config
 from agent_ops.loop import LoopOutcome
-from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import PLATFORM_ROOT, run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import (
@@ -72,6 +72,45 @@ def test_this_repos_config_declares_and_allows_actionlint() -> None:
 
 def test_gate_allowed_tools_empty_when_no_commands() -> None:
     assert gate_allowed_tools(ProjectConfig()) == ()
+
+
+def test_role_request_rejects_a_chain_when_no_provider_cli_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class MissingRuntime:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def available(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        implement_module,
+        "get_runtime",
+        lambda name: MissingRuntime(name),
+    )
+    config = ProjectConfig.model_validate(
+        {
+            "model_tiers": {
+                "claude_code": {"fast": "sonnet"},
+                "codex": {"fast": "gpt-fast"},
+            },
+            "agents": {
+                "implementer": {
+                    "runtimes": ["claude_code", "codex"],
+                    "model": "fast",
+                }
+            },
+        }
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        implement_module.role_request(config, "implementer", "fix it", tmp_path)
+
+    message = str(exc.value)
+    assert "claude_code" in message
+    assert "codex" in message
+    assert "installed/on PATH" in message
 
 
 def _fake_issue(number: int, cwd: Path) -> dict:
@@ -758,6 +797,93 @@ def test_finish_run_pr_body_names_actual_fallback_provider_and_model(
     assert "**Provider/model fallback:**" in captured["body"]
     assert "`claude_code` / `fable`" in captured["body"]
     assert "`codex` / `gpt-smart`" in captured["body"]
+
+
+def test_finish_run_preserves_scalar_model_fallback_after_gate_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ScalarFallbackRuntime:
+        name = "claude_code"
+
+        def __init__(self, marker: Path) -> None:
+            self.marker = marker
+            self.models: list[str | None] = []
+            self.opus_calls = 0
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.models.append(request.model)
+            if request.model == "fable":
+                return RunResult(ok=False, text="model unavailable")
+            self.opus_calls += 1
+            if self.opus_calls == 2:
+                self.marker.write_text("passed")
+            return RunResult(ok=True, text="done")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            if not result.ok:
+                return FailureKind.MODEL_UNAVAILABLE
+            return FailureKind.AGENT_FAILURE
+
+    _stub_finish_run_git_calls(monkeypatch)
+    monkeypatch.setattr(implement_module.worktree, "remove", lambda *a, **k: None)
+    captured: dict[str, str] = {}
+
+    def fake_create_pr(cwd: Path, *, base: str, title: str, body: str) -> str:
+        captured["body"] = body
+        return "https://x/pull/297"
+
+    monkeypatch.setattr(implement_module.github, "create_pr", fake_create_pr)
+    wt_path = tmp_path / "wt"
+    wt_path.mkdir()
+    marker = wt_path / "gate-passed"
+    runtime = ScalarFallbackRuntime(marker)
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": f"test -f {marker}"},
+            "loop": {"max_attempts": 3, "gates": ["test"]},
+        }
+    )
+    request = RunRequest(
+        prompt="p",
+        cwd=wt_path,
+        model="fable",
+        fallback_models=("opus",),
+    )
+
+    outcome = implement_module.run_task_loop(runtime, request, config, wt_path)
+
+    assert outcome.ok
+    assert outcome.attempts == 2
+    assert runtime.models == ["fable", "opus", "opus"]
+    assert outcome.last_result is not None
+    # The scalar path re-pins the request before attempt two; reporting must
+    # still compare against the original caller request below.
+    assert outcome.last_result.configured_model == "opus"
+
+    ok = implement_module._finish_run(
+        tmp_path,
+        config,
+        _fake_issue(297, tmp_path),
+        297,
+        "issue-297",
+        "fix/issue-297",
+        wt_path,
+        request,
+        runtime,
+        outcome,
+        card=implement_module._CardReporter(tmp_path, wt_path, lambda _: None),
+        open_pr=True,
+        keep_worktree=False,
+        log=lambda _: None,
+    )
+
+    assert ok is True
+    assert "**Provider/model fallback:**" in captured["body"]
+    assert "`claude_code` / `fable`" in captured["body"]
+    assert "`claude_code` / `opus`" in captured["body"]
 
 
 def test_finish_run_marks_a_carried_over_grant_distinctly_in_the_pr_body(

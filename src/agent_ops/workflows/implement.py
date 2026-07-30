@@ -249,6 +249,11 @@ def role_request(
             raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
     else:
         runtime = RuntimeChain(providers)
+        if not runtime.available():
+            names = ", ".join(repr(provider.runtime.name) for provider in providers)
+            raise RuntimeError(
+                f"None of the configured runtime CLIs are installed/on PATH: {names}"
+            )
     request = RunRequest(
         prompt=prompt,
         cwd=cwd,
@@ -662,11 +667,13 @@ def _finish_run(
         configured_provider = (
             last_result.configured_provider if last_result else None
         ) or runtime.name
-        configured_model = (
-            last_result.configured_model
-            if last_result is not None and last_result.configured_provider is not None
-            else request.model
-        )
+        configured_model = request.model
+        if (
+            used_provider != configured_provider
+            and last_result is not None
+            and last_result.configured_provider is not None
+        ):
+            configured_model = last_result.configured_model
         body = (
             f"Closes #{issue_number}.\n\n"
             f"Automated implementation via agent-ops "
