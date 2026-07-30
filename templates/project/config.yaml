@@ -5,10 +5,10 @@ base_branch: main
 
 commands:
   # These resolved strings are the sole executable contract for setup and
-  # gates. agent-ops shows these exact spellings to planner/implementer/reviewer
-  # agents, derives their permission allowlist from them, and runs them again
-  # as the final gate authority. Adapt the repository here; do not rely on an
-  # equivalent alias documented elsewhere.
+  # gates. agent-ops shows the applicable exact spellings to each agent and
+  # derives matching permissions; read-only roles do not receive setup
+  # permission. For implement/resume, the parent runs the gates again as final
+  # authority. Adapt this file; do not rely on an alias documented elsewhere.
   setup: null       # run once per fresh worktree, e.g. "npm install"
   test: null        # e.g. "uv run pytest -q" | "npm test" | "swift test"
   lint: null        # e.g. "uv run ruff check ." | "npx eslint ."

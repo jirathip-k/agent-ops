@@ -88,7 +88,10 @@ repo's **Actions** tab.
   Those strings are also shown to each verifying agent and used for its
   command allowlist. `AGENTS.md` / `CLAUDE.md` still define conventions and
   safety, but an alternate command spelling there does not replace the
-  configured executable contract.
+  configured executable contract. Read-only roles cannot run setup. A
+  standalone PR reviewer also cannot treat a gate run in its local checkout
+  as verification of the PR diff, because that checkout does not contain the
+  PR tree.
 - **Reviewer** (smart model, read-only) must approve the diff.
 - **Merge rules** (plain code, not AI) decide if the PR may auto-merge into
   `staging`: CI green, small enough, nothing protected touched.

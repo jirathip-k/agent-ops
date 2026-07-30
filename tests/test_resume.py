@@ -189,6 +189,9 @@ def test_run_resume_feeds_the_message_to_the_implementer_prompt(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wt_path = worktree.create(repo, ".worktrees", "issue-8", "fix/issue-8", "main")
+    agent_dir = repo / ".agent"
+    agent_dir.mkdir()
+    (agent_dir / "config.yaml").write_text("commands:\n  test: uv run pytest -q\n")
     monkeypatch.setattr(github, "get_issue", _fake_issue)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(implement_module, "role_request", _fake_role_request(captured))
@@ -1238,7 +1241,8 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
         lambda runtime, request, on_event=None: RunResult(ok=True, text="APPROVE"),
     )
 
-    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+    config = ProjectConfig.model_validate({"commands": {"test": "uv run pytest -q"}})
+    review = implement_module._self_review(config, repo, log=lambda _: None)
 
     assert review.reviewed is True
     assert "new_module.py" in captured["prompt"]

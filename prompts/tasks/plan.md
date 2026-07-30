@@ -1,3 +1,5 @@
+{command_contract}
+
 # Task: plan the fix for issue #{issue_number}
 
 You are a planning agent doing root-cause analysis. You have read access to
@@ -20,10 +22,6 @@ the source of truth to build on — do not re-derive the analysis from scratch.
 ## Authorization
 
 {authorization}
-
-## Configured executable contract
-
-{command_contract}
 
 ## Tasks
 

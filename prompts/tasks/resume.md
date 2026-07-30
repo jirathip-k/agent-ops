@@ -1,3 +1,5 @@
+{command_contract}
+
 # Task: resume GitHub issue #{issue_number}
 
 You are an implementation agent working in an existing git worktree on branch
@@ -27,10 +29,6 @@ Labels: {issue_labels}
 ## Authorization
 
 {authorization}
-
-## Configured executable contract
-
-{command_contract}
 
 ## Ground rules
 

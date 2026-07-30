@@ -9,6 +9,7 @@ from agent_ops import claims, github, grants, messages, orca, runs, surfaces, wo
 from agent_ops.config import ProjectConfig, load_project_config, resolved_commands
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.gates import (
+    CommandContractLane,
     GateResult,
     format_missing_gate,
     format_missing_requirements,
@@ -200,15 +201,18 @@ def _existing_worktree(
     return recovered
 
 
-def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
-    """Permission patterns pre-approving the project's gate commands.
+def gate_allowed_tools(config: ProjectConfig, *, include_setup: bool = True) -> tuple[str, ...]:
+    """Permission patterns pre-approving the project's applicable commands.
 
-    Headless runs have nobody to answer permission prompts, so the implementer
-    must be able to run test/lint/typecheck itself. Compound commands
-    (a && b) are split because permissions are checked per component.
+    Headless runs have nobody to answer permission prompts, so each role must
+    be able to run its applicable gates. Read-only planner/reviewer roles omit
+    setup because it may modify their checkout. Compound commands (a && b) are
+    split because permissions are checked per component.
     """
     patterns: list[str] = []
-    for _name, command in resolved_commands(config):
+    for name, command in resolved_commands(config):
+        if name == "setup" and not include_setup:
+            continue
         for part in command.split("&&"):
             part = part.strip()
             if part:
@@ -243,9 +247,10 @@ def role_request(
         permission_mode=role.permission_mode,
         stream=config.runtime.stream,
         fallback_models=tuple(role.fallbacks),
-        # every role may run the gates: implementer to iterate, planner to
-        # reproduce, reviewer to verify — write access still differs by mode
-        allowed_tools=gate_allowed_tools(config) + extra_allowed_tools,
+        allowed_tools=gate_allowed_tools(
+            config, include_setup=role_name not in ("planner", "reviewer")
+        )
+        + extra_allowed_tools,
         idle_timeout_seconds=config.loop.idle_timeout_seconds,
         run_timeout_seconds=config.loop.run_timeout_seconds,
     )
@@ -259,7 +264,7 @@ def task_role_request(
     cwd: Path,
     fields: dict[str, str],
     *,
-    parent_gates: bool,
+    contract_lane: CommandContractLane,
     runtime_override: str | None = None,
     extra_allowed_tools: tuple[str, ...] = (),
 ) -> tuple[Runtime, RunRequest]:
@@ -272,7 +277,7 @@ def task_role_request(
     """
     prompt = render_task(
         task_name,
-        command_contract=render_command_contract(config, parent_gates=parent_gates),
+        command_contract=render_command_contract(config, lane=contract_lane),
         **fields,
     )
     return role_request(
@@ -318,7 +323,7 @@ def make_plan(
             "issue_comments": _format_comments(issue),
             "authorization": _render_authorization(grant),
         },
-        parent_gates=False,
+        contract_lane=CommandContractLane.WORKTREE_READ_ONLY,
         runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)
@@ -561,7 +566,7 @@ def _run_implement(
             "skills": load_skills(config.skills, project_root),
             "authorization": _render_authorization(grant),
         },
-        parent_gates=True,
+        contract_lane=CommandContractLane.IMPLEMENTATION,
         runtime_override=runtime_name,
     )
 
@@ -867,7 +872,7 @@ def _run_resume(
             "authorization": _render_authorization(grant),
             "ci_status": _ci_section(ci),
         },
-        parent_gates=True,
+        contract_lane=CommandContractLane.IMPLEMENTATION,
         runtime_override=runtime_name,
     )
 
@@ -1314,7 +1319,7 @@ def _self_review(
             "diff": diff,
             "context": review_context,
         },
-        parent_gates=False,
+        contract_lane=CommandContractLane.WORKTREE_READ_ONLY,
         runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)

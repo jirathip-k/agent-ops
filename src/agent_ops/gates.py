@@ -26,6 +26,14 @@ class GateStatus(StrEnum):
     MISSING = "missing"  # the shell couldn't exec the gate's command at all
 
 
+class CommandContractLane(StrEnum):
+    """How a request may use the resolved executable contract."""
+
+    IMPLEMENTATION = "implementation"
+    WORKTREE_READ_ONLY = "worktree-read-only"
+    STANDALONE_REVIEW = "standalone-review"
+
+
 @dataclass(frozen=True)
 class GateResult:
     name: str
@@ -125,25 +133,28 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
     return results
 
 
-def render_command_contract(config: ProjectConfig, *, parent_gates: bool) -> str:
+def render_command_contract(config: ProjectConfig, *, lane: CommandContractLane) -> str:
     """Render the resolved setup/gate commands as instructions for agent roles.
 
     The markers make the contract easy to distinguish from repository
     documentation or untrusted task data. Commands are interpolated verbatim:
     this is the same resolved `ProjectConfig` that setup, `run_gates`,
-    requirement checks, and Claude permission patterns consume. Implementation
-    lanes get the parent-gate relationship; standalone read-only lanes get
-    verification context without a promise that any parent gate exists.
+    requirement checks, and Claude permission patterns consume. Each lane gets
+    only the authority that matches the checkout it runs in.
     """
     commands = resolved_commands(config)
-    command_lines = (
-        [f"{name}: {command}" for name, command in commands]
-        if commands
-        else ["(no setup or gate commands are configured)"]
-    )
+    if not commands:
+        return "\n".join(
+            [
+                "<!-- BEGIN AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+                "(nothing is configured; do not invent setup or gate commands)",
+                "<!-- END AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+            ]
+        )
+
     lines = [
         "<!-- BEGIN AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
-        *command_lines,
+        *(f"{name}: {command}" for name, command in commands),
         "<!-- END AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
         "",
         "These exact strings, resolved from `.agent/config.yaml`, are the sole executable "
@@ -152,7 +163,7 @@ def render_command_contract(config: ProjectConfig, *, parent_gates: bool) -> str
         "command spellings.",
         "",
     ]
-    if parent_gates:
+    if lane is CommandContractLane.IMPLEMENTATION:
         lines += [
             "Run the configured gates yourself before finishing, exactly as written. For a "
             "targeted test, extend the configured test command with supported arguments; do not "
@@ -172,6 +183,15 @@ def render_command_contract(config: ProjectConfig, *, parent_gates: bool) -> str
             "written. For a targeted test, extend the configured test command with supported "
             "arguments; do not replace its prefix with an underlying runner or a remembered alias.",
             "",
+        ]
+        if lane is CommandContractLane.STANDALONE_REVIEW:
+            lines += [
+                "This standalone PR-review checkout does not contain the PR tree under review. "
+                "Do not treat gates run in this checkout as verification of the PR diff, and do "
+                "not report them as PR gate results.",
+                "",
+            ]
+        lines += [
             "If an exact configured gate command is denied or unavailable, report that command as "
             "UNVERIFIED and name the environment/permission gap. Do not substitute another "
             "command, hand-evaluate tests, or claim the gate passed.",

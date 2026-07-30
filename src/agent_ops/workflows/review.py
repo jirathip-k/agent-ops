@@ -15,7 +15,7 @@ from agent_ops.fallback import (
     model_note,
     run_with_fallback,
 )
-from agent_ops.gates import render_command_contract
+from agent_ops.gates import CommandContractLane, render_command_contract
 from agent_ops.prompts import render_task, verdict_of
 from agent_ops.runtimes.base import FailureKind
 from agent_ops.utils import CommandError, flush_print
@@ -123,11 +123,17 @@ def run_review(
         "review",
         diff=diff,
         context=f"PR #{pr['number']}: {pr['title']}\n\n{pr.get('body') or ''}",
-        command_contract=render_command_contract(config, parent_gates=False),
+        command_contract=render_command_contract(
+            config, lane=CommandContractLane.STANDALONE_REVIEW
+        ),
     )
 
     runtime, request = role_request(
-        config, "reviewer", prompt, project_root, runtime_override=runtime_name
+        config,
+        "reviewer",
+        prompt,
+        project_root,
+        runtime_override=runtime_name,
     )
     if stream is not None:
         request = replace(request, stream=stream)

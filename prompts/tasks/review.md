@@ -1,3 +1,5 @@
+{command_contract}
+
 # Task: code review
 
 You are a review agent. Review the diff below strictly but fairly. You have
@@ -6,10 +8,6 @@ read access to the repository for context; do not modify anything.
 ## Context
 
 {context}
-
-## Configured executable contract
-
-{command_contract}
 
 ## What to check
 
