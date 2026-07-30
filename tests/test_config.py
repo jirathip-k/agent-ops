@@ -261,6 +261,43 @@ def test_missing_tier_for_the_effective_runtime_raises(tmp_path: Path) -> None:
     assert "codex" in message and "smart" in message
 
 
+def test_chain_prunes_a_provider_with_a_missing_tier_when_another_resolves(
+    tmp_path: Path,
+) -> None:
+    _write_config(
+        tmp_path,
+        "agents:\n  planner:\n    runtimes: [claude_code, codex]\n",
+    )
+    config = load_project_config(tmp_path)
+
+    role = config.resolve_role("planner")
+    report = {row.name: row for row in role_reports(config)}["planner"]
+
+    assert [provider.runtime for provider in role.providers] == ["claude_code"]
+    assert role.runtime == "claude_code"
+    assert len(role.diagnostics) == 1
+    assert "codex" in role.diagnostics[0]
+    assert "model_tiers.codex" in role.diagnostics[0]
+    assert report.error is None
+    assert report.runtime == "claude_code"
+    assert [(provider.runtime, provider.error is None) for provider in report.providers] == [
+        ("claude_code", True),
+        ("codex", False),
+    ]
+
+
+def test_chain_raises_when_no_provider_can_resolve_the_requested_tier(
+    tmp_path: Path,
+) -> None:
+    _write_config(
+        tmp_path,
+        "agents:\n  planner:\n    runtimes: [codex, another]\n",
+    )
+
+    with pytest.raises(RuntimeChainConfigError, match="no provider with a resolvable model"):
+        load_project_config(tmp_path).resolve_role("planner")
+
+
 def test_concrete_models_are_not_treated_as_tiers(tmp_path: Path) -> None:
     _write_config(tmp_path, "agents:\n  reviewer:\n    runtime: codex\n    model: gpt-5-codex\n")
     config = load_project_config(tmp_path)

@@ -243,16 +243,18 @@ def role_request(
         for provider in role.providers
     ]
     runtime: Runtime
-    if len(providers) == 1:
+    if len(providers) == 1 and not role.diagnostics:
         runtime = providers[0].runtime
         if not runtime.available():
             raise RuntimeError(f"Runtime {runtime.name!r} CLI is not installed/on PATH")
     else:
-        runtime = RuntimeChain(providers)
+        runtime = RuntimeChain(providers, diagnostics=tuple(role.diagnostics))
         if not runtime.available():
             names = ", ".join(repr(provider.runtime.name) for provider in providers)
+            resolution_detail = f"; {'; '.join(role.diagnostics)}" if role.diagnostics else ""
             raise RuntimeError(
-                f"None of the configured runtime CLIs are installed/on PATH: {names}"
+                f"None of the resolved runtime CLIs are installed/on PATH: "
+                f"{names}{resolution_detail}"
             )
     request = RunRequest(
         prompt=prompt,

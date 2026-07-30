@@ -492,6 +492,11 @@ Rules worth knowing:
   provider/allowance refusal may advance the provider chain. A transient rate
   limit or overload, a failing gate, rejected output, or an ordinary agent
   failure never changes provider.
+- **Claude Code advances only on observed model unavailability.** Its captured
+  logged-out and invalid-key envelopes include a session ID, so their prose is
+  not a safe provider-wide signal: agent output can contain the same text.
+  Claude therefore reaches the next provider after an observed condition such
+  as its spend-limit / switch-models response exhausts the configured ladder.
 - **Substitutions are loud.** The log says `MODEL FALLBACK: …` or
   `PROVIDER FALLBACK: …`, and every
   artifact the run posts — PR review comment, plan/spec comment, PR body —
@@ -511,13 +516,16 @@ Rules worth knowing:
   failure steps *up* into models it never chose and never budgeted for. Set
   both keys together, or clear `model_fallbacks` for that tier — `agent doctor`
   warns when a tier's model is not on its own ladder.
-- **Every runtime needs its own table.** A tier names a job — `smart` for
-  planning and review, `fast` for implementation — and each runtime maps those
-  onto its own models. A tier the *effective* runtime does not define is a
-  named error at resolution, never a foreign model name handed to a CLI; that
-  is what `--runtime codex` used to do (#39).
+- **Every usable runtime needs its own table.** A tier names a job — `smart`
+  for planning and review, `fast` for implementation — and each runtime maps
+  those onto its own models. In a chain, a provider missing that tier is
+  loudly pruned while independently resolved providers remain usable. A
+  scalar runtime (including `--runtime`) still raises immediately, and a chain
+  raises when no provider resolves. A foreign model name is never handed to a
+  CLI; that is what `--runtime codex` used to do (#39).
 - `agent doctor` prints every provider/model ladder in each role's chain,
-  annotates missing CLIs, and fails when no configured provider can start. Then,
+  annotates invalid tiers and missing CLIs, and warns while another provider
+  remains usable. It fails only when no configured provider can start. Then,
   for each runtime the project is *not* using, either what that runtime would
   resolve to or which tiers it is missing:
 

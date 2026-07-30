@@ -470,10 +470,13 @@ def test_doctor_reports_a_missing_chain_cli_but_allows_an_installed_fallback(
     assert "planner: claude_code / fable" in result.output
     assert "[CLI missing]" in result.output
     assert "codex / gpt-smart" in result.output
+    assert "! planner: provider claude_code CLI is missing" in result.output
     assert "✗ planner: no configured provider" not in result.output
 
 
-def test_doctor_fails_a_chain_with_a_missing_provider_tier(tmp_path: Path, monkeypatch) -> None:
+def test_doctor_warns_but_keeps_a_chain_usable_with_a_missing_provider_tier(
+    tmp_path: Path, monkeypatch
+) -> None:
     runner.invoke(app, ["init", "--project", str(tmp_path)])
     _write_project_config(
         tmp_path,
@@ -483,10 +486,13 @@ def test_doctor_fails_a_chain_with_a_missing_provider_tier(tmp_path: Path, monke
 
     result = runner.invoke(app, ["doctor", "--project", str(tmp_path)])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert "planner: claude_code / fable" in result.output
     assert "codex / INVALID" in result.output
     assert "model_tiers.codex" in result.output
+    assert "! planner: provider codex (" in result.output
+    assert "was pruned; another configured provider remains usable" in result.output
+    assert "✗ planner:" not in result.output
 
 
 def test_doctor_flags_a_ladder_that_could_step_up_into_a_costlier_model(

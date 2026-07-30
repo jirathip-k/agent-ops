@@ -33,13 +33,20 @@ class RuntimeChain:
     calling an adapter directly never gains hidden fallback behaviour.
     """
 
-    def __init__(self, providers: list[ProviderRuntime]) -> None:
+    def __init__(
+        self,
+        providers: list[ProviderRuntime],
+        *,
+        diagnostics: tuple[str, ...] = (),
+    ) -> None:
         if not providers:
             raise ValueError("a runtime chain needs at least one provider")
         self.providers = tuple(providers)
         self._active_index = 0
         self._configured_provider = providers[0].runtime.name
         self._configured_model = providers[0].model
+        self._diagnostics = diagnostics
+        self._diagnostics_reported = False
 
     @property
     def name(self) -> str:
@@ -63,6 +70,14 @@ class RuntimeChain:
 
     def pin(self, index: int) -> None:
         self._active_index = index
+
+    def report_diagnostics(self, on_event: Callable[[str], None]) -> None:
+        """Emit config-time provider pruning once, before the first real run."""
+        if self._diagnostics_reported:
+            return
+        self._diagnostics_reported = True
+        for diagnostic in self._diagnostics:
+            on_event(f"PROVIDER SKIPPED: {diagnostic}")
 
     def pin_model(self, provider_name: str | None, model: str | None) -> None:
         """Keep a model substitution on the selected provider for later retries."""
@@ -151,28 +166,36 @@ def _run_chain(
     request: RunRequest,
     on_event: Callable[[str], None],
 ) -> RunResult:
+    chain.report_diagnostics(on_event)
     configured_provider = chain.configured_provider
     configured_model = chain.configured_model
+    last_real: RunResult | None = None
     for index in range(chain.active_index, len(chain.providers)):
         provider = chain.providers[index]
         provider_name = provider.runtime.name
         chain.pin(index)
         if not provider.runtime.available():
-            result = RunResult(
-                ok=False,
-                text=f"Runtime {provider_name!r} CLI is not installed/on PATH",
-                raw={"failure_kind": FailureKind.PROVIDER_UNAVAILABLE},
-                model=provider.model,
-                provider=provider_name,
-                configured_provider=configured_provider,
-                configured_model=configured_model,
-            )
             if index + 1 >= len(chain.providers):
+                if last_real is not None:
+                    on_event(
+                        f"PROVIDER FALLBACK exhausted: {provider_name!r} has no installed CLI; "
+                        f"preserving the refusal from {last_real.provider!r} because no "
+                        "remaining provider can run"
+                    )
+                    return last_real
                 on_event(
                     f"PROVIDER FALLBACK exhausted: {provider_name!r} is unavailable and "
                     "no provider is left"
                 )
-                return result
+                return RunResult(
+                    ok=False,
+                    text=f"Runtime {provider_name!r} CLI is not installed/on PATH",
+                    raw={"failure_kind": FailureKind.PROVIDER_UNAVAILABLE},
+                    model=provider.model,
+                    provider=provider_name,
+                    configured_provider=configured_provider,
+                    configured_model=configured_model,
+                )
             next_name = chain.providers[index + 1].runtime.name
             on_event(f"PROVIDER FALLBACK: {provider_name!r} is unavailable — trying {next_name!r}")
             continue
@@ -191,6 +214,7 @@ def _run_chain(
         }:
             chain.pin_model(result.provider, result.model)
             return result
+        last_real = result
         if index + 1 >= len(chain.providers):
             on_event(
                 f"PROVIDER FALLBACK exhausted: {provider_name!r} is unavailable and "

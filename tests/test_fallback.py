@@ -258,6 +258,25 @@ def test_missing_primary_cli_is_an_explicit_provider_fallback(tmp_path: Path) ->
     assert any("is unavailable" in event and "codex" in event for event in events)
 
 
+def test_missing_tail_cli_preserves_the_primary_ladder_refusal(tmp_path: Path) -> None:
+    claude = ProviderFake("claude_code", unavailable_models={"fable", "opus"})
+    codex = ProviderFake("codex", installed=False)
+    events: list[str] = []
+    chain = _chain(
+        ProviderRuntime(claude, "fable", ("opus",)),
+        ProviderRuntime(codex, "gpt-smart"),
+    )
+
+    result = run_with_fallback(chain, _request(tmp_path, model="fable"), events.append)
+
+    assert not result.ok
+    assert result.text == "claude_code/opus refused"
+    assert (result.provider, result.model) == ("claude_code", "opus")
+    assert claude.models == ["fable", "opus"]
+    assert codex.models == []
+    assert any("preserving the refusal from 'claude_code'" in event for event in events)
+
+
 def test_agent_failure_never_switches_provider(tmp_path: Path) -> None:
     claude = ProviderFake(
         "claude_code",

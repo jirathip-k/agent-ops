@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_ops.fallback import ProviderRuntime, RuntimeChain, run_with_fallback
 from agent_ops.runtimes import claude_code as claude_mod
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, terminate_and_reap
 from agent_ops.runtimes.claude_code import (
@@ -241,6 +242,61 @@ def test_spend_limit_prose_classifies_as_model_unavailable() -> None:
     result = parse_result(_proc(SPEND_LIMIT_OUTPUT, returncode=1))
     assert not result.ok
     assert classify_failure(result) is FailureKind.MODEL_UNAVAILABLE
+
+
+def test_spend_limit_ladder_exhaustion_advances_to_the_next_provider(
+    tmp_path: Path,
+) -> None:
+    class SpendLimitedClaude:
+        name = "claude_code"
+
+        def __init__(self) -> None:
+            self.models: list[str | None] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.models.append(request.model)
+            return RunResult(ok=False, text=SPEND_LIMIT_OUTPUT)
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return classify_failure(result)
+
+    class HealthyCodex:
+        name = "codex"
+
+        def __init__(self) -> None:
+            self.models: list[str | None] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.models.append(request.model)
+            return RunResult(ok=True, text="done")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    claude = SpendLimitedClaude()
+    codex = HealthyCodex()
+    chain = RuntimeChain(
+        [
+            ProviderRuntime(claude, "fable", ("opus",)),
+            ProviderRuntime(codex, "gpt-smart"),
+        ]
+    )
+
+    result = run_with_fallback(
+        chain,
+        RunRequest(prompt="review", cwd=tmp_path, model="fable"),
+    )
+
+    assert result.ok
+    assert (result.provider, result.model) == ("codex", "gpt-smart")
+    assert claude.models == ["fable", "opus"]
+    assert codex.models == ["gpt-smart"]
 
 
 def test_unsupported_model_classifies_as_model_unavailable() -> None:

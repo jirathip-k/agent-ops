@@ -150,6 +150,9 @@ class ResolvedRole(BaseModel):
     max_turns: int | None
     fallbacks: list[str] = Field(default_factory=list)
     providers: list[ResolvedProvider] = Field(default_factory=list)
+    # Configured providers pruned because their requested tier could not be
+    # resolved. Workflows surface these before the first runtime invocation.
+    diagnostics: list[str] = Field(default_factory=list)
 
 
 class MergeConfig(BaseModel):
@@ -374,9 +377,22 @@ class ProjectConfig(BaseModel):
         runtimes = self.effective_runtimes(role_name, runtime_override)
         requested = role.model or self.runtime.model
         _validate_runtime_chain_shape(role_name, runtimes, requested, self.tier_names())
-        providers = [
-            self._resolve_provider(role_name, runtime, requested=requested) for runtime in runtimes
-        ]
+        providers: list[ResolvedProvider] = []
+        errors: list[ModelTierError] = []
+        diagnostics: list[str] = []
+        for runtime in runtimes:
+            try:
+                providers.append(self._resolve_provider(role_name, runtime, requested=requested))
+            except ModelTierError as exc:
+                errors.append(exc)
+                diagnostics.append(f"provider {runtime!r} cannot resolve and was pruned: {exc}")
+        if not providers:
+            if len(errors) == 1:
+                raise errors[0]
+            detail = "; ".join(str(error) for error in errors)
+            raise RuntimeChainConfigError(
+                f"role {role_name!r} has no provider with a resolvable model: {detail}"
+            )
         primary = providers[0]
         return ResolvedRole(
             runtime=primary.runtime,
@@ -385,6 +401,7 @@ class ProjectConfig(BaseModel):
             max_turns=role.max_turns if role.max_turns is not None else self.runtime.max_turns,
             fallbacks=primary.fallbacks,
             providers=providers,
+            diagnostics=diagnostics,
         )
 
     def _resolve_provider(
@@ -526,16 +543,19 @@ def role_reports(config: ProjectConfig, *, runtime: str | None = None) -> list[R
                     fallbacks=resolved.fallbacks,
                 )
             )
-        first = provider_rows[0]
-        error = chain_error or next((row.error for row in provider_rows if row.error), None)
+        resolved_rows = [row for row in provider_rows if row.error is None]
+        primary = resolved_rows[0] if resolved_rows else provider_rows[0]
+        error = chain_error
+        if error is None and not resolved_rows:
+            error = "; ".join(row.error or "" for row in provider_rows)
         reports.append(
             RoleReport(
                 name=name,
-                runtime=first.runtime,
-                model=first.model,
-                fallbacks=first.fallbacks,
+                runtime=primary.runtime,
+                model=primary.model,
+                fallbacks=primary.fallbacks,
                 error=error,
-                missing_tier=first.missing_tier,
+                missing_tier=primary.missing_tier,
                 providers=provider_rows,
             )
         )

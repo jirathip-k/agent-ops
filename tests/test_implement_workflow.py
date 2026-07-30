@@ -5,6 +5,7 @@ import pytest
 
 from agent_ops import github, grants, orca, runs, worktree
 from agent_ops.config import LoopConfig, ProjectConfig, load_project_config
+from agent_ops.fallback import RuntimeChain, run_with_fallback
 from agent_ops.loop import LoopOutcome
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import PLATFORM_ROOT, run
@@ -111,6 +112,58 @@ def test_role_request_rejects_a_chain_when_no_provider_cli_is_available(
     assert "claude_code" in message
     assert "codex" in message
     assert "installed/on PATH" in message
+
+
+def test_role_request_prunes_an_invalid_provider_and_logs_the_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class AvailableRuntime:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.models: list[str | None] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.models.append(request.model)
+            return RunResult(ok=True, text="done")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    claude = AvailableRuntime("claude_code")
+    monkeypatch.setattr(
+        implement_module,
+        "get_runtime",
+        lambda name: claude if name == "claude_code" else AvailableRuntime(name),
+    )
+    config = ProjectConfig.model_validate(
+        {
+            "model_tiers": {"claude_code": {"fast": "sonnet"}},
+            "agents": {
+                "implementer": {
+                    "runtimes": ["claude_code", "codex"],
+                    "model": "fast",
+                }
+            },
+        }
+    )
+    events: list[str] = []
+
+    runtime, request = implement_module.role_request(
+        config,
+        "implementer",
+        "fix it",
+        tmp_path,
+    )
+    result = run_with_fallback(runtime, request, events.append)
+
+    assert isinstance(runtime, RuntimeChain)
+    assert result.ok
+    assert (result.provider, result.model) == ("claude_code", "sonnet")
+    assert claude.models == ["sonnet"]
+    assert any("PROVIDER SKIPPED" in event and "codex" in event for event in events)
 
 
 def _fake_issue(number: int, cwd: Path) -> dict:

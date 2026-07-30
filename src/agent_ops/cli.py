@@ -1570,9 +1570,12 @@ def _report_roles(config: ProjectConfig) -> bool:
     for report in reports:
         rendered: list[str] = []
         usable = 0
+        pruned: list[str] = []
+        missing_clis: list[str] = []
         for provider in report.providers:
             if provider.error:
                 rendered.append(f"{provider.runtime} / INVALID ({provider.error})")
+                pruned.append(f"{provider.runtime} ({provider.error})")
                 continue
             ladder = " → ".join(provider.fallbacks) if provider.fallbacks else "none configured"
             suffix = ""
@@ -1580,6 +1583,7 @@ def _report_roles(config: ProjectConfig) -> bool:
                 suffix = " [unknown provider]"
             elif not get_runtime(provider.runtime).available():
                 suffix = " [CLI missing]"
+                missing_clis.append(provider.runtime)
             else:
                 usable += 1
             rendered.append(
@@ -1594,6 +1598,17 @@ def _report_roles(config: ProjectConfig) -> bool:
         if usable == 0:
             _err(f"✗ {report.name}: no configured provider has an available CLI")
             ok = False
+            continue
+        for detail in pruned:
+            typer.echo(
+                f"! {report.name}: provider {detail} was pruned; "
+                "another configured provider remains usable"
+            )
+        for provider_name in missing_clis:
+            typer.echo(
+                f"! {report.name}: provider {provider_name} CLI is missing; "
+                "another configured provider remains usable"
+            )
 
     in_use = {provider.runtime for report in reports for provider in report.providers}
     others = [name for name in runtime_names() if name not in in_use]
