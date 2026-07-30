@@ -896,19 +896,14 @@ def test_ad_hoc_message_does_not_overwrite_the_halt_findings(
     assert passed.read_text() == "also bump the version"
 
 
-def test_self_review_reports_nothing_to_review_for_an_empty_diff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_self_review_reports_nothing_to_review_for_an_empty_diff(repo: Path) -> None:
     """The producer of `reviewed=False`, not just its consumer.
 
-    It early-returns before touching a runtime, so this is cheap — and without
-    it the flag's only coverage monkeypatches the function that sets it.
+    Runs against a real clean Git repository and returns before touching a
+    runtime. Without it the flag's only coverage monkeypatches the function
+    that sets it.
     """
-    monkeypatch.setattr(
-        implement_module, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="")
-    )
-
-    review = implement_module._self_review(ProjectConfig(), tmp_path, log=lambda _: None)
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
 
     assert review.reviewed is False
     assert review.ok is False
@@ -1507,6 +1502,92 @@ def test_implement_and_resume_share_review_context_construction(
         assert "no explicit grant was supplied or carried over" in prompt
         assert "no danger-zone exemption" in prompt
         assert "REVIEW GRANT SCOPE SENTINEL" not in prompt
+
+
+# --- reviewed diff includes every local change (issue #294) ----------------
+#
+# `_self_review` used to build its diff via `git add -A -N` then plain `git
+# diff`, which compares the worktree against the INDEX, not HEAD — so a
+# tracked-file edit already staged before self-review ran was invisible to
+# the reviewed diff. These tests use real git (no `run` stub), so they
+# exercise the product's exact `git diff HEAD` recipe.
+
+
+def test_self_review_diff_includes_staged_tracked_file_edits(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tracked-file edit that is fully staged, with no unstaged delta left,
+    must still reach the reviewed diff. Fails on the tree without the fix:
+    the old `git add -A -N` + bare `git diff` recipe reports nothing for a
+    file that already matches the index, so `_self_review` would see an empty
+    diff and never call the reviewer at all here.
+    """
+    (repo / "README.md").write_text("hello\nfix applied here\n")
+    run(["git", "add", "README.md"], cwd=repo)  # stage-only, no unstaged delta
+
+    captured: dict[str, str] = {}
+
+    def fake_role_request(config, role_name, prompt, cwd, **kwargs):
+        captured["prompt"] = prompt
+        return object(), RunRequest(prompt=prompt, cwd=cwd)
+
+    monkeypatch.setattr(implement_module, "role_request", fake_role_request)
+    monkeypatch.setattr(
+        implement_module,
+        "run_with_fallback",
+        lambda runtime, request, on_event=None: RunResult(ok=True, text="VERDICT: APPROVE"),
+    )
+
+    review = implement_module._self_review(ProjectConfig(), repo, log=lambda _: None)
+
+    assert review.reviewed is True
+    assert "fix applied here" in captured["prompt"]
+
+
+def test_handle_empty_diff_does_not_classify_a_staged_tracked_edit_as_empty(
+    repo: Path,
+) -> None:
+    """Companion to the self-review case: `_handle_empty_diff` shares
+    `_self_review`'s exact diff recipe (`_reviewed_diff`), so the same
+    stage-only edit must not be misread as an empty diff and recorded
+    `failed` before self-review ever gets a chance to run (#294). Fails on
+    the tree without the fix, for the same reason as the test above.
+    """
+    (repo / "README.md").write_text("hello\nfix applied here\n")
+    run(["git", "add", "README.md"], cwd=repo)  # stage-only, no unstaged delta
+
+    card = implement_module._CardReporter(repo, repo / "wt", lambda _: None)
+
+    handled = implement_module._handle_empty_diff(
+        repo, 90, repo, "implementer's final message", card=card, log=lambda _: None
+    )
+
+    assert handled is False
+
+
+def test_reviewed_diff_reports_a_clean_repo_as_empty(repo: Path) -> None:
+    """The shared helper executes real Git and preserves a successful empty result."""
+    diff = implement_module._reviewed_diff(repo)
+
+    assert diff.returncode == 0
+    assert diff.stdout == ""
+
+
+def test_self_review_raises_with_real_git_diff_diagnostic(tmp_path: Path) -> None:
+    """A failed reviewed diff is an infrastructure failure, not an empty tree.
+
+    An unborn repository has no HEAD, so the product's real `git diff HEAD`
+    command returns nonzero. `_self_review` must surface Git's own diagnostic
+    instead of skipping review as though the diff were empty.
+    """
+    run(["git", "init", "-b", "main"], cwd=tmp_path)
+    logged: list[str] = []
+
+    with pytest.raises(CommandError, match="HEAD") as exc_info:
+        implement_module._self_review(ProjectConfig(), tmp_path, log=logged.append)
+
+    assert "fatal:" in str(exc_info.value)
+    assert any("git diff HEAD" in line and "HEAD" in line for line in logged)
 
 
 # --- self-review verdict parsing (issue #157) ------------------------------

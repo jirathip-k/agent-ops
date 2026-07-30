@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1243,6 +1244,30 @@ class SelfReview:
     """
 
 
+def _reviewed_diff(wt_path: Path) -> subprocess.CompletedProcess[str]:
+    """The diff `_self_review` and `_handle_empty_diff` both judge the tree by.
+
+    Intent-to-add first: `git diff` ignores untracked files, so an
+    implementer whose change is only *new* files — the common shape for "add
+    X" issues — would otherwise produce an empty diff and go unreviewed, or
+    in the mixed case get approved on the one modified file the reviewer
+    could see. Harmless for the later `git add -A` + commit.
+
+    Diffed against HEAD, not bare `git diff` (which compares worktree to the
+    INDEX): a bare diff is blind to tracked-file edits already staged before
+    this call, so self-review can otherwise omit changes that are ready to
+    commit (#294).
+
+    Returns the `CompletedProcess`, not just `.stdout`: `_handle_empty_diff`
+    tells "diff determined to be empty" apart from "diff could not be
+    determined at all" (`wt_path` doesn't exist) via `.returncode`, and
+    `check=False` here means a missing worktree reports that as a non-zero
+    exit rather than raising.
+    """
+    run(["git", "add", "-A", "-N"], cwd=wt_path, check=False)
+    return run(["git", "diff", "HEAD"], cwd=wt_path, check=False)
+
+
 def _self_review(
     config: ProjectConfig,
     wt_path: Path,
@@ -1251,13 +1276,13 @@ def _self_review(
     runtime_override: str | None = None,
     context: ReviewContext | None = None,
 ) -> SelfReview:
-    # Intent-to-add first: `git diff` ignores untracked files, so an
-    # implementer whose change is only *new* files — the common shape for "add
-    # X" issues — would otherwise produce an empty diff and go unreviewed, or
-    # in the mixed case get approved on the one modified file the reviewer
-    # could see. Harmless for the later `git add -A` + commit.
-    run(["git", "add", "-A", "-N"], cwd=wt_path, check=False)
-    diff = run(["git", "diff"], cwd=wt_path).stdout
+    diff_proc = _reviewed_diff(wt_path)
+    if diff_proc.returncode != 0:
+        diagnostic = diff_proc.stderr.strip() or diff_proc.stdout.strip() or "(no output)"
+        message = f"`git diff HEAD` failed with exit code {diff_proc.returncode}:\n{diagnostic}"
+        log(f"self-review failed before invoking the reviewer: {message}")
+        raise CommandError(message)
+    diff = diff_proc.stdout
     if not diff.strip():
         log("self-review skipped: empty diff")
         return SelfReview(False, "(empty diff — nothing to review)", reviewed=False)
@@ -1464,9 +1489,11 @@ def _handle_empty_diff(
     caller that gets False should proceed to whatever check normally follows,
     exactly as it did before this existed.
 
-    Detection reuses `_self_review`'s exact recipe (intent-to-add, then `git
-    diff`) so a create-only run counts as "not empty" here too (#75). Called
-    from `_review_and_maybe_halt` before the `config.loop.self_review` early
+    Detection reuses `_self_review`'s exact recipe (`_reviewed_diff`:
+    intent-to-add, then `git diff HEAD`) so a create-only run counts as "not
+    empty" here too (#75), and a tracked-file edit already staged before this
+    call is seen rather than silently ignored (#294). Called from
+    `_review_and_maybe_halt` before the `config.loop.self_review` early
     return, so an empty diff is caught even with self-review disabled —
     otherwise `_finish_run` would `git commit` on a clean tree and raise
     (issue #199).
@@ -1493,8 +1520,7 @@ def _handle_empty_diff(
     that could not be observed at all (so the empty diff might be exactly
     wrong, and nothing here can tell).
     """
-    run(["git", "add", "-A", "-N"], cwd=wt_path, check=False)
-    diff = run(["git", "diff"], cwd=wt_path, check=False)
+    diff = _reviewed_diff(wt_path)
     if diff.returncode != 0 or diff.stdout.strip():
         return False
 
