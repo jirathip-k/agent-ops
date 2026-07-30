@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult, wall_clock_timeout_result
+from agent_ops.runtimes.credentials import environment_for
 from agent_ops.utils import TIMEOUT_RETURNCODE, run
 
 # Codex reports refusals as one JSON object per line on stderr, e.g.
@@ -78,7 +79,15 @@ class CodexRuntime:
         # `codex exec` has no streaming path (yet) to measure silence against,
         # so this call gets a wall-clock bound instead — the same one the
         # non-streaming path in claude_code.py uses.
-        proc = run(cmd, cwd=request.cwd, check=False, timeout=request.run_timeout_seconds)
+        child_env = environment_for(self.name)
+        env_kwargs: dict[str, Any] = {"env": child_env} if child_env is not None else {}
+        proc = run(
+            cmd,
+            cwd=request.cwd,
+            check=False,
+            timeout=request.run_timeout_seconds,
+            **env_kwargs,
+        )
         if proc.returncode == TIMEOUT_RETURNCODE:
             return wall_clock_timeout_result(request.run_timeout_seconds)
         text = proc.stdout.strip() or proc.stderr.strip()

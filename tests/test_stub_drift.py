@@ -591,6 +591,7 @@ def test_lanes_are_discovered_from_the_shipped_stubs() -> None:
     assert set(known_lanes()) == {
         "triage",
         "classify",
+        "implement",
         "groom",
         "spec",
         "plan",
@@ -671,3 +672,11 @@ def test_distill_stub_is_dispatch_only_with_no_cron() -> None:
     triggers = parsed[True]
     assert "schedule" not in triggers
     assert "workflow_dispatch" in triggers
+
+
+def test_implement_stub_is_dispatch_only_with_no_cron() -> None:
+    """#296: hybrid implementation starts with an explicit human-selected issue."""
+    parsed = yaml.safe_load(stubs.stub_for("implement").read_text())
+    triggers = parsed[True]
+    assert "schedule" not in triggers
+    assert triggers["workflow_dispatch"]["inputs"]["issue"]["required"] is True
