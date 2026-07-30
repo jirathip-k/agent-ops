@@ -1431,14 +1431,22 @@ def test_implement_and_resume_share_review_context_construction(
         built.append(context)
         return context
 
-    received: list[implement_module.ReviewContext] = []
+    received: list[implement_module.ReviewContext | None] = []
 
-    def capture_review(*args: Any, **kwargs: Any) -> bool:
-        received.append(kwargs["review_context"])
-        return False
+    def capture_self_review(
+        config: ProjectConfig,
+        wt_path: Path,
+        *,
+        log: object,
+        runtime_override: str | None = None,
+        context: implement_module.ReviewContext | None = None,
+    ) -> SelfReview:
+        received.append(context)
+        return SelfReview(False, "VERDICT: REQUEST CHANGES\n\nstop before commit")
 
     monkeypatch.setattr(implement_module, "_build_review_context", capture_builder)
-    monkeypatch.setattr(implement_module, "_review_and_maybe_halt", capture_review)
+    monkeypatch.setattr(implement_module, "_self_review", capture_self_review)
+    monkeypatch.setattr(implement_module, "_record_halt", lambda *args, **kwargs: None)
 
     if entrypoint == "implement":
         plan_file = repo / "plan.md"
@@ -1448,7 +1456,7 @@ def test_implement_and_resume_share_review_context_construction(
         worktree.create(repo, ".worktrees", "issue-299", "fix/issue-299", "main")
         ok = run_resume(repo, 299, message="resume feedback", log=lambda _: None)
 
-    assert ok is False  # capture_review deliberately stops before commit
+    assert ok is False  # the reviewer deliberately requests changes before commit
     assert received == built
     assert len(built) == 1
     assert "SHARED COMMENT SENTINEL" in built[0].text
