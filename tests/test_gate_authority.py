@@ -188,6 +188,31 @@ def test_npm_documented_alias_does_not_replace_configured_request_or_allowlist(
     assert "Bash(npx vitest)" not in request.allowed_tools
 
 
+@pytest.mark.parametrize("task_name", ("implement", "resume"))
+def test_implementation_requests_keep_headless_safety_and_require_early_gates(
+    task_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = ProjectConfig.model_validate({"commands": ECOSYSTEMS["npm"]["commands"]})
+    monkeypatch.setattr(implement_module, "get_runtime", lambda _name: _AvailableRuntime())
+    role_name, fields = TASKS[task_name]
+
+    _runtime, request = task_role_request(
+        config,
+        role_name,
+        task_name,
+        tmp_path,
+        fields,
+    )
+    normalized = " ".join(request.prompt.split())
+
+    assert (
+        "If some other command is blocked, work around it or note it in your summary instead "
+        "of waiting."
+    ) in normalized
+    assert "run them yourself before finishing" in normalized
+    assert "the parent runs them again after you finish; its result is final" in normalized
+
+
 def test_standalone_reviewer_request_receives_the_same_npm_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

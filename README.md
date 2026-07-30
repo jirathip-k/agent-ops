@@ -115,9 +115,9 @@ The resolved `commands.setup/test/lint/typecheck` strings in each managed
 repository's `.agent/config.yaml` are the executable source of truth. Agents
 receive those exact strings and matching permission patterns; they may append
 supported arguments for a targeted run, but must not swap in aliases from
-`AGENTS.md` / `CLAUDE.md` or an underlying runner. Agent-side runs are early
-feedback—the parent loop executes the configured gates independently and its
-results are final.
+`AGENTS.md` / `CLAUDE.md` or an underlying runner. Implement/resume agents run
+the configured gates before finishing for early feedback; the parent loop
+executes them independently again, and its results are final.
 
 When self-review requests changes, the worktree is kept, the findings are
 saved to `.agent-runs/issue-<N>-feedback.md`, and a `## Agent self-review`

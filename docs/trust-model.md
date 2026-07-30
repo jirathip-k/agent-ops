@@ -92,7 +92,8 @@ A grant is not a boolean. `scope` is prose for a human reviewing the PR;
   is a *copy*, written to `.agent-runs/issue-N-grant.yaml` so `--grant-file`
   doesn't have to be repeated. But the implementer that runs in between
   dispatch and resume is headless, under `acceptEdits`, with the project's
-  test commands pre-approved (ground rule 7 in `implement.md`/`resume.md`) —
+  test commands pre-approved by `gate_allowed_tools`
+  (`src/agent_ops/workflows/implement.py`) —
   a prompt-injected implementer can plant a conftest that writes that file,
   trigger it through a pre-approved `pytest`, and delete the conftest before
   the diff is reviewed. The cycle that plants it is unaffected (its own

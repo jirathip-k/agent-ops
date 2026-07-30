@@ -179,8 +179,9 @@ state (worktrees branch from `origin/staging`).
 - **promotion PR** — one PR collecting everything on staging, with a
   changelog. Merging it is you saying "ship it."
 - **gates** — your project's exact `.agent/config.yaml`
-  test/lint/typecheck commands. Agents can run them for early feedback, but
-  the parent workflow runs them independently; its result is the final signal.
+  test/lint/typecheck commands. Implement/resume agents run them before
+  finishing for early feedback; the parent workflow runs them independently
+  again, and its result is the final signal.
 - **escalation** — an agent choosing to ask instead of guess. It looks like
   a `needs-human` label plus a written explanation.
 - **worktree** — a disposable copy of the repo where one task happens, so

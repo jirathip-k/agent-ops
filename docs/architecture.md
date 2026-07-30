@@ -63,8 +63,9 @@ For the local lane, resolved `commands.setup/test/lint/typecheck` values are
 one executable contract shared by setup, requirement preflight, agent prompt
 rendering, Claude permission patterns, and the parent gate runner. Repository
 instruction files remain authoritative for conventions and safety, but cannot
-substitute an alternate command spelling. Agents may execute the configured
-prefix for early feedback; the parent gate runner remains the evaluator.
+substitute an alternate command spelling. Implement/resume agents execute the
+configured gates before finishing for early feedback; the parent gate runner
+executes them independently and remains the evaluator.
 
 ## Where things live
 

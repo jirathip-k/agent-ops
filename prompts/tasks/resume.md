@@ -52,7 +52,9 @@ Labels: {issue_labels}
 7. You are running headless: nobody can answer permission prompts, so never
    ask for approval. Use only the exact setup/gate spellings in the configured
    executable contract above. If one is blocked or unavailable, follow that
-   section's UNVERIFIED reporting rule instead of working around it.
+   section's UNVERIFIED reporting rule instead of working around it. If some
+   other command is blocked, work around it or note it in your summary instead
+   of waiting.
 
 {skills}
 
@@ -72,7 +74,7 @@ platform reports — it is not a quiet pass.
 
 - The feedback above is addressed with test coverage, or you escalated
   instead.
-- The configured test/lint/typecheck commands pass, or you reported the exact
-  command as UNVERIFIED (the parent will run the gates independently after you
-  finish).
+- The configured test/lint/typecheck commands pass — run them yourself before
+  finishing — or you reported the exact command as UNVERIFIED (the parent runs
+  them again after you finish; its result is final).
 - End with a short summary: what you changed and why.
