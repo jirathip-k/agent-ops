@@ -1284,6 +1284,7 @@ def test_review_context_is_immutable_after_live_issue_data_changes() -> None:
         issue,
         plan="PLAN SENTINEL",
         grant=grant,
+        grant_carried_over=False,
         gate_results=gate_results,
     )
 
@@ -1313,6 +1314,7 @@ def test_self_review_runtime_receives_the_frozen_snapshot_and_diff(
         issue,
         plan="PLAN SENTINEL",
         grant=grant,
+        grant_carried_over=False,
         gate_results=gate_results,
     )
     issue["comments"][0]["body"] = "LATE COMMENT MUST NOT REACH REQUEST"
@@ -1360,10 +1362,14 @@ def test_self_review_runtime_receives_the_frozen_snapshot_and_diff(
 
 
 @pytest.mark.parametrize("entrypoint", ["implement", "resume"])
+@pytest.mark.parametrize("grant_source", ["fresh", "carried-over", "absent"])
 def test_implement_and_resume_share_review_context_construction(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    grant_source: str,
 ) -> None:
-    """Both parent paths must freeze context before invoking the reviewer."""
+    """Both parents must send grant provenance through the real review seam."""
     issue = {
         "number": 299,
         "title": "shared context",
@@ -1387,11 +1393,29 @@ def test_implement_and_resume_share_review_context_construction(
         "observed_ci",
         lambda branch, cwd: github.ObservedCi(state="no-pr"),
     )
+
+    class ReviewRuntime:
+        name = "review-capture"
+
+        def __init__(self) -> None:
+            self.requests: list[RunRequest] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.requests.append(request)
+            return RunResult(ok=True, text="VERDICT: REQUEST CHANGES\n\nstop before commit")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    reviewer_runtime = ReviewRuntime()
     monkeypatch.setattr(
         implement_module,
         "role_request",
         lambda config, role_name, prompt, cwd, **kwargs: (
-            _fake_runtime,
+            reviewer_runtime,
             RunRequest(prompt=prompt, cwd=cwd),
         ),
     )
@@ -1410,61 +1434,79 @@ def test_implement_and_resume_share_review_context_construction(
         ),
     )
 
-    original_builder = implement_module._build_review_context
-    built: list[implement_module.ReviewContext] = []
-
-    def capture_builder(
-        config: ProjectConfig,
-        issue_data: dict[str, Any],
-        *,
-        plan: str | None,
-        grant: grants.Grant | None,
-        gate_results: tuple[GateResult, ...],
-    ) -> implement_module.ReviewContext:
-        context = original_builder(
-            config,
-            issue_data,
-            plan=plan,
-            grant=grant,
-            gate_results=gate_results,
-        )
-        built.append(context)
-        return context
-
-    received: list[implement_module.ReviewContext | None] = []
-
-    def capture_self_review(
-        config: ProjectConfig,
-        wt_path: Path,
-        *,
-        log: object,
-        runtime_override: str | None = None,
-        context: implement_module.ReviewContext | None = None,
-    ) -> SelfReview:
-        received.append(context)
-        return SelfReview(False, "VERDICT: REQUEST CHANGES\n\nstop before commit")
-
-    monkeypatch.setattr(implement_module, "_build_review_context", capture_builder)
-    monkeypatch.setattr(implement_module, "_self_review", capture_self_review)
     monkeypatch.setattr(implement_module, "_record_halt", lambda *args, **kwargs: None)
+
+    grant_file: Path | None = None
+    grant = grants.Grant(
+        issue=299,
+        granted_by="review-test-dispatcher",
+        scope="REVIEW GRANT SCOPE SENTINEL",
+        paths=["sentinel/path"],
+    )
+    if grant_source == "fresh":
+        grant_file = repo / "grant.yaml"
+        grant_file.write_text(
+            "issue: 299\n"
+            "granted_by: review-test-dispatcher\n"
+            "scope: REVIEW GRANT SCOPE SENTINEL\n"
+            "paths: [sentinel/path]\n"
+        )
+    elif grant_source == "carried-over":
+        grants.persist(repo, grant)
 
     if entrypoint == "implement":
         plan_file = repo / "plan.md"
         plan_file.write_text("ACCEPTED PLAN SENTINEL")
-        ok = run_implement(repo, 299, plan_file=plan_file, log=lambda _: None)
+        ok = run_implement(
+            repo,
+            299,
+            plan_file=plan_file,
+            grant_file=grant_file,
+            log=lambda _: None,
+        )
     else:
         worktree.create(repo, ".worktrees", "issue-299", "fix/issue-299", "main")
-        ok = run_resume(repo, 299, message="resume feedback", log=lambda _: None)
+        ok = run_resume(
+            repo,
+            299,
+            message="resume feedback",
+            grant_file=grant_file,
+            log=lambda _: None,
+        )
 
     assert ok is False  # the reviewer deliberately requests changes before commit
-    assert received == built
-    assert len(built) == 1
-    assert "SHARED COMMENT SENTINEL" in built[0].text
-    assert "passed sentinel" in built[0].text
+    (review_request,) = reviewer_runtime.requests
+    prompt = review_request.prompt
+    assert "SHARED COMMENT SENTINEL" in prompt
+    assert "passed sentinel" in prompt
+    assert "read-only reviewer" in prompt
+    assert "Ground rule 6 in `prompts/tasks/implement.md`" in prompt
+    assert "you must still report every CI/CD" in prompt
+    assert "authentication or authorization" in prompt
+    assert "migration" in prompt
+    assert "dependency-manifest" in prompt
+    assert "other danger-zone change" in prompt
+    assert "stay strictly inside" not in prompt
+    assert "danger-zone rule below" not in prompt
     if entrypoint == "implement":
-        assert "ACCEPTED PLAN SENTINEL" in built[0].text
+        assert "ACCEPTED PLAN SENTINEL" in prompt
     else:
-        assert "this resume cycle did not receive a separate plan/spec" in built[0].text
+        assert "this resume cycle did not receive a separate plan/spec" in prompt
+    if grant_source == "fresh":
+        assert "supplied via `--grant-file` this invocation" in prompt
+        assert "fresh invocation grant, not carried over" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" in prompt
+        assert "is not proof of authorization" not in prompt
+    elif grant_source == "carried-over":
+        assert "carried over from a persisted grant" in prompt
+        assert "weaker than a fresh invocation grant" in prompt
+        assert "is not proof of authorization" in prompt
+        assert "do not treat it as proof" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" in prompt
+    else:
+        assert "no explicit grant was supplied or carried over" in prompt
+        assert "no danger-zone exemption" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" not in prompt
 
 
 # --- self-review verdict parsing (issue #157) ------------------------------
