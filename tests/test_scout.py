@@ -45,6 +45,75 @@ def test_uses_last_marker_and_ignores_junk() -> None:
     assert [(r.number, r.reason) for r in results] == [(2, "final")]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SCOUT RESULTS:\n#41: missing the dash\n",
+        "SCOUT RESULTS:\n#41\n",
+    ],
+)
+def test_only_unparseable_attempted_lines_is_none(text: str) -> None:
+    assert parse_scout(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n(#42) parenthesized reason\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n- #42 no separator\n",
+        "SCOUT RESULTS:\n#41 — a valid one\n  #42 indented, no separator\n",
+    ],
+)
+def test_mixed_valid_and_line_start_malformed_lines_raises(text: str) -> None:
+    """A line that *begins* with the `#<digits>` shape — bare, bulleted,
+    parenthesized or indented — is an attempted result line whose separator
+    the agent got wrong. `gh issue create` has already filed #42 by this
+    point, so it must raise rather than be dropped as chatter."""
+    with pytest.raises(ValueError, match="#42"):
+        parse_scout(text)
+
+
+def test_unrelated_trailing_prose_does_not_raise() -> None:
+    text = "SCOUT RESULTS:\n#41 — a valid one\nFiled the above.\n"
+    results = parse_scout(text)
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
+def test_unrelated_trailing_prose_without_issue_number_does_not_raise() -> None:
+    text = "SCOUT RESULTS:\n#41 — a valid one\nFiled the above issues after reviewing the TODOs.\n"
+    results = parse_scout(text)
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
+@pytest.mark.parametrize(
+    "chatter",
+    [
+        "Issue #42 filed for reason X",
+        "see #42 for details",
+        "these follow the pattern from #42",
+        "part of epic #42",
+    ],
+)
+def test_mid_line_issue_mentions_are_chatter_not_malformed_results(chatter: str) -> None:
+    """A `#N` cited mid-sentence is ordinary sign-off prose, not a mangled
+    report line: the agent is explaining context, not writing out a result
+    whose separator it fumbled. Raising here would abort a scout run that
+    fully succeeded — and abort it *after* `gh issue create` already filed
+    every issue, which is strictly worse than the silent no-op #286 fixed."""
+    results = parse_scout(f"SCOUT RESULTS:\n#41 — a valid one\n{chatter}\n")
+    assert results is not None
+    assert [(r.number, r.reason) for r in results] == [(41, "a valid one")]
+
+
+def test_a_block_of_only_mid_line_mentions_is_none_not_a_raise() -> None:
+    """With no valid result to mix with, chatter-only text still yields no
+    usable results — `None`, the caller's existing raise — never `ValueError`."""
+    assert parse_scout("SCOUT RESULTS:\nsee #42 for details\nnothing cleared the bar\n") is None
+
+
 class _FakeRuntime:
     name = "fake"
 
@@ -175,6 +244,29 @@ def test_run_scout_logs_a_single_label_failure_without_aborting(
 
     assert [r.number for r in results] == [41]
     assert any("backlog" in line and "HTTP 403: no scope" in line for line in logged)
+
+
+def test_run_scout_raises_runtime_error_on_a_mixed_unparseable_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block mixing a valid result with a malformed `#N`-shaped line makes
+    `parse_scout` raise `ValueError` — `run_scout` must wrap that into a
+    `RuntimeError` so `cli.py`'s `except (CommandError, RuntimeError)` still
+    catches it, instead of letting a bare `ValueError` escape uncaught."""
+    _stub_scout_run(
+        monkeypatch, tmp_path, "SCOUT RESULTS:\n#41 — a valid one\n#42: missing the dash\n"
+    )
+
+    def fake_sync_labels(
+        project_root: Path, labels: dict[str, github.Label], *, repo: str | None = None
+    ) -> github.LabelSync:
+        return github.LabelSync(created=list(labels), updated=[], unchanged=[], failed=[])
+
+    monkeypatch.setattr(github, "sync_labels", fake_sync_labels)
+    monkeypatch.setattr(github, "remote_slug", lambda root: "acme/widgets")
+
+    with pytest.raises(RuntimeError, match="unparseable"):
+        run_scout(tmp_path, log=lambda _msg: None)
 
 
 def test_focus_reaches_the_prompt_with_its_grounding_reminder() -> None:

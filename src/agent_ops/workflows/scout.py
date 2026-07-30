@@ -14,6 +14,18 @@ from agent_ops.workflows.implement import role_request
 from agent_ops.workflows.triage import LABEL_COLORS
 
 _RESULT_LINE = re.compile(r"^#(\d+)\s*[—-]+\s*(.+)$")
+#: Looser than `_RESULT_LINE`, but anchored the same way: a line counts as an
+#: attempted result only if it *begins* with the `#<digits>` shape every valid
+#: result line shares, allowing the leading noise a real result line might
+#: carry (bullet marker, opening paren, indentation) and nothing else. The
+#: raise this feeds exists to catch a filed-but-mangled *report line* — an
+#: agent writing out a result and getting the separator wrong — and such a
+#: line always leads with its issue number. Ordinary prose that happens to
+#: cite an issue mid-sentence ("see #279 for context", "part of epic #12") is
+#: chatter, not a mangled report, so an unanchored search would abort runs
+#: that fully succeeded. Checked only after `_RESULT_LINE` has already failed
+#: to match, so a well-formed result line is never re-flagged as malformed.
+_LOOKS_LIKE_RESULT = re.compile(r"^[-*(\s]*#\d+")
 
 #: How much repo-authored focus text may reach the prompt. Repo text is
 #: trusted at the same level as AGENTS.md, but a long one would still crowd
@@ -29,19 +41,42 @@ class ScoutResult:
 
 
 def parse_scout(text: str) -> list[ScoutResult] | None:
-    """Parse the SCOUT RESULTS block. None = no block; [] = explicit 'none'."""
+    """Parse the SCOUT RESULTS block.
+
+    `None` means "no usable results": either there is no `SCOUT RESULTS:`
+    block at all, or the block is present but every line is either an
+    attempted-but-malformed result or unrelated chatter — nothing parsed as
+    a real result and nothing parsed as an explicit `none` either. Only an
+    explicit `none` line returns `[]`; that is the sole way to get `[]`.
+
+    A block that mixes at least one valid result with at least one
+    attempted-but-malformed result raises `ValueError` naming the offending
+    line(s) rather than silently keeping just the parseable subset — by the
+    time this text is parsed, `gh issue create` has already run, so dropping
+    a mangled line here would leave a filed issue uncounted with no signal.
+    A line is an attempted result only when it *starts* with `#<digits>`
+    (bullet markers, an opening paren and indentation allowed); a `#N` cited
+    mid-sentence is chatter and is ignored, not a mangled report.
+    """
     _, marker, tail = text.rpartition("SCOUT RESULTS:")
     if not marker:
         return None
     results = []
+    malformed = []
     for line in tail.strip().splitlines():
         line = line.strip()
+        if not line:
+            continue
         if line.lower() == "none":
             return []
         m = _RESULT_LINE.match(line)
         if m:
             results.append(ScoutResult(int(m.group(1)), m.group(2).strip()))
-    return results
+        elif _LOOKS_LIKE_RESULT.match(line):
+            malformed.append(line)
+    if malformed and results:
+        raise ValueError(f"unparseable result line(s): {malformed!r}")
+    return results or None
 
 
 def focus_block(focus: str) -> str:
@@ -132,7 +167,10 @@ def run_scout(
     if not result.ok:
         raise RuntimeError(f"Scout run failed: {result.text}")
 
-    results = parse_scout(result.text)
+    try:
+        results = parse_scout(result.text)
+    except ValueError as exc:
+        raise RuntimeError(f"Scout produced an unparseable results block: {exc}") from exc
     if results is None:
         raise RuntimeError(f"Scout produced no parseable results:\n{result.text[-500:]}")
     if not results:
