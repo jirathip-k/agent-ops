@@ -1,0 +1,45 @@
+# Copy this file into each managed repo at .github/workflows/classify.yml
+# Replace YOUR-USERNAME with your GitHub username/org.
+#
+# Requires the same setup as the triage stub: CLAUDE_CODE_OAUTH_TOKEN secret
+# and workflow-reuse access on the agent-ops repo.
+#
+# Not hourly, by design (#262): classification no longer shares
+# triage-pipeline.yml's lock or 55-minute budget, but a plain hourly cron
+# would still fire inside a live triage window six times a day (triage's own
+# tick is `0 */4 * * *`, live up to :55 — triage-pipeline.yml's
+# `timeout-minutes: 55`). Seven hours are excluded instead:
+#
+#   - 0, 4, 8, 12, 16, 20 — triage's own 4-hourly tick
+#     (stubs/managed-repo-triage.yml, `0 */4 * * *`), live up to :55
+#   - 1 — groom's daily run (stubs/managed-repo-groom.yml, `0 1 * * *`,
+#     30-minute timeout), the lane that reconciles divergent buckets
+#
+# The goal is that `untriaged` stops ageing (observed: four days) — a gap
+# that never exceeds two hours satisfies that with zero designed overlap
+# against the only other lane that writes bucket labels. Preserving literal
+# hourliness is not the goal and isn't worth reintroducing the collision for.
+# See docs/reference/lanes.md for the residual (undesigned) overlaps this
+# schedule doesn't and can't close.
+
+name: Agent Classify
+
+on:
+  schedule:
+    # Minute 17 staggers off the :00/:20/:30 crowd the other stubs cron on.
+    - cron: '17 2-3,5-7,9-11,13-15,17-19,21-23 * * *'
+  workflow_dispatch: {}   # manual "run now" button for testing
+
+jobs:
+  classify:
+    # The caller must grant everything the pipeline requests — a called
+    # workflow cannot exceed the caller's token.
+    permissions:
+      contents: read
+      issues: write
+    uses: YOUR-USERNAME/agent-ops/.github/workflows/classify-pipeline.yml@main
+    with:
+      target_repo: ${{ github.repository }}
+      # runner: blacksmith-2vcpu-ubuntu-2404  # optional: faster/cheaper runners (org repos only)
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
