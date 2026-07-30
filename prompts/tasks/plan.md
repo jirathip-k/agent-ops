@@ -21,6 +21,10 @@ the source of truth to build on — do not re-derive the analysis from scratch.
 
 {authorization}
 
+## Configured executable contract
+
+{command_contract}
+
 ## Tasks
 
 1. Locate the relevant code and confirm the problem (or, for a feature,

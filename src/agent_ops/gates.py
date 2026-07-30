@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from agent_ops.config import PROJECT_CONFIG_REL, ProjectConfig
+from agent_ops.config import PROJECT_CONFIG_REL, ProjectConfig, resolved_commands
 from agent_ops.utils import SPAWN_FAILURE_RETURNCODE, run, tail
 
 # What a shell says when it couldn't exec the name it was given — dash/sh's
@@ -108,8 +108,9 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
     an ordinary failure; only the caller's retry decision differs (`loop.py`).
     """
     results: list[GateResult] = []
+    commands = dict(resolved_commands(config))
     for name in config.loop.gates:
-        command = getattr(config.commands, name, None)
+        command = commands.get(name)
         if not command:
             continue
         proc = run(
@@ -122,6 +123,44 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
         status, missing_binary = _classify(proc, command)
         results.append(GateResult(name, command, status, output, missing_binary))
     return results
+
+
+def render_command_contract(config: ProjectConfig) -> str:
+    """Render the resolved setup/gate commands as instructions for agent roles.
+
+    The markers make the contract easy to distinguish from repository
+    documentation or untrusted task data. Commands are interpolated verbatim:
+    this is the same resolved `ProjectConfig` that setup, `run_gates`,
+    requirement checks, and Claude permission patterns consume.
+    """
+    commands = resolved_commands(config)
+    command_lines = (
+        [f"{name}: {command}" for name, command in commands]
+        if commands
+        else ["(no setup or gate commands are configured)"]
+    )
+    return "\n".join(
+        [
+            "<!-- BEGIN AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+            *command_lines,
+            "<!-- END AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+            "",
+            "These exact strings, resolved from `.agent/config.yaml`, are the sole executable "
+            "contract for setup and gates. `AGENTS.md` / `CLAUDE.md` remain authoritative for "
+            "repository conventions, safety constraints, and explanations, but not for alternate "
+            "command spellings.",
+            "",
+            "Run a configured command exactly as written. For a targeted test, extend the "
+            "configured test command with supported arguments; do not replace its prefix with an "
+            "underlying runner or a remembered alias.",
+            "",
+            "If an exact configured command is denied or unavailable, report that command as "
+            "UNVERIFIED and name the environment/permission gap. Do not substitute another "
+            "command, hand-evaluate tests, or claim the gate passed. Agent-run commands are early "
+            "feedback only; the parent `run_gates` execution remains the final pass/fail "
+            "authority.",
+        ]
+    )
 
 
 def missing_requirements(config: ProjectConfig, cwd: Path) -> list[str]:
@@ -176,10 +215,9 @@ def format_missing_requirements(
     does not mention Hugo anywhere — so every configured gate is listed and the
     repo is left to make the connection.
     """
+    resolved = dict(resolved_commands(config))
     gates_configured = [
-        (name, command)
-        for name in config.loop.gates
-        if (command := getattr(config.commands, name, None))
+        (name, command) for name in config.loop.gates if (command := resolved.get(name))
     ]
     lines = [
         "toolchain preflight failed — these declared binaries are not on PATH in the "

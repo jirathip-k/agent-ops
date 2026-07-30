@@ -111,6 +111,14 @@ suite. A gate that overruns is reported as a failed gate, so the retry prompt
 says so instead of the run hanging. Every other subprocess `agent` shells out
 to is bookkeeping (`gh`, `git`) and carries a short built-in bound.
 
+The resolved `commands.setup/test/lint/typecheck` strings in each managed
+repository's `.agent/config.yaml` are the executable source of truth. Agents
+receive those exact strings and matching permission patterns; they may append
+supported arguments for a targeted run, but must not swap in aliases from
+`AGENTS.md` / `CLAUDE.md` or an underlying runner. Agent-side runs are early
+feedback—the parent loop executes the configured gates independently and its
+results are final.
+
 When self-review requests changes, the worktree is kept, the findings are
 saved to `.agent-runs/issue-<N>-feedback.md`, and a `## Agent self-review`
 comment is posted on the issue as a human-visible marker that it's halted

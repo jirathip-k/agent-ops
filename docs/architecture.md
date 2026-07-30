@@ -18,7 +18,7 @@ CLI (agent scout / distill / spec / triage / groom / plan / implement / review /
  │    │
  │    ├─ worktree   one isolated worktree + branch per task
  │    ├─ loop       execute → gates → retry (fresh context per retry)
- │    ├─ gates      project test/lint/typecheck commands = the evaluator
+ │    ├─ gates      exact .agent/config.yaml commands = the evaluator
  │    ├─ skills     markdown fragments injected into prompts
  │    └─ github     thin `gh` wrappers (issues, PRs, comments)
  │
@@ -58,6 +58,13 @@ pipelines run the local lane's CLI outright. Triage is the partial exception
 merge gate calls `agent merge --check` rather than judging caps in prose
 (#150), so even there the rules come from one tested place. #171 tracks
 converging what's left: triage's classification, review, and implement.
+
+For the local lane, resolved `commands.setup/test/lint/typecheck` values are
+one executable contract shared by setup, requirement preflight, agent prompt
+rendering, Claude permission patterns, and the parent gate runner. Repository
+instruction files remain authoritative for conventions and safety, but cannot
+substitute an alternate command spelling. Agents may execute the configured
+prefix for early feedback; the parent gate runner remains the evaluator.
 
 ## Where things live
 

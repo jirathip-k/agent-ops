@@ -7,6 +7,10 @@ read access to the repository for context; do not modify anything.
 
 {context}
 
+## Configured executable contract
+
+{command_contract}
+
 ## What to check
 
 1. Correctness: bugs, broken edge cases, wrong logic. Highest priority.

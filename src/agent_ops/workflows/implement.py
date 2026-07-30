@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from agent_ops import claims, github, grants, messages, orca, runs, surfaces, worktree
-from agent_ops.config import ProjectConfig, load_project_config
+from agent_ops.config import ProjectConfig, load_project_config, resolved_commands
 from agent_ops.fallback import model_note, run_with_fallback
 from agent_ops.gates import (
     GateResult,
     format_missing_gate,
     format_missing_requirements,
     missing_requirements,
+    render_command_contract,
 )
 from agent_ops.loop import LoopOutcome, run_task_loop
 from agent_ops.prompts import escalated, opens_with_escalation_word, render_task, verdict_of
@@ -207,10 +208,7 @@ def gate_allowed_tools(config: ProjectConfig) -> tuple[str, ...]:
     (a && b) are split because permissions are checked per component.
     """
     patterns: list[str] = []
-    for name in ("setup", "test", "lint", "typecheck"):
-        command = getattr(config.commands, name, None)
-        if not command:
-            continue
+    for _name, command in resolved_commands(config):
         for part in command.split("&&"):
             part = part.strip()
             if part:
@@ -254,6 +252,38 @@ def role_request(
     return runtime, request
 
 
+def task_role_request(
+    config: ProjectConfig,
+    role_name: str,
+    task_name: str,
+    cwd: Path,
+    fields: dict[str, str],
+    *,
+    runtime_override: str | None = None,
+    extra_allowed_tools: tuple[str, ...] = (),
+) -> tuple[Runtime, RunRequest]:
+    """Render one code-task prompt and construct its role request.
+
+    Implement, resume, plan, and pre-commit review all go through this boundary
+    so none can omit the resolved setup/gate contract while retaining the
+    matching permission patterns from `role_request`. Standalone PR review
+    constructs the same pair in `workflows.review`.
+    """
+    prompt = render_task(
+        task_name,
+        command_contract=render_command_contract(config),
+        **fields,
+    )
+    return role_request(
+        config,
+        role_name,
+        prompt,
+        cwd,
+        runtime_override=runtime_override,
+        extra_allowed_tools=extra_allowed_tools,
+    )
+
+
 def make_plan(
     config: ProjectConfig,
     issue: dict[str, Any],
@@ -274,17 +304,20 @@ def make_plan(
     Returns the request and its result so callers can attribute the plan to the
     model that actually wrote it; raises on ESCALATE or failure.
     """
-    prompt = render_task(
+    runtime, request = task_role_request(
+        config,
+        "planner",
         "plan",
-        issue_number=str(issue["number"]),
-        issue_title=issue["title"],
-        issue_body=issue.get("body") or "(no description)",
-        issue_labels=_labels(issue),
-        issue_comments=_format_comments(issue),
-        authorization=_render_authorization(grant),
-    )
-    runtime, request = role_request(
-        config, "planner", prompt, cwd, runtime_override=runtime_override
+        cwd,
+        {
+            "issue_number": str(issue["number"]),
+            "issue_title": issue["title"],
+            "issue_body": issue.get("body") or "(no description)",
+            "issue_labels": _labels(issue),
+            "issue_comments": _format_comments(issue),
+            "authorization": _render_authorization(grant),
+        },
+        runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)
     if not result.ok:
@@ -511,19 +544,22 @@ def _run_implement(
         plan = plan_result.text
         log(f"plan ready ({len(plan.splitlines())} lines, {model_note(plan_request, plan_result)})")
 
-    prompt = render_task(
+    runtime, request = task_role_request(
+        config,
+        "implementer",
         "implement",
-        issue_number=str(issue["number"]),
-        issue_title=issue["title"],
-        issue_body=issue.get("body") or "(no description)",
-        issue_labels=_labels(issue),
-        branch=branch,
-        plan=plan,
-        skills=load_skills(config.skills, project_root),
-        authorization=_render_authorization(grant),
-    )
-    runtime, request = role_request(
-        config, "implementer", prompt, wt_path, runtime_override=runtime_name
+        wt_path,
+        {
+            "issue_number": str(issue["number"]),
+            "issue_title": issue["title"],
+            "issue_body": issue.get("body") or "(no description)",
+            "issue_labels": _labels(issue),
+            "branch": branch,
+            "plan": plan,
+            "skills": load_skills(config.skills, project_root),
+            "authorization": _render_authorization(grant),
+        },
+        runtime_override=runtime_name,
     )
 
     card.note(f"#{issue_number}: implementing")
@@ -811,21 +847,24 @@ def _run_resume(
     diff_stat = run(["git", "diff", "--stat"], cwd=wt_path).stdout.strip() or "(no changes yet)"
     grant, grant_carried_over = _resolve_grant(project_root, issue_number, grant_file, log=log)
 
-    prompt = render_task(
+    runtime, request = task_role_request(
+        config,
+        "implementer",
         "resume",
-        issue_number=str(issue["number"]),
-        issue_title=issue["title"],
-        issue_body=issue.get("body") or "(no description)",
-        issue_labels=_labels(issue),
-        branch=branch,
-        diff_stat=diff_stat,
-        feedback=feedback,
-        skills=load_skills(config.skills, project_root),
-        authorization=_render_authorization(grant),
-        ci_status=_ci_section(ci),
-    )
-    runtime, request = role_request(
-        config, "implementer", prompt, wt_path, runtime_override=runtime_name
+        wt_path,
+        {
+            "issue_number": str(issue["number"]),
+            "issue_title": issue["title"],
+            "issue_body": issue.get("body") or "(no description)",
+            "issue_labels": _labels(issue),
+            "branch": branch,
+            "diff_stat": diff_stat,
+            "feedback": feedback,
+            "skills": load_skills(config.skills, project_root),
+            "authorization": _render_authorization(grant),
+            "ci_status": _ci_section(ci),
+        },
+        runtime_override=runtime_name,
     )
 
     # Same as `run_implement`: whatever a previous cycle recorded, this one is
@@ -1262,9 +1301,16 @@ def _self_review(
         log("self-review skipped: empty diff")
         return SelfReview(False, "(empty diff — nothing to review)", reviewed=False)
     review_context = context.text if context is not None else "Pre-commit self-review."
-    prompt = render_task("review", diff=diff, context=review_context)
-    runtime, request = role_request(
-        config, "reviewer", prompt, wt_path, runtime_override=runtime_override
+    runtime, request = task_role_request(
+        config,
+        "reviewer",
+        "review",
+        wt_path,
+        {
+            "diff": diff,
+            "context": review_context,
+        },
+        runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)
     # `verdict_of` returning "unknown" (no `VERDICT:` line) makes this False —

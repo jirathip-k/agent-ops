@@ -4,8 +4,13 @@
 base_branch: main
 
 commands:
+  # These resolved strings are the sole executable contract for setup and
+  # gates. agent-ops shows these exact spellings to planner/implementer/reviewer
+  # agents, derives their permission allowlist from them, and runs them again
+  # as the final gate authority. Adapt the repository here; do not rely on an
+  # equivalent alias documented elsewhere.
   setup: null       # run once per fresh worktree, e.g. "npm install"
-  test: null        # e.g. "uv run pytest -q" | "npm test" | "swift test"
+  test: null        # e.g. "uv run pytest -q" | "npm run test" | "swift test"
   lint: null        # e.g. "uv run ruff check ." | "npx eslint ."
   typecheck: null   # e.g. "uv run pyright" | "npx tsc --noEmit"
   # Executable names the gate commands above need on PATH. A run resolves each

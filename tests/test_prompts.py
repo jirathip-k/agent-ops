@@ -21,6 +21,7 @@ TASK_FIELDS = {
         "issue_labels": "none",
         "issue_comments": "some comment",
         "authorization": "(none — danger-zone rules fully in force)",
+        "command_contract": "test: uv run pytest -q",
     },
     "spec": {
         "issue_number": "1",
@@ -39,6 +40,7 @@ TASK_FIELDS = {
         "skills": "",
         "authorization": "(none — danger-zone rules fully in force)",
         "ci_status": "",
+        "command_contract": "test: uv run pytest -q",
     },
     "scout": {"max_issues": "3", "repo_focus": "\n## Repo focus\n\npages with no meta\n"},
     "triage": {"issues": "### #1: t"},

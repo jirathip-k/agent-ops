@@ -15,6 +15,7 @@ DEFAULTS_FILE = PLATFORM_ROOT / "config" / "defaults.yaml"
 PROJECT_CONFIG_REL = Path(".agent") / "config.yaml"
 
 ROLE_NAMES = ("planner", "implementer", "reviewer")
+COMMAND_NAMES = ("setup", "test", "lint", "typecheck")
 
 
 class ModelTierError(RuntimeError):
@@ -378,6 +379,22 @@ class ProjectConfig(BaseModel):
         if model in rungs:
             rungs = rungs[rungs.index(model) + 1 :]
         return [rung for rung in dict.fromkeys(rungs) if rung != model]
+
+
+def resolved_commands(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
+    """The configured setup/gate strings, in their fixed executable-contract order.
+
+    These are the only command categories agent-ops supports. Keeping the
+    iteration here makes prompt rendering and permission construction consume
+    the same resolved `ProjectConfig` values as setup and `run_gates`, without
+    inventing a second command source or accepting arbitrary categories.
+    """
+    commands: list[tuple[str, str]] = []
+    for name in COMMAND_NAMES:
+        command = getattr(config.commands, name)
+        if command:
+            commands.append((name, command))
+    return tuple(commands)
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,9 @@ patterns, commit message style. -->
 ## Commands
 
 <!-- How to run tests, lint, typecheck, build, and start the app locally.
-Keep in sync with .agent/config.yaml. -->
+The exact setup/test/lint/typecheck shell spellings live in
+.agent/config.yaml; document conventions and explanations here, not alternate
+aliases for those configured commands. -->
 
 ## Danger zones
 

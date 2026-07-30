@@ -83,8 +83,12 @@ repo's **Actions** tab.
 - **Planner** (smart model, read-only) finds the root cause and writes a
   plan — or escalates instead of guessing.
 - **Implementer** (fast model) writes the code in an isolated worktree.
-- **Gates** (not AI — your real test/lint/typecheck commands) must pass, with
-  retries on failure.
+- **Gates** (not AI — the exact test/lint/typecheck strings resolved from the
+  managed repo's `.agent/config.yaml`) must pass, with retries on failure.
+  Those strings are also shown to each verifying agent and used for its
+  command allowlist. `AGENTS.md` / `CLAUDE.md` still define conventions and
+  safety, but an alternate command spelling there does not replace the
+  configured executable contract.
 - **Reviewer** (smart model, read-only) must approve the diff.
 - **Merge rules** (plain code, not AI) decide if the PR may auto-merge into
   `staging`: CI green, small enough, nothing protected touched.
@@ -174,8 +178,9 @@ state (worktrees branch from `origin/staging`).
 - **main** — production. Humans only, always via the promotion PR.
 - **promotion PR** — one PR collecting everything on staging, with a
   changelog. Merging it is you saying "ship it."
-- **gates** — your project's own test/lint/typecheck commands. An agent's
-  work doesn't count until they pass.
+- **gates** — your project's exact `.agent/config.yaml`
+  test/lint/typecheck commands. Agents can run them for early feedback, but
+  the parent workflow runs them independently; its result is the final signal.
 - **escalation** — an agent choosing to ask instead of guess. It looks like
   a `needs-human` label plus a written explanation.
 - **worktree** — a disposable copy of the repo where one task happens, so
