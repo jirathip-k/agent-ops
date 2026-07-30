@@ -143,6 +143,12 @@ def test_run_review_under_budget_includes_full_diff_no_note(
     assert runtime.received_prompt is not None
     assert diff_text in runtime.received_prompt
     assert "NOTE:" not in runtime.received_prompt
+    assert "verification context for this read-only lane" in runtime.received_prompt
+    assert "Do not run the configured `setup` command here" in runtime.received_prompt
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority"
+        not in runtime.received_prompt
+    )
     assert not any("NOTE:" in m for m in messages)
 
 

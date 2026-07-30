@@ -123,7 +123,7 @@ def run_review(
         "review",
         diff=diff,
         context=f"PR #{pr['number']}: {pr['title']}\n\n{pr.get('body') or ''}",
-        command_contract=render_command_contract(config),
+        command_contract=render_command_contract(config, parent_gates=False),
     )
 
     runtime, request = role_request(

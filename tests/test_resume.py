@@ -204,6 +204,10 @@ def test_run_resume_feeds_the_message_to_the_implementer_prompt(
     assert captured["role_name"] == "implementer"
     assert captured["cwd"] == wt_path
     assert "please handle the edge case" in captured["prompt"]
+    assert "Run the configured gates yourself before finishing" in captured["prompt"]
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority" in captured["prompt"]
+    )
 
 
 def test_run_resume_falls_back_to_the_stored_halt_feedback(
@@ -1238,6 +1242,12 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
 
     assert review.reviewed is True
     assert "new_module.py" in captured["prompt"]
+    assert "verification context for this read-only lane" in captured["prompt"]
+    assert "Do not run the configured `setup` command here" in captured["prompt"]
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority"
+        not in captured["prompt"]
+    )
 
 
 def _review_fixture() -> tuple[ProjectConfig, dict[str, Any], grants.Grant, tuple[GateResult, ...]]:

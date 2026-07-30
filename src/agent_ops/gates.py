@@ -125,13 +125,15 @@ def run_gates(config: ProjectConfig, cwd: Path) -> list[GateResult]:
     return results
 
 
-def render_command_contract(config: ProjectConfig) -> str:
+def render_command_contract(config: ProjectConfig, *, parent_gates: bool) -> str:
     """Render the resolved setup/gate commands as instructions for agent roles.
 
     The markers make the contract easy to distinguish from repository
     documentation or untrusted task data. Commands are interpolated verbatim:
     this is the same resolved `ProjectConfig` that setup, `run_gates`,
-    requirement checks, and Claude permission patterns consume.
+    requirement checks, and Claude permission patterns consume. Implementation
+    lanes get the parent-gate relationship; standalone read-only lanes get
+    verification context without a promise that any parent gate exists.
     """
     commands = resolved_commands(config)
     command_lines = (
@@ -139,20 +141,22 @@ def render_command_contract(config: ProjectConfig) -> str:
         if commands
         else ["(no setup or gate commands are configured)"]
     )
-    return "\n".join(
-        [
-            "<!-- BEGIN AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
-            *command_lines,
-            "<!-- END AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
-            "",
-            "These exact strings, resolved from `.agent/config.yaml`, are the sole executable "
-            "contract for setup and gates. `AGENTS.md` / `CLAUDE.md` remain authoritative for "
-            "repository conventions, safety constraints, and explanations, but not for alternate "
-            "command spellings.",
-            "",
-            "Run a configured command exactly as written. For a targeted test, extend the "
-            "configured test command with supported arguments; do not replace its prefix with an "
-            "underlying runner or a remembered alias.",
+    lines = [
+        "<!-- BEGIN AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+        *command_lines,
+        "<!-- END AGENT-OPS CONFIGURED EXECUTABLE CONTRACT -->",
+        "",
+        "These exact strings, resolved from `.agent/config.yaml`, are the sole executable "
+        "contract for setup and gates. `AGENTS.md` / `CLAUDE.md` remain authoritative for "
+        "repository conventions, safety constraints, and explanations, but not for alternate "
+        "command spellings.",
+        "",
+    ]
+    if parent_gates:
+        lines += [
+            "Run the configured gates yourself before finishing, exactly as written. For a "
+            "targeted test, extend the configured test command with supported arguments; do not "
+            "replace its prefix with an underlying runner or a remembered alias.",
             "",
             "If an exact configured command is denied or unavailable, report that command as "
             "UNVERIFIED and name the environment/permission gap. Do not substitute another "
@@ -160,7 +164,19 @@ def render_command_contract(config: ProjectConfig) -> str:
             "feedback only; the parent `run_gates` execution remains the final pass/fail "
             "authority.",
         ]
-    )
+    else:
+        lines += [
+            "These commands are verification context for this read-only lane. Do not run the "
+            "configured `setup` command here; setup may modify the checkout and is managed outside "
+            "this request. If you run a configured gate for verification, run it exactly as "
+            "written. For a targeted test, extend the configured test command with supported "
+            "arguments; do not replace its prefix with an underlying runner or a remembered alias.",
+            "",
+            "If an exact configured gate command is denied or unavailable, report that command as "
+            "UNVERIFIED and name the environment/permission gap. Do not substitute another "
+            "command, hand-evaluate tests, or claim the gate passed.",
+        ]
+    return "\n".join(lines)
 
 
 def missing_requirements(config: ProjectConfig, cwd: Path) -> list[str]:

@@ -143,12 +143,14 @@ def test_each_ecosystem_executes_every_task_request_and_exact_allowlist(
     )
 
     for task_name, (role_name, fields) in TASKS.items():
+        parent_gates = task_name in ("implement", "resume")
         _runtime, request = task_role_request(
             config,
             role_name,
             task_name,
             tmp_path,
             fields,
+            parent_gates=parent_gates,
         )
         contract = request.prompt.split(BEGIN_CONTRACT, 1)[1].split(END_CONTRACT, 1)[0]
 
@@ -157,9 +159,16 @@ def test_each_ecosystem_executes_every_task_request_and_exact_allowlist(
             f"{name}: {command}" for name, command in commands.items()
         ]
         assert "sole executable contract" in request.prompt
-        assert (
-            "parent `run_gates` execution remains the final pass/fail authority" in request.prompt
-        )
+        assert "UNVERIFIED" in request.prompt
+        parent_note = "parent `run_gates` execution remains the final pass/fail authority"
+        if parent_gates:
+            assert parent_note in request.prompt
+            assert "Run the configured gates yourself before finishing" in request.prompt
+            assert "verification context for this read-only lane" not in request.prompt
+        else:
+            assert parent_note not in request.prompt
+            assert "verification context for this read-only lane" in request.prompt
+            assert "Do not run the configured `setup` command here" in request.prompt
 
 
 def test_npm_documented_alias_does_not_replace_configured_request_or_allowlist(
@@ -176,6 +185,7 @@ def test_npm_documented_alias_does_not_replace_configured_request_or_allowlist(
         "implement",
         tmp_path,
         fields,
+        parent_gates=True,
     )
     contract = request.prompt.split(BEGIN_CONTRACT, 1)[1].split(END_CONTRACT, 1)[0]
 
@@ -202,6 +212,7 @@ def test_implementation_requests_keep_headless_safety_and_require_early_gates(
         task_name,
         tmp_path,
         fields,
+        parent_gates=True,
     )
     normalized = " ".join(request.prompt.split())
 
@@ -243,6 +254,12 @@ def test_standalone_reviewer_request_receives_the_same_npm_contract(
     request = runtime.requests[0]
     contract = request.prompt.split(BEGIN_CONTRACT, 1)[1].split(END_CONTRACT, 1)[0]
     assert "test: npm run test" in contract
+    assert "UNVERIFIED" in request.prompt
+    assert "verification context for this read-only lane" in request.prompt
+    assert "Do not run the configured `setup` command here" in request.prompt
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority" not in request.prompt
+    )
     assert request.allowed_tools == (
         "Bash(npm ci)",
         "Bash(npm ci:*)",

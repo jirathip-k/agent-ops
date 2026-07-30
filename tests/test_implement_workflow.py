@@ -311,6 +311,12 @@ def test_make_plan_includes_issue_comments_in_rendered_prompt(
 
     assert "## Agent spec" in captured["prompt"]
     assert "build on this instead of re-deriving" in captured["prompt"]
+    assert "verification context for this read-only lane" in captured["prompt"]
+    assert "Do not run the configured `setup` command here" in captured["prompt"]
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority"
+        not in captured["prompt"]
+    )
 
 
 def test_make_plan_with_grant_renders_authorization_in_prompt(
@@ -933,6 +939,10 @@ def test_run_implement_with_grant_records_authorization_and_scope_in_the_prompt(
 
     assert "the described scope only" in captured["prompt"]
     assert "jirathip-k" in captured["prompt"]
+    assert "Run the configured gates yourself before finishing" in captured["prompt"]
+    assert (
+        "parent `run_gates` execution remains the final pass/fail authority" in captured["prompt"]
+    )
 
 
 def test_run_implement_resolves_grant_before_planning_and_passes_it_to_make_plan(

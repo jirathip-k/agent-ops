@@ -259,6 +259,7 @@ def task_role_request(
     cwd: Path,
     fields: dict[str, str],
     *,
+    parent_gates: bool,
     runtime_override: str | None = None,
     extra_allowed_tools: tuple[str, ...] = (),
 ) -> tuple[Runtime, RunRequest]:
@@ -271,7 +272,7 @@ def task_role_request(
     """
     prompt = render_task(
         task_name,
-        command_contract=render_command_contract(config),
+        command_contract=render_command_contract(config, parent_gates=parent_gates),
         **fields,
     )
     return role_request(
@@ -317,6 +318,7 @@ def make_plan(
             "issue_comments": _format_comments(issue),
             "authorization": _render_authorization(grant),
         },
+        parent_gates=False,
         runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)
@@ -559,6 +561,7 @@ def _run_implement(
             "skills": load_skills(config.skills, project_root),
             "authorization": _render_authorization(grant),
         },
+        parent_gates=True,
         runtime_override=runtime_name,
     )
 
@@ -864,6 +867,7 @@ def _run_resume(
             "authorization": _render_authorization(grant),
             "ci_status": _ci_section(ci),
         },
+        parent_gates=True,
         runtime_override=runtime_name,
     )
 
@@ -1310,6 +1314,7 @@ def _self_review(
             "diff": diff,
             "context": review_context,
         },
+        parent_gates=False,
         runtime_override=runtime_override,
     )
     result = run_with_fallback(runtime, request, on_event=log)
