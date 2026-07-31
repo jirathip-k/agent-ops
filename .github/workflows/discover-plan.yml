@@ -1,0 +1,105 @@
+name: Agent · Discover & Plan
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: fable
+        type: string
+      max_items:
+        description: Maximum issues to create or refine
+        required: false
+        default: 3
+        type: number
+  workflow_call:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: fable
+        type: string
+      max_items:
+        description: Maximum issues to create or refine
+        required: false
+        default: 3
+        type: number
+      runner:
+        description: GitHub runner label
+        required: false
+        default: ubuntu-latest
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  discover-plan:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    concurrency:
+      group: agent-discover-plan-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 50
+          persist-credentials: false
+
+      - name: Checkout agent prompts
+        uses: actions/checkout@v6
+        with:
+          repository: jirathip-k/agent-ops
+          ref: main
+          path: .agent-ops-control
+          sparse-checkout: prompts
+          persist-credentials: false
+
+      - name: Keep control files outside the target diff
+        run: echo "/.agent-ops-control/" >> .git/info/exclude
+
+      - name: Ensure lifecycle labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          gh label create "agent:needs-plan" --repo "$TARGET_REPO" --force \
+            --color "d4c5f9" --description "Useful work that still needs a complete plan"
+          gh label create "agent:ready" --repo "$TARGET_REPO" --force \
+            --color "1d76db" --description "Ready for unattended implementation"
+          gh label create "agent:blocked" --repo "$TARGET_REPO" --force \
+            --color "b60205" --description "Waiting for a human decision or prerequisite"
+          gh label create "agent:implementing" --repo "$TARGET_REPO" --force \
+            --color "fbca04" --description "Claimed by the implementation lane"
+          gh label create "agent:review" --repo "$TARGET_REPO" --force \
+            --color "0e8a16" --description "Awaiting independent agent review"
+          gh label create "agent:approved" --repo "$TARGET_REPO" --force \
+            --color "2cbe4e" --description "Agent review passed; human merge required"
+
+      - name: Discover and plan
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPOSITORY: ${{ github.repository }}
+            MAX_ITEMS: ${{ inputs.max_items || 3 }}
+
+            Follow .agent-ops-control/prompts/discover-plan.md exactly.
+            Work in the checked-out repository root.
+          claude_args: >-
+            --model ${{ inputs.model || 'fable' }}
+            --max-turns 30
+            --allowedTools
+            "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(gh issue:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"

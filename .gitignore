@@ -6,16 +6,7 @@ __pycache__/
 dist/
 .DS_Store
 .worktrees/
-
-# Background-surface run logs (agent review/plan --surface background).
 .agent-runs/
-
 config/local/
-
-# Supabase CLI scratch state (link refs, temp creds) — never a source artifact.
 supabase/.temp/
-
-# Local scratch: API captures, .har files, throwaway verification scripts.
-# .har recordings carry live auth headers and cookies, so this must stay
-# ignored rather than relying on remembering not to `git add -A`.
 tmp/

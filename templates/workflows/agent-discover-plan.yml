@@ -1,0 +1,20 @@
+name: Agent · Discover & Plan
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  discover-plan:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+    uses: jirathip-k/agent-ops/.github/workflows/discover-plan.yml@main
+    with:
+      model: fable
+      max_items: 3
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
