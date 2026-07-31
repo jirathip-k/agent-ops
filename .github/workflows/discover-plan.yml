@@ -73,7 +73,7 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
         run: |
           gh label create "agent:needs-plan" --repo "$TARGET_REPO" --force \
-            --color "d4c5f9" --description "Useful work that still needs a complete plan"
+            --color "d4c5f9" --description "Awaiting triage and a complete plan"
           gh label create "agent:ready" --repo "$TARGET_REPO" --force \
             --color "1d76db" --description "Ready for unattended implementation"
           gh label create "agent:blocked" --repo "$TARGET_REPO" --force \

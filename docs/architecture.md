@@ -35,9 +35,11 @@ This combines discovery, triage, grooming, specification, and planning.
 Those activities answer one question: is there a small, evidence-backed task
 that an implementation agent can execute without another decision?
 
-The lane improves existing `agent:needs-plan` issues first, then discovers
-new work up to its cap. It can write issues and labels but cannot write
-repository contents.
+The target caller deterministically labels new issues from owners, members,
+and collaborators as `agent:needs-plan`; this intake job does not invoke a
+model. The lane triages those queued issues first, then discovers new work up
+to its cap. It can write issues and labels but cannot write repository
+contents.
 
 ### Implement
 

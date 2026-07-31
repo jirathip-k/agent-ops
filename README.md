@@ -99,6 +99,11 @@ The workflows create missing labels. Discover & Plan moves work toward
 `agent/issue-...` branch; Review & Release performs a fresh independent pass.
 Only a human merges.
 
+The Discover & Plan caller also performs deterministic intake. When an issue
+is opened by an owner, member, or collaborator, it adds `agent:needs-plan`
+without invoking a model. The next scheduled or manual Discover & Plan run
+assesses the issue. Public contributors are not automatically queued.
+
 If review requests changes, it adds `agent:changes-requested`. After a human
 or fixing workflow pushes a revision, restore `agent:review` to request a new
 independent pass.
