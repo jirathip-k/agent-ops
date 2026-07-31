@@ -1,0 +1,196 @@
+name: Agent · Implement
+
+on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: sonnet
+        type: string
+      base_branch:
+        description: Pull-request base branch
+        required: false
+        default: main
+        type: string
+  workflow_call:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: sonnet
+        type: string
+      base_branch:
+        description: Pull-request base branch
+        required: false
+        default: main
+        type: string
+      runner:
+        description: GitHub runner label
+        required: false
+        default: ubuntu-latest
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AGENT_APP_ID:
+        required: true
+      AGENT_APP_PRIVATE_KEY:
+        required: true
+
+jobs:
+  implement:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 55
+    concurrency:
+      group: agent-implement-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Ensure implementation labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          gh label create "agent:ready" --repo "$TARGET_REPO" --force \
+            --color "1d76db" --description "Ready for unattended implementation"
+          gh label create "agent:implementing" --repo "$TARGET_REPO" --force \
+            --color "fbca04" --description "Claimed by the implementation lane"
+          gh label create "agent:review" --repo "$TARGET_REPO" --force \
+            --color "0e8a16" --description "Awaiting independent agent review"
+          gh label create "agent:blocked" --repo "$TARGET_REPO" --force \
+            --color "b60205" --description "Waiting for a human decision or prerequisite"
+
+      - name: Select one ready issue
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          ISSUE=$(gh issue list --repo "$TARGET_REPO" --state open \
+            --label "agent:ready" --search "-label:agent:implementing -label:agent:blocked" \
+            --limit 100 --json number,createdAt \
+            --jq 'sort_by(.createdAt) | .[0].number // 0')
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          echo "Selected issue: $ISSUE"
+
+      - name: Mint a target-scoped GitHub App token
+        id: app_token
+        if: steps.select.outputs.issue != '0'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Checkout target repository
+        if: steps.select.outputs.issue != '0'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.base_branch || 'main' }}
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
+
+      - name: Checkout agent prompts
+        if: steps.select.outputs.issue != '0'
+        uses: actions/checkout@v6
+        with:
+          repository: jirathip-k/agent-ops
+          ref: main
+          path: .agent-ops-control
+          sparse-checkout: prompts
+          persist-credentials: false
+
+      - name: Keep control files outside the target diff
+        if: steps.select.outputs.issue != '0'
+        run: echo "/.agent-ops-control/" >> .git/info/exclude
+
+      - name: Claim the issue
+        id: claim
+        if: steps.select.outputs.issue != '0'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ISSUE: ${{ steps.select.outputs.issue }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$TARGET_REPO" --add-label "agent:implementing"
+          gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+            --body "Implementation started in workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+
+      - name: Implement the selected issue
+        id: claude
+        if: steps.select.outputs.issue != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          base_branch: ${{ inputs.base_branch || 'main' }}
+          branch_prefix: agent/issue-${{ steps.select.outputs.issue }}-
+          prompt: |
+            REPOSITORY: ${{ github.repository }}
+            ISSUE_NUMBER: ${{ steps.select.outputs.issue }}
+
+            Follow .agent-ops-control/prompts/implement.md exactly.
+            Read the issue with `gh issue view`.
+            Work in the checked-out repository root.
+          claude_args: >-
+            --model ${{ inputs.model || 'sonnet' }}
+            --max-turns 45
+            --allowedTools
+            "Read,Edit,Write,Grep,Glob,Bash(gh issue view:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
+
+      - name: Reject workflow-file changes
+        if: steps.select.outputs.issue != '0'
+        env:
+          BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
+        run: |
+          if git diff --name-only "origin/$BASE_BRANCH...HEAD" |
+            grep -q '^\.github/workflows/'; then
+            echo "::error::The implementation lane may not modify GitHub workflows."
+            exit 1
+          fi
+
+      - name: Open a draft pull request
+        id: pull_request
+        if: steps.select.outputs.issue != '0'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
+          BRANCH: ${{ steps.claude.outputs.branch_name }}
+          ISSUE: ${{ steps.select.outputs.issue }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$BRANCH" ]; then
+            echo "::error::Claude produced no branch."
+            exit 1
+          fi
+          TITLE=$(gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title --jq .title)
+          BODY=$(printf 'Closes #%s\n\nCreated by the subscription-backed implementation lane. Human review and merge are required.' "$ISSUE")
+          URL=$(gh pr create --repo "$TARGET_REPO" --head "$BRANCH" --base "$BASE_BRANCH" \
+            --draft --title "$TITLE" --body "$BODY")
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          gh pr edit "$URL" --repo "$TARGET_REPO" --add-label "agent:review"
+          gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+            --remove-label "agent:ready" --remove-label "agent:implementing"
+          echo "Opened draft PR: $URL"
+
+      - name: Mark failed work as blocked
+        if: failure() && steps.select.outputs.issue != '0' && steps.app_token.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ISSUE: ${{ steps.select.outputs.issue }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+            --remove-label "agent:implementing" --add-label "agent:blocked"
+          gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+            --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."

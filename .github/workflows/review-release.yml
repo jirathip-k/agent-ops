@@ -1,0 +1,115 @@
+name: Agent · Review & Release
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: fable
+        type: string
+  workflow_call:
+    inputs:
+      model:
+        description: Claude subscription model or alias
+        required: false
+        default: fable
+        type: string
+      runner:
+        description: GitHub runner label
+        required: false
+        default: ubuntu-latest
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  review-release:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 40
+    concurrency:
+      group: agent-review-release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      actions: read
+      checks: read
+    steps:
+      - name: Ensure review labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          gh label create "agent:review" --repo "$TARGET_REPO" --force \
+            --color "0e8a16" --description "Awaiting independent agent review"
+          gh label create "agent:approved" --repo "$TARGET_REPO" --force \
+            --color "2cbe4e" --description "Agent review passed; human merge required"
+          gh label create "agent:changes-requested" --repo "$TARGET_REPO" --force \
+            --color "d93f0b" --description "Agent review found blocking changes"
+
+      - name: Select one pull request
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          PR=$(gh pr list --repo "$TARGET_REPO" --state open --label "agent:review" \
+            --limit 100 --json number,createdAt,headRefName \
+            --jq 'sort_by(.createdAt) | .[0].number // 0')
+          if [ "$PR" = "0" ]; then
+            echo "pr=0" >> "$GITHUB_OUTPUT"
+            echo "head=" >> "$GITHUB_OUTPUT"
+            echo "No pull request is waiting for review."
+            exit 0
+          fi
+          HEAD=$(gh pr view "$PR" --repo "$TARGET_REPO" --json headRefName --jq .headRefName)
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "Selected PR: $PR"
+
+      - name: Checkout pull-request branch
+        if: steps.select.outputs.pr != '0'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.select.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout agent prompts
+        if: steps.select.outputs.pr != '0'
+        uses: actions/checkout@v6
+        with:
+          repository: jirathip-k/agent-ops
+          ref: main
+          path: .agent-ops-control
+          sparse-checkout: prompts
+          persist-credentials: false
+
+      - name: Keep control files outside the target diff
+        if: steps.select.outputs.pr != '0'
+        run: echo "/.agent-ops-control/" >> .git/info/exclude
+
+      - name: Review and mark release readiness
+        if: steps.select.outputs.pr != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPOSITORY: ${{ github.repository }}
+            PULL_REQUEST: ${{ steps.select.outputs.pr }}
+
+            Follow .agent-ops-control/prompts/review-release.md exactly.
+            Work in the checked-out pull-request branch.
+          claude_args: >-
+            --model ${{ inputs.model || 'fable' }}
+            --max-turns 30
+            --allowedTools
+            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"

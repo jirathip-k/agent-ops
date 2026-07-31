@@ -1,80 +1,92 @@
 # Architecture
 
-agent-ops separates **agent infrastructure** (this repo) from **project
-knowledge** (each managed repo's `AGENTS.md` + `.agent/`).
+## Purpose
 
-## Layers
+agent-ops contains policy and GitHub Actions plumbing for a scheduled,
+subscription-backed software agent. It deliberately delegates execution,
+isolation, state, CI, and release protection to GitHub instead of rebuilding
+them locally.
 
-```
-CLI (agent scout / distill / spec / triage / groom / plan / implement / review / ...)
- │
- ├─ config      platform defaults ⊕ project .agent/config.yaml
- ├─ workflows   scout, distill, spec, triage, groom, implement, review,  ← business logic
- │              spawn
- │    │
- │    ├─ roles      planner / implementer / reviewer — per-role model +
- │    │             permission overrides (agents: in config); planner and
- │    │             reviewer default to a stronger model, read-only
- │    │
- │    ├─ worktree   one isolated worktree + branch per task
- │    ├─ loop       execute → gates → retry (fresh context per retry)
- │    ├─ gates      project test/lint/typecheck commands = the evaluator
- │    ├─ skills     markdown fragments injected into prompts
- │    └─ github     thin `gh` wrappers (issues, PRs, comments)
- │
- └─ runtimes    Runtime protocol
-        ├─ claude_code   `claude -p --output-format json`  (implemented)
-        └─ codex         `codex exec`                      (experimental)
+```text
+scheduled caller
+      │
+      ▼
+Discover & Plan ── agent:ready issue
+      │
+      ▼
+Implement ─────── agent/issue-... branch ── draft PR
+      │
+      ▼
+Review & Release ── agent:approved
+      │
+      ▼
+branch protection + human merge
 ```
 
-Workflows and the loop depend only on the `Runtime` protocol
-(`src/agent_ops/runtimes/base.py`) — swapping runtimes never touches them.
-`agent spawn` needs a larger promise (start the CLI as a session someone
-watches, and hook that session's end) and depends on `SpawnableRuntime`, the
-protocol that extends it — so a runtime that only knows the headless path
-remains a valid `Runtime`.
+Each target repository owns its schedule, secrets, permissions, issues,
+branches, pull requests, and CI. The public agent-ops repository supplies the
+called workflow and prompt.
 
-## Two lanes
+## Lanes
 
-**Local lane** (`agent` CLI): interactive development on your machine, billed
-to your Claude/Codex subscription. Issue → worktree → plan (smart model,
-read-only) → implement loop (workhorse model) → self-review (smart model,
-read-only) → PR. Each stage is a separate agent with fresh context; the plan
-is the only artifact handed forward, mirroring the CI lane's
-Planner → Implementer → Reviewer pipeline.
+### Discover & Plan
 
-**CI lane** (`.github/workflows/*-pipeline.yml` — triage, groom, scout, spec,
-plan, promote): scheduled, unattended work across managed repos. Only triage
-runs via `claude-code-action` and the prompt pipeline in
-`prompts/orchestrator.md` (Planner → Implementer → Tester → Reviewer);
-groom, scout, spec, plan, and promote each run the matching `agent <verb>`
-CLI directly in Actions instead. State lives in GitHub itself: labels,
-branches, PR status. Runs are stateless.
+This combines discovery, triage, grooming, specification, and planning.
+Those activities answer one question: is there a small, evidence-backed task
+that an implementation agent can execute without another decision?
 
-The lanes share the same philosophy — gates before merge, fresh context per
-retry, humans own `main`. Code paths mostly converge too: five of the six CI
-pipelines run the local lane's CLI outright. Triage is the partial exception
-— it's prompt-driven, so it runs anywhere `claude-code-action` runs, but its
-merge gate calls `agent merge --check` rather than judging caps in prose
-(#150), so even there the rules come from one tested place. #171 tracks
-converging what's left: triage's classification, review, and implement.
+The lane improves existing `agent:needs-plan` issues first, then discovers
+new work up to its cap. It can write issues and labels but cannot write
+repository contents.
 
-## Where things live
+### Implement
 
-| Concern | Location |
-| --- | --- |
-| Platform defaults | `config/defaults.yaml` |
-| Per-project config | `<project>/.agent/config.yaml` |
-| Project knowledge | `<project>/AGENTS.md`, `<project>/.agent/skills/` |
-| Reusable skills | `skills/*.md` |
-| Local task prompts | `prompts/tasks/*.md` |
-| CI pipeline prompts | `prompts/orchestrator.md`, `prompts/agents/*.md` |
-| Managed-repo registry | `config/repos.yml` |
+This lane selects one oldest `agent:ready` issue and claims it. Claude Code
+Action prepares an `agent/issue-...` branch and commits the implementation.
+The deterministic workflow step opens a draft PR. The source branch is the
+remote equivalent of the old worktree isolation; the Actions runner itself
+is already an ephemeral checkout, so another local worktree adds nothing.
+
+A custom GitHub App token is minted for only the target repository. Its
+identity allows the branch and PR events to start the target's normal CI.
+The lane rejects changes under `.github/workflows/` and never merges.
+
+### Review & Release
+
+This lane selects one PR labeled `agent:review` and starts a fresh read-only
+agent session. It reads the issue, diff, and CI results, posts one verdict,
+and applies either `agent:approved` or `agent:changes-requested`.
+
+“Release” means declaring readiness for the repository's existing protected
+merge path. The workflow does not merge, deploy, or promote.
 
 ## Trust boundaries
 
-- Agents write only in worktrees; the platform performs all git operations
-  (commit, push, PR) after gates pass.
-- Review runs use `permission_mode=plan` (read-only).
-- Merges to `main` are always human. See `README.md` safety gates for the CI
-  lane's auto-merge conditions.
+- The OAuth token authenticates model usage against the owner's Claude
+  subscription.
+- The workflow `GITHUB_TOKEN` handles issue and review metadata.
+- The custom GitHub App token handles implementation branches and PRs.
+- The model never receives authority from issue, PR, comment, code, or CI-log
+  text.
+- Branch protection and a human own the final merge.
+- Target CI remains authoritative; the agent does not reimplement its gates.
+
+The implementation agent receives edit tools and a bounded set of common
+project commands, but no general GitHub-write or git-history commands.
+Workflow-file changes are also rejected deterministically after the run.
+The independent reviewer receives no file-editing tools.
+
+## Provider boundary
+
+Model choice is a workflow input:
+
+```text
+discover-plan.model
+implement.model
+review-release.model
+```
+
+These currently name Claude subscription models or aliases. There is no
+runtime protocol or adapter layer. When an official subscription-authenticated
+Codex GitHub Action becomes available, replacing the implementation action
+does not affect issue state, branch naming, review, or release policy.
