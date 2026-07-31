@@ -21,6 +21,7 @@ from agent_ops.runtimes.base import (
     terminate_and_reap,
     wall_clock_timeout_result,
 )
+from agent_ops.runtimes.credentials import environment_for
 from agent_ops.utils import TIMEOUT_RETURNCODE, run
 
 # Claude Code reports these conditions as prose, not as codes, so matching is
@@ -125,12 +126,15 @@ class ClaudeCodeRuntime:
         # underneath) captures everything and returns only at the end — so
         # this path gets a generous wall-clock bound instead of the streaming
         # path's idle timeout.
+        child_env = environment_for(self.name)
+        env_kwargs: dict[str, Any] = {"env": child_env} if child_env is not None else {}
         proc = run(
             cmd,
             cwd=request.cwd,
             input_text=request.prompt,
             check=False,
             timeout=request.run_timeout_seconds,
+            **env_kwargs,
         )
         if proc.returncode == TIMEOUT_RETURNCODE:
             return wall_clock_timeout_result(request.run_timeout_seconds)
@@ -148,6 +152,8 @@ class ClaudeCodeRuntime:
         return write_stop_hook(worktree, command)
 
     def _run_streaming(self, cmd: list[str], request: RunRequest) -> RunResult:
+        child_env = environment_for(self.name)
+        env_kwargs: dict[str, Any] = {"env": child_env} if child_env is not None else {}
         proc = subprocess.Popen(
             cmd,
             cwd=request.cwd,
@@ -160,6 +166,7 @@ class ClaudeCodeRuntime:
             # tool call (e.g. a long Bash invocation) that inherited these
             # same pipes — rather than leaving one running with them open.
             start_new_session=sys.platform != "win32",
+            **env_kwargs,
         )
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
         stdin = proc.stdin

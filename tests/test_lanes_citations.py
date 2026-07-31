@@ -32,6 +32,15 @@ EVOLVE_PIPELINE_LINES = (
 DISTILL_PIPELINE_LINES = (
     (PLATFORM_ROOT / ".github" / "workflows" / "distill-pipeline.yml").read_text().splitlines()
 )
+CLASSIFY_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "classify-pipeline.yml").read_text().splitlines()
+)
+IMPLEMENT_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "implement-pipeline.yml").read_text().splitlines()
+)
+IMPLEMENT_STUB_LINES = (
+    (PLATFORM_ROOT / "stubs" / "managed-repo-implement.yml").read_text().splitlines()
+)
 
 
 def _line(n: int) -> str:
@@ -40,6 +49,15 @@ def _line(n: int) -> str:
 
 def _evolve_pipeline_line(n: int) -> str:
     return EVOLVE_PIPELINE_LINES[n - 1]
+
+
+TRIAGE_PIPELINE_LINES = (
+    (PLATFORM_ROOT / ".github" / "workflows" / "triage-pipeline.yml").read_text().splitlines()
+)
+
+
+def _triage_pipeline_line(n: int) -> str:
+    return TRIAGE_PIPELINE_LINES[n - 1]
 
 
 def test_merge_shell_out_citation_matches_orchestrator() -> None:
@@ -81,6 +99,42 @@ def test_evolve_pipeline_citation_matches_workflow() -> None:
 def test_distill_pipeline_citation_matches_pipeline() -> None:
     assert ".github/workflows/distill-pipeline.yml:132" in LANES
     assert "uv run agent distill" in DISTILL_PIPELINE_LINES[132 - 1]
+
+
+def test_classify_pipeline_citation_matches_pipeline() -> None:
+    assert ".github/workflows/classify-pipeline.yml:118" in LANES
+    assert "uv run agent triage" in CLASSIFY_PIPELINE_LINES[118 - 1]
+
+
+def test_implement_pipeline_citations_match_workflow() -> None:
+    assert ".github/workflows/implement-pipeline.yml:138" in LANES
+    assert 'uv run agent implement "$ISSUE"' in IMPLEMENT_PIPELINE_LINES[138 - 1]
+    assert ".github/workflows/implement-pipeline.yml:109-117" in LANES
+    assert "openai/codex-action@v1" in IMPLEMENT_PIPELINE_LINES[113 - 1]
+    assert "safety-strategy: drop-sudo" in IMPLEMENT_PIPELINE_LINES[117 - 1]
+    assert ".github/workflows/implement-pipeline.yml:123-138" in LANES
+    assert "unset CLAUDE_CODE_OAUTH_TOKEN" in IMPLEMENT_PIPELINE_LINES[136 - 1]
+
+
+def test_implement_stub_citation_matches_required_dispatch_input() -> None:
+    assert "stubs/managed-repo-implement.yml:14-20" in LANES
+    assert "workflow_dispatch:" in IMPLEMENT_STUB_LINES[15 - 1]
+    assert "required: true" in IMPLEMENT_STUB_LINES[19 - 1]
+    assert "type: number" in IMPLEMENT_STUB_LINES[20 - 1]
+
+
+def test_classify_override_citation_matches_orchestrator() -> None:
+    assert "prompts/orchestrator.md:61-63" in LANES
+    assert "Exception: `agent-ready`" in _line(61)
+    assert "It does NOT override `needs-human`," in _line(63)
+
+
+def test_classify_override_citation_matches_triage_pipeline() -> None:
+    assert "triage-pipeline.yml:97-101" in LANES
+    assert "needs-human" in _triage_pipeline_line(97)
+    assert "blocked" in _triage_pipeline_line(97)
+    assert "agent-ready" in _triage_pipeline_line(100)
+    assert "approved-for-agent" in _triage_pipeline_line(100)
 
 
 # --- Python citations: resolved by symbol, not by line number -------------
@@ -230,13 +284,13 @@ def extract_python_citations(text: str) -> list[tuple[str, str]]:
 
 PYTHON_CITATIONS = extract_python_citations(LANES)
 
-# lanes.md cites 27 distinct Python symbols today. If extraction ever yields
+# lanes.md cites 28 distinct Python symbols today. If extraction ever yields
 # fewer, either a citation was silently dropped from the doc or the regex
 # above stopped matching its format -- both are real drift. Raising this
 # number (after adding citations) or lowering it (after deliberately
 # removing some) is an intentional edit to make alongside the doc change,
 # never a quick fix for a test that's gone red.
-_MIN_PYTHON_CITATIONS = 27
+_MIN_PYTHON_CITATIONS = 28
 
 
 def test_python_citation_floor() -> None:

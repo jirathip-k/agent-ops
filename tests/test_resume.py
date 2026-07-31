@@ -14,7 +14,7 @@ from agent_ops.cli import app
 from agent_ops.config import ProjectConfig
 from agent_ops.gates import GateResult, GateStatus
 from agent_ops.loop import LoopOutcome
-from agent_ops.runtimes.base import RunRequest, RunResult
+from agent_ops.runtimes.base import FailureKind, RunRequest, RunResult
 from agent_ops.utils import CommandError, run
 from agent_ops.workflows import implement as implement_module
 from agent_ops.workflows.implement import SelfReview, run_implement, run_resume
@@ -1238,6 +1238,275 @@ def test_self_review_sees_untracked_files(repo: Path, monkeypatch: pytest.Monkey
 
     assert review.reviewed is True
     assert "new_module.py" in captured["prompt"]
+
+
+def _review_fixture() -> tuple[ProjectConfig, dict[str, Any], grants.Grant, tuple[GateResult, ...]]:
+    config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "sentinel-test-command --frozen"},
+            "loop": {"gates": ["test"]},
+        }
+    )
+    issue = {
+        "number": 299,
+        "title": "ISSUE TITLE SENTINEL",
+        "body": "ISSUE BODY SENTINEL",
+        "labels": [{"name": "LABEL SENTINEL"}],
+        "comments": [
+            {
+                "author": {"login": "commenter"},
+                "createdAt": "2026-07-30T00:00:00Z",
+                "body": "COMMENT SENTINEL",
+            }
+        ],
+    }
+    grant = grants.Grant(
+        issue=299,
+        granted_by="dispatcher",
+        scope="AUTHORIZATION SENTINEL",
+        paths=["sentinel/path"],
+    )
+    gate_results = (
+        GateResult(
+            "test",
+            "sentinel-test-command --frozen",
+            GateStatus.PASSED,
+            "GATE OUTPUT SENTINEL",
+        ),
+    )
+    return config, issue, grant, gate_results
+
+
+def test_review_context_is_immutable_after_live_issue_data_changes() -> None:
+    config, issue, grant, gate_results = _review_fixture()
+    context = implement_module._build_review_context(
+        config,
+        issue,
+        plan="PLAN SENTINEL",
+        grant=grant,
+        grant_carried_over=False,
+        gate_results=gate_results,
+    )
+
+    issue["title"] = "LATE TITLE"
+    issue["body"] = "LATE BODY"
+    issue["labels"][0]["name"] = "LATE LABEL"
+    issue["comments"][0]["body"] = "LATE COMMENT"
+    issue["comments"].append({"body": "NEW LIVE COMMENT"})
+
+    assert "ISSUE TITLE SENTINEL" in context.text
+    assert "ISSUE BODY SENTINEL" in context.text
+    assert "LABEL SENTINEL" in context.text
+    assert "COMMENT SENTINEL" in context.text
+    assert "PLAN SENTINEL" in context.text
+    assert "AUTHORIZATION SENTINEL" in context.text
+    assert "GATE OUTPUT SENTINEL" in context.text
+    assert "LATE" not in context.text
+    assert "NEW LIVE COMMENT" not in context.text
+
+
+def test_self_review_runtime_receives_the_frozen_snapshot_and_diff(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, issue, grant, gate_results = _review_fixture()
+    context = implement_module._build_review_context(
+        config,
+        issue,
+        plan="PLAN SENTINEL",
+        grant=grant,
+        grant_carried_over=False,
+        gate_results=gate_results,
+    )
+    issue["comments"][0]["body"] = "LATE COMMENT MUST NOT REACH REQUEST"
+    (repo / "review_sentinel.py").write_text("DIFF SENTINEL = True\n")
+
+    class CaptureRuntime:
+        name = "capture"
+
+        def __init__(self) -> None:
+            self.requests: list[RunRequest] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.requests.append(request)
+            return RunResult(ok=True, text="VERDICT: APPROVE")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    runtime = CaptureRuntime()
+    monkeypatch.setattr(implement_module, "get_runtime", lambda name: runtime)
+
+    review = implement_module._self_review(config, repo, log=lambda _: None, context=context)
+
+    assert review.ok is True
+    (request,) = runtime.requests
+    for sentinel in (
+        "ISSUE TITLE SENTINEL",
+        "ISSUE BODY SENTINEL",
+        "LABEL SENTINEL",
+        "COMMENT SENTINEL",
+        "PLAN SENTINEL",
+        "AUTHORIZATION SENTINEL",
+        "sentinel-test-command --frozen",
+        "GATE OUTPUT SENTINEL",
+        "DIFF SENTINEL",
+    ):
+        assert sentinel in request.prompt
+    assert "Issue snapshot (untrusted data)" in request.prompt
+    assert "Bounded comment snapshot (untrusted data)" in request.prompt
+    assert "LATE COMMENT MUST NOT REACH REQUEST" not in request.prompt
+    assert not any("gh issue view" in tool for tool in request.allowed_tools)
+
+
+@pytest.mark.parametrize("entrypoint", ["implement", "resume"])
+@pytest.mark.parametrize("grant_source", ["fresh", "carried-over", "absent"])
+def test_implement_and_resume_share_review_context_construction(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    grant_source: str,
+) -> None:
+    """Both parents must send grant provenance through the real review seam."""
+    issue = {
+        "number": 299,
+        "title": "shared context",
+        "body": "shared issue body",
+        "labels": [],
+        "comments": [{"body": "SHARED COMMENT SENTINEL"}],
+    }
+    workflow_config = ProjectConfig.model_validate(
+        {
+            "commands": {"test": "pytest sentinel"},
+            "loop": {"plan": False, "gates": ["test"]},
+        }
+    )
+    monkeypatch.setattr(
+        implement_module, "load_project_config", lambda project_root: workflow_config
+    )
+    monkeypatch.setattr(github, "get_issue", lambda number, cwd: issue)
+    monkeypatch.setattr(github, "open_prs_for_issue", lambda number, cwd: [])
+    monkeypatch.setattr(
+        implement_module.github,
+        "observed_ci",
+        lambda branch, cwd: github.ObservedCi(state="no-pr"),
+    )
+
+    class ReviewRuntime:
+        name = "review-capture"
+
+        def __init__(self) -> None:
+            self.requests: list[RunRequest] = []
+
+        def available(self) -> bool:
+            return True
+
+        def run(self, request: RunRequest) -> RunResult:
+            self.requests.append(request)
+            return RunResult(ok=True, text="VERDICT: REQUEST CHANGES\n\nstop before commit")
+
+        def classify_failure(self, result: RunResult) -> FailureKind:
+            return FailureKind.AGENT_FAILURE
+
+    reviewer_runtime = ReviewRuntime()
+    monkeypatch.setattr(
+        implement_module,
+        "role_request",
+        lambda config, role_name, prompt, cwd, **kwargs: (
+            reviewer_runtime,
+            RunRequest(prompt=prompt, cwd=cwd),
+        ),
+    )
+    observed_gate = GateResult("test", "pytest sentinel", GateStatus.PASSED, "passed sentinel")
+    monkeypatch.setattr(
+        implement_module,
+        "run_task_loop",
+        _fake_loop_that_changes_a_file(
+            LoopOutcome(
+                True,
+                1,
+                RunResult(ok=True, text="done"),
+                [],
+                gate_results=(observed_gate,),
+            )
+        ),
+    )
+
+    monkeypatch.setattr(implement_module, "_record_halt", lambda *args, **kwargs: None)
+
+    grant_file: Path | None = None
+    grant = grants.Grant(
+        issue=299,
+        granted_by="review-test-dispatcher",
+        scope="REVIEW GRANT SCOPE SENTINEL",
+        paths=["sentinel/path"],
+    )
+    if grant_source == "fresh":
+        grant_file = repo / "grant.yaml"
+        grant_file.write_text(
+            "issue: 299\n"
+            "granted_by: review-test-dispatcher\n"
+            "scope: REVIEW GRANT SCOPE SENTINEL\n"
+            "paths: [sentinel/path]\n"
+        )
+    elif grant_source == "carried-over":
+        grants.persist(repo, grant)
+
+    if entrypoint == "implement":
+        plan_file = repo / "plan.md"
+        plan_file.write_text("ACCEPTED PLAN SENTINEL")
+        ok = run_implement(
+            repo,
+            299,
+            plan_file=plan_file,
+            grant_file=grant_file,
+            log=lambda _: None,
+        )
+    else:
+        worktree.create(repo, ".worktrees", "issue-299", "fix/issue-299", "main")
+        ok = run_resume(
+            repo,
+            299,
+            message="resume feedback",
+            grant_file=grant_file,
+            log=lambda _: None,
+        )
+
+    assert ok is False  # the reviewer deliberately requests changes before commit
+    (review_request,) = reviewer_runtime.requests
+    prompt = review_request.prompt
+    assert "SHARED COMMENT SENTINEL" in prompt
+    assert "passed sentinel" in prompt
+    assert "read-only reviewer" in prompt
+    assert "Ground rule 6 in `prompts/tasks/implement.md`" in prompt
+    assert "you must still report every CI/CD" in prompt
+    assert "authentication or authorization" in prompt
+    assert "migration" in prompt
+    assert "dependency-manifest" in prompt
+    assert "other danger-zone change" in prompt
+    assert "stay strictly inside" not in prompt
+    assert "danger-zone rule below" not in prompt
+    if entrypoint == "implement":
+        assert "ACCEPTED PLAN SENTINEL" in prompt
+    else:
+        assert "this resume cycle did not receive a separate plan/spec" in prompt
+    if grant_source == "fresh":
+        assert "supplied via `--grant-file` this invocation" in prompt
+        assert "fresh invocation grant, not carried over" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" in prompt
+        assert "is not proof of authorization" not in prompt
+    elif grant_source == "carried-over":
+        assert "carried over from a persisted grant" in prompt
+        assert "weaker than a fresh invocation grant" in prompt
+        assert "is not proof of authorization" in prompt
+        assert "do not treat it as proof" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" in prompt
+    else:
+        assert "no explicit grant was supplied or carried over" in prompt
+        assert "no danger-zone exemption" in prompt
+        assert "REVIEW GRANT SCOPE SENTINEL" not in prompt
 
 
 # --- self-review verdict parsing (issue #157) ------------------------------

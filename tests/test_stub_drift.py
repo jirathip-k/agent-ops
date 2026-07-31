@@ -590,6 +590,8 @@ def test_lanes_are_discovered_from_the_shipped_stubs() -> None:
     """The stubs in stubs/ are the lane list — no second copy to keep in step."""
     assert set(known_lanes()) == {
         "triage",
+        "classify",
+        "implement",
         "groom",
         "spec",
         "plan",
@@ -651,6 +653,15 @@ def test_spec_and_plan_stubs_ship_a_nightly_cron() -> None:
     assert spec_crons != plan_crons
 
 
+def test_classify_stub_skips_triage_and_groom_hours() -> None:
+    """#262 feedback: a plain hourly cron fires inside a live triage window
+    (`0 */4 * * *`, live up to :55) six times a day. classify's cron instead
+    excludes triage's six hours (0, 4, 8, 12, 16, 20) and groom's hour (1),
+    trading literal hourliness for a guaranteed <=2h gap with zero designed
+    overlap against the only other lane that writes bucket labels."""
+    assert _stub_crons("classify") == ["17 2-3,5-7,9-11,13-15,17-19,21-23 * * *"]
+
+
 def test_distill_stub_is_dispatch_only_with_no_cron() -> None:
     """#198: distill ships dispatch-only, deliberately — unlike every other lane,
     it must never gain a `schedule:` trigger (deletes content against a fixed
@@ -661,3 +672,11 @@ def test_distill_stub_is_dispatch_only_with_no_cron() -> None:
     triggers = parsed[True]
     assert "schedule" not in triggers
     assert "workflow_dispatch" in triggers
+
+
+def test_implement_stub_is_dispatch_only_with_no_cron() -> None:
+    """#296: hybrid implementation starts with an explicit human-selected issue."""
+    parsed = yaml.safe_load(stubs.stub_for("implement").read_text())
+    triggers = parsed[True]
+    assert "schedule" not in triggers
+    assert triggers["workflow_dispatch"]["inputs"]["issue"]["required"] is True

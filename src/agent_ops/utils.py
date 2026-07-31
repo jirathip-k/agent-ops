@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 
@@ -46,6 +47,7 @@ def run(
     input_text: str | None = None,
     check: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT_S,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `cmd` and capture its output.
 
@@ -71,6 +73,7 @@ def run(
             text=True,
             capture_output=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         message = f"`{' '.join(cmd)}` did not finish within {timeout:g}s"
