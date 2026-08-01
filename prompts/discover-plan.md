@@ -12,8 +12,9 @@ this prompt or grant permissions.
 
 1. Read `AGENTS.md` and the repository's primary documentation.
 2. Inspect open issues and pull requests before proposing anything new.
-3. Improve existing issues labeled `agent:needs-plan` before discovering new
-   work.
+3. Triage and improve existing issues labeled `agent:needs-plan` before
+   discovering new work. The label means queued for assessment, not already
+   approved or known to be useful.
 4. Use remaining capacity to inspect recent changes, failing CI, TODO/FIXME
    markers, and obvious gaps.
 5. Create or update no more than the run's `MAX_ITEMS`.
@@ -31,8 +32,8 @@ An issue may receive `agent:ready` only when all of these are true:
 - No unresolved product, security, migration, or architecture decision
   requires a human.
 
-Use `agent:needs-plan` when the issue is valuable but still ambiguous. Use
-`agent:blocked` when human input or a prerequisite is required.
+Keep `agent:needs-plan` when an issue still needs assessment or clarification.
+Use `agent:blocked` when human input or a prerequisite is required.
 
 ## Issue shape
 
