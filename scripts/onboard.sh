@@ -137,22 +137,58 @@ for repo in "${targets[@]}"; do
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$work/repo"
-  (
+
+  if ! git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$work/repo"; then
+    echo "  ERROR: failed to clone $repo"
+    status=1
+    rm -rf "$work"
+    trap - EXIT
+    continue
+  fi
+
+  # The rest of the apply for this repository runs as one subshell so that any
+  # failing step (a bad clone state, an unmatched sed pattern, a rejected push)
+  # exits that subshell instead of the whole script, and is caught below.
+  if ! (
     cd "$work/repo"
     git switch -qc ci/agent-ops-"$REF"
     mkdir -p .github/workflows
     for wf in "${drop[@]:-}"; do
       [ -n "$wf" ] && git rm -q ".github/workflows/$wf"
     done
-    sed -e "s|cron: \"17 \\*/6 \\* \\* \\*\"|cron: \"$(((base + 40) % 60)) */6 * * *\"|" \
+
+    # sed exits 0 whether or not it substituted anything, so a template whose
+    # literal cron or base_branch drifted from these patterns would otherwise
+    # render an unstaggered caller and report success. Verify the exact
+    # literals the sed patterns below expect are still present in the source
+    # templates before trusting the substitution.
+    if ! grep -qF 'cron: "17 */6 * * *"' "$TEMPLATES/agent-discover-plan.yml" ||
+      ! grep -qF 'cron: "37 * * * *"' "$TEMPLATES/agent-implement.yml" ||
+      ! grep -qF 'base_branch: main' "$TEMPLATES/agent-implement.yml" ||
+      ! grep -qF 'cron: "7 * * * *"' "$TEMPLATES/agent-review-release.yml"; then
+      echo "  ERROR: a template's cron or base_branch literal no longer matches onboard.sh's sed patterns; refusing to render an unstaggered caller" >&2
+      exit 1
+    fi
+
+    discover_cron="$(((base + 40) % 60)) */6 * * *"
+    implement_cron="$base * * * *"
+    review_cron="$(((base + 20) % 60)) * * * *"
+
+    sed -e "s|cron: \"17 \\*/6 \\* \\* \\*\"|cron: \"$discover_cron\"|" \
       "$TEMPLATES/agent-discover-plan.yml" > .github/workflows/agent-discover-plan.yml
-    sed -e "s|cron: \"37 \\* \\* \\* \\*\"|cron: \"$base * * * *\"|" \
+    sed -e "s|cron: \"37 \\* \\* \\* \\*\"|cron: \"$implement_cron\"|" \
       -e "s|base_branch: main|base_branch: $branch|" \
       "$TEMPLATES/agent-implement.yml" > .github/workflows/agent-implement.yml
-    sed -e "s|cron: \"7 \\* \\* \\* \\*\"|cron: \"$(((base + 20) % 60)) * * * *\"|" \
+    sed -e "s|cron: \"7 \\* \\* \\* \\*\"|cron: \"$review_cron\"|" \
       "$TEMPLATES/agent-review-release.yml" > .github/workflows/agent-review-release.yml
+
     git add .github/workflows
+
+    if git diff --cached --quiet; then
+      echo "  -> already provisioned; no changes needed"
+      exit 0
+    fi
+
     git commit -q -m "ci: adopt the agent-ops $REF lifecycle lanes"
 
     if [ "$protected" = true ]; then
@@ -164,7 +200,11 @@ for repo in "${targets[@]}"; do
       git push -q origin "HEAD:$branch"
       echo "  -> pushed directly to $branch"
     fi
-  )
+  ); then
+    echo "  ERROR: apply failed for $repo"
+    status=1
+  fi
+
   rm -rf "$work"
   trap - EXIT
 done
