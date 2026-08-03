@@ -11,7 +11,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    uses: jirathip-k/agent-ops/.github/workflows/implement.yml@main
+    uses: jirathip-k/agent-ops/.github/workflows/implement.yml@v1
     with:
       model: sonnet
       base_branch: main

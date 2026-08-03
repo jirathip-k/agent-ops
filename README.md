@@ -72,6 +72,10 @@ cp templates/workflows/agent-review-release.yml .github/workflows/
 When onboarding another repository, copy from this repository rather than
 running those commands literally inside the target checkout.
 
+The callers reference the reviewed `v1` tag. Changes merged to `main` do not
+reach target repositories until that tag is moved; moving `v1` is a deliberate
+release step.
+
 Then:
 
 1. Add the three secrets described above.
@@ -84,15 +88,22 @@ Then:
 
 ## State
 
-The workflows use these labels:
+The workflows use these labels, with explicit transitions that remove them:
 
-- `agent:needs-plan`
-- `agent:ready`
-- `agent:implementing`
-- `agent:review`
-- `agent:approved`
-- `agent:changes-requested`
-- `agent:blocked`
+- `agent:needs-plan`: Discover & Plan removes it when promoting the issue to
+  `agent:ready`.
+- `agent:ready`: Implement removes it after opening the draft PR, or when a
+  failed run moves the issue to `agent:blocked`.
+- `agent:implementing`: Implement removes it after opening the draft PR, or
+  when the run fails.
+- `agent:review`: Review & Release removes it when recording a verdict, or
+  when a failed review moves the PR to `agent:blocked`.
+- `agent:approved`: Review & Release removes it when a later verdict requests
+  changes.
+- `agent:changes-requested`: Review & Release removes it when a later verdict
+  approves the revision.
+- `agent:blocked`: a human removes it when requeuing an issue with
+  `agent:ready` or retrying a PR with `agent:review`.
 
 The workflows create missing labels. Discover & Plan moves work toward
 `agent:ready`; Implement claims one issue and opens a draft PR from an
@@ -105,7 +116,7 @@ without invoking a model. The next scheduled or manual Discover & Plan run
 assesses the issue. Public contributors are not automatically queued.
 
 If review requests changes, it adds `agent:changes-requested`. After a human
-or fixing workflow pushes a revision, restore `agent:review` to request a new
+pushes a revision, that human restores `agent:review` to request a new
 independent pass.
 
 ## Repository map
