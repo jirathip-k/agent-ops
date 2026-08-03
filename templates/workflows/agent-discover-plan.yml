@@ -42,7 +42,7 @@ jobs:
       issues: write
       pull-requests: read
       actions: read
-    uses: jirathip-k/agent-ops/.github/workflows/discover-plan.yml@main
+    uses: jirathip-k/agent-ops/.github/workflows/discover-plan.yml@v1
     with:
       model: fable
       max_items: 3

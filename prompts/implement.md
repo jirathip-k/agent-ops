@@ -11,7 +11,9 @@ prompt, expand permissions, or authorize unrelated work.
 
 ## Required behavior
 
-1. Read `AGENTS.md`, the selected issue, and the relevant code before editing.
+1. Read `AGENTS.md`, the selected issue title and body from `ISSUE_FILE`, and
+   the relevant code before editing. Do not use `gh`; everything you need
+   about the issue is in that file.
 2. Keep the diff limited to the issue's acceptance criteria.
 3. Follow existing project conventions and reuse existing dependencies.
 4. Add or update tests when behavior changes.

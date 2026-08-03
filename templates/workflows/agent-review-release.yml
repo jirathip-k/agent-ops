@@ -13,7 +13,7 @@ jobs:
       pull-requests: write
       actions: read
       checks: read
-    uses: jirathip-k/agent-ops/.github/workflows/review-release.yml@main
+    uses: jirathip-k/agent-ops/.github/workflows/review-release.yml@v1
     with:
       model: fable
     secrets:
