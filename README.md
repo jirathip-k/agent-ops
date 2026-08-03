@@ -60,17 +60,24 @@ reusable workflow across unrelated owners. If the control repository must be
 private, keep one copy per owner or copy the three complete workflows into
 each target repository.
 
-Copy the callers:
+Run the onboarding script from a checkout of this repository. It reports a
+plan and changes nothing until you pass `--apply`:
 
 ```sh
-mkdir -p .github/workflows
-cp templates/workflows/agent-discover-plan.yml .github/workflows/
-cp templates/workflows/agent-implement.yml .github/workflows/
-cp templates/workflows/agent-review-release.yml .github/workflows/
+scripts/onboard.sh owner/repo
+scripts/onboard.sh --apply owner/repo
 ```
 
-When onboarding another repository, copy from this repository rather than
-running those commands literally inside the target checkout.
+It resolves the target's default branch and sets `base_branch` to match,
+reports which of the three secrets are missing and refuses to apply until they
+exist, removes callers left over from an earlier agent-ops architecture,
+staggers the schedules so several targets do not open Claude sessions on the
+same minute, and opens a pull request when the default branch is protected or
+pushes directly when it is not.
+
+To do it by hand instead, copy the three files in `templates/workflows/` into
+the target's `.github/workflows/`, and set `base_branch` in the implement
+caller to the target's default branch.
 
 The callers reference the reviewed `v1` tag. Changes merged to `main` do not
 reach target repositories until that tag is moved; moving `v1` is a deliberate

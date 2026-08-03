@@ -1,8 +1,12 @@
 # AGENTS.md
 
 agent-ops is a small, public library of reusable GitHub Actions workflows. It
-has no application, package, CLI, local runtime, worktree manager, or memory
-store.
+has no application, package, local runtime, worktree manager, or memory store.
+
+The single exception is `scripts/onboard.sh`, which provisions target
+repositories. It is operator tooling: a human runs it by hand, no workflow or
+agent invokes it, and it holds no state. Do not grow it into a runtime, and do
+not add a second script without the owner deciding to widen this exception.
 
 ## Architecture
 
@@ -39,6 +43,7 @@ Run:
 
 ```sh
 actionlint -color -shellcheck= .github/workflows/*.yml templates/workflows/*.yml
+shellcheck scripts/onboard.sh
 ```
 
 Also inspect the rendered diff for unintended permissions, secret exposure,
