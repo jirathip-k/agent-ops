@@ -86,6 +86,7 @@ jobs:
             --color "2cbe4e" --description "Agent review passed; human merge required"
 
       - name: Discover and plan
+        id: claude
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,3 +104,18 @@ jobs:
             --max-turns 30
             --allowedTools
             "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(gh issue:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"
+
+      - name: Print Claude execution result
+        if: failure() || cancelled()
+        continue-on-error: true
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          log_path="${EXECUTION_FILE:-$RUNNER_TEMP/claude-execution-output.json}"
+          if [[ ! -f "$log_path" ]]; then
+            echo "Claude execution log not found at $log_path"
+            exit 0
+          fi
+
+          echo "Final Claude execution result:"
+          jq -s '[.[] | if type == "array" then .[] else . end | select(.type == "result")] | last' "$log_path"
