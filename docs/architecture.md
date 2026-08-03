@@ -62,8 +62,14 @@ This lane selects one PR labeled `agent:review` and starts a fresh read-only
 agent session. It reads the issue, diff, and CI results, posts one verdict,
 and applies either `agent:approved` or `agent:changes-requested`.
 
+A deterministic step then takes an approved pull request out of draft. It
+reads the label the reviewer applied rather than asking the model, so a
+`REQUEST CHANGES` verdict cannot lift the draft.
+
 “Release” means declaring readiness for the repository's existing protected
-merge path. The workflow does not merge, deploy, or promote.
+merge path. Lifting the draft is part of declaring that readiness; the
+workflow does not merge, deploy, or promote, and branch protection and a
+human still own the merge.
 
 ## Trust boundaries
 

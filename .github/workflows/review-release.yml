@@ -127,6 +127,38 @@ jobs:
             --allowedTools
             "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"
 
+      - name: Mark an approved pull request ready for review
+        if: steps.select.outputs.pr != '0'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.select.outputs.pr }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          # Lifting the draft is a readiness signal, not a merge: branch
+          # protection and a human still own that. Deriving it from the label
+          # the reviewer applied keeps it out of the model's hands, so a
+          # REQUEST CHANGES verdict can never lift the draft.
+          STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
+            --jq '.isDraft, ([.labels[].name] | join(" "))')
+          DRAFT=$(printf '%s\n' "$STATE" | head -1)
+          LABELS=$(printf '%s\n' "$STATE" | tail -1)
+
+          if [ "$DRAFT" != "true" ]; then
+            echo "Pull request $PR is already out of draft."
+            exit 0
+          fi
+          case " $LABELS " in
+            *" agent:approved "*) ;;
+            *)
+              echo "Pull request $PR is not approved; leaving it as a draft."
+              exit 0
+              ;;
+          esac
+
+          gh pr ready "$PR" --repo "$TARGET_REPO"
+          echo "Marked pull request $PR ready for review; a human owns the merge."
+
       - name: Mark failed review as blocked
         if: >-
           (failure() || cancelled()) &&

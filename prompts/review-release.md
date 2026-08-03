@@ -25,6 +25,9 @@ For `APPROVE`, remove `agent:review` and `agent:changes-requested`, then add
 `agent:approved`, then add `agent:changes-requested`. A human owns the
 revision and must restore `agent:review` after pushing new commits.
 
+Do not take the pull request out of draft yourself. A deterministic workflow
+step lifts the draft when, and only when, `agent:approved` is present.
+
 Do not edit files, commit, push, create branches, submit a formal GitHub
 approval, or merge. `agent:approved` means ready for a human to make the
 release decision; humans and branch protection own the merge.

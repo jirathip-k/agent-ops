@@ -107,8 +107,8 @@ The workflows use these labels, with explicit transitions that remove them:
 
 The workflows create missing labels. Discover & Plan moves work toward
 `agent:ready`; Implement claims one issue and opens a draft PR from an
-`agent/issue-...` branch; Review & Release performs a fresh independent pass.
-Only a human merges.
+`agent/issue-...` branch; Review & Release performs a fresh independent pass
+and takes an approved pull request out of draft. Only a human merges.
 
 The Discover & Plan caller also performs deterministic intake. When an issue
 is opened by an owner, member, or collaborator, it adds `agent:needs-plan`
