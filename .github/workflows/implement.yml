@@ -78,11 +78,33 @@ jobs:
             --jq 'sort_by(.createdAt) | .[0].number // 0')
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
           echo "Selected issue: $ISSUE"
+          if [ "$ISSUE" != "0" ]; then
+            echo "Selected issue: #$ISSUE" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # An idle lane must stay green, so a transient API error here must
+            # not fail the step; report an unknown count instead.
+            READY=$(gh issue list --repo "$TARGET_REPO" --state open \
+              --label "agent:ready" --json number --jq 'length' || echo "?")
+            IMPLEMENTING=$(gh issue list --repo "$TARGET_REPO" --state open \
+              --label "agent:implementing" --json number --jq 'length' || echo "?")
+            BLOCKED=$(gh issue list --repo "$TARGET_REPO" --state open \
+              --label "agent:blocked" --json number --jq 'length' || echo "?")
+            NEEDS_PLAN=$(gh issue list --repo "$TARGET_REPO" --state open \
+              --label "agent:needs-plan" --json number --jq 'length' || echo "?")
+            {
+              echo "No issue was selectable."
+              echo ""
+              echo "- agent:ready: $READY"
+              echo "- agent:implementing: $IMPLEMENTING"
+              echo "- agent:blocked: $BLOCKED"
+              echo "- agent:needs-plan: $NEEDS_PLAN"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Mint a target-scoped GitHub App token
         id: app_token
         if: steps.select.outputs.issue != '0'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
@@ -91,7 +113,7 @@ jobs:
 
       - name: Checkout target repository
         if: steps.select.outputs.issue != '0'
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.base_branch || 'main' }}
           fetch-depth: 0
@@ -99,10 +121,10 @@ jobs:
 
       - name: Checkout agent prompts
         if: steps.select.outputs.issue != '0'
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jirathip-k/agent-ops
-          ref: main
+          ref: v1
           path: .agent-ops-control
           sparse-checkout: prompts
           persist-credentials: false
@@ -123,12 +145,21 @@ jobs:
           gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
             --body "Implementation started in workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
 
+      - name: Fetch the selected issue
+        if: steps.select.outputs.issue != '0'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ISSUE: ${{ steps.select.outputs.issue }}
+          TARGET_REPO: ${{ github.repository }}
+          ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
+        run: |
+          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body \
+            --jq '"# " + .title + "\n\n" + (.body // "")' > "$ISSUE_FILE"
+
       - name: Implement the selected issue
         id: claude
         if: steps.select.outputs.issue != '0'
-        uses: anthropics/claude-code-action@v1
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app_token.outputs.token }}
@@ -137,15 +168,16 @@ jobs:
           prompt: |
             REPOSITORY: ${{ github.repository }}
             ISSUE_NUMBER: ${{ steps.select.outputs.issue }}
+            ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
 
             Follow .agent-ops-control/prompts/implement.md exactly.
-            Read the issue with `gh issue view`.
+            Read the issue from the file at ISSUE_FILE.
             Work in the checked-out repository root.
           claude_args: >-
             --model ${{ inputs.model || 'sonnet' }}
             --max-turns 45
             --allowedTools
-            "Read,Edit,Write,Grep,Glob,Bash(gh issue view:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
+            "Read,Edit,Write,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
 
       - name: Stage implementation changes
         id: stage

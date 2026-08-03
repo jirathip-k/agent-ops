@@ -52,9 +52,9 @@ Actions runner itself is already an ephemeral checkout, so another local
 worktree adds nothing.
 
 A custom GitHub App token is minted for only the target repository. Its
-identity allows the branch and PR events to start the target's normal CI.
-The lane rejects changes under `.github/workflows/` and `.github/actions/`,
-and never merges.
+identity allows deterministic workflow steps to create branches and PRs whose
+events start the target's normal CI. The lane rejects changes under
+`.github/workflows/` and `.github/actions/`, and never merges.
 
 ### Review & Release
 
@@ -67,17 +67,26 @@ merge path. The workflow does not merge, deploy, or promote.
 
 ## Trust boundaries
 
-- The OAuth token authenticates model usage against the owner's Claude
-  subscription.
+- The implementation runner is trusted with the Claude subscription token.
+  The action places that token in the agent's environment for model
+  authentication, so it cannot be withheld from the agent.
 - The workflow `GITHUB_TOKEN` handles issue and review metadata.
-- The custom GitHub App token handles implementation branches and PRs.
+- The custom GitHub App token handles implementation branches and PRs. It is
+  also reachable by the implementation agent: `claude-code-action` assigns its
+  `github_token` input to `GH_TOKEN` in the agent's own process environment,
+  and the checkout persists it in git credentials. Removing the token from the
+  workflow step's `env:` does not withhold it. The implementation runner is
+  therefore trusted with both tokens.
 - The model never receives authority from issue, PR, comment, code, or CI-log
   text.
 - Branch protection and a human own the final merge.
 - Target CI remains authoritative; the agent does not reimplement its gates.
 
-The implementation agent receives edit tools and a bounded set of common
-project commands, but no general GitHub-write or git-history commands.
+The implementation agent receives edit tools and an allowlist of common
+project commands. Entries such as `npx`, `python`, and `make` are general
+shell escapes, so this allowlist is a guardrail against casual scope creep,
+not a security boundary. `gh` is not on the allowlist and the issue text is
+supplied as a file, but neither fact isolates the agent from the tokens above.
 Changes under `.github/workflows/` and `.github/actions/` are rejected
 deterministically after the run and before anything is pushed, against both
 the staged tree and any commit a project command made on its own.
