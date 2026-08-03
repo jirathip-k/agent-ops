@@ -8,14 +8,14 @@ on:
       model:
         description: Claude subscription model or alias
         required: false
-        default: fable
+        default: opus
         type: string
   workflow_call:
     inputs:
       model:
         description: Claude subscription model or alias
         required: false
-        default: fable
+        default: opus
         type: string
       runner:
         description: GitHub runner label
@@ -121,7 +121,7 @@ jobs:
             Follow .agent-ops-control/prompts/review-release.md exactly.
             Work in the checked-out pull-request branch.
           claude_args: >-
-            --model ${{ inputs.model || 'fable' }}
+            --model ${{ inputs.model || 'opus' }}
             --max-turns 30
             --setting-sources user
             --allowedTools
