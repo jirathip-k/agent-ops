@@ -15,7 +15,7 @@ Discover & Plan → Implement → Review & Release → human merge
 | --- | --- | --- | --- |
 | Discover & Plan | Repository signals and incomplete issues | A deduplicated `agent:ready` issue | `fable` |
 | Implement | Oldest `agent:ready` issue | A separate branch and draft PR | `sonnet` |
-| Review & Release | Oldest PR labeled `agent:review` | `agent:approved` or `agent:changes-requested` | `fable` |
+| Review & Release | Oldest PR labeled `agent:review` | `agent:approved` or `agent:changes-requested` | `opus` |
 
 There is no distill, evolve, staging, promotion, auto-merge, local lane, or
 secondary database.
