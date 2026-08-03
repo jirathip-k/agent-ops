@@ -133,7 +133,7 @@ docs/architecture.md state and trust boundaries
 There is no build or dependency installation. Validate workflow syntax with:
 
 ```sh
-actionlint -color -shellcheck=
+actionlint -color -shellcheck= .github/workflows/*.yml templates/workflows/*.yml
 ```
 
 Workflow and prompt changes affect unattended agents and must be reviewed by

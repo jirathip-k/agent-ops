@@ -38,7 +38,7 @@ promotion, auto-merge, or local lane.
 Run:
 
 ```sh
-actionlint -color -shellcheck=
+actionlint -color -shellcheck= .github/workflows/*.yml templates/workflows/*.yml
 ```
 
 Also inspect the rendered diff for unintended permissions, secret exposure,
