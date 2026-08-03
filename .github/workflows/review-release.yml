@@ -61,33 +61,43 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
         run: |
           PR=$(gh pr list --repo "$TARGET_REPO" --state open --label "agent:review" \
-            --limit 100 --json number,createdAt,headRefName \
+            --limit 100 --json number,createdAt \
             --jq 'sort_by(.createdAt) | .[0].number // 0')
           if [ "$PR" = "0" ]; then
             echo "pr=0" >> "$GITHUB_OUTPUT"
-            echo "head=" >> "$GITHUB_OUTPUT"
             echo "No pull request is waiting for review."
+            {
+              echo "## Review & Release"
+              echo
+              echo "No pull request is waiting for review."
+              echo
+              echo "Open pull requests by lifecycle label:"
+              for LABEL in agent:review agent:approved agent:changes-requested agent:blocked; do
+                COUNT=$(gh pr list --repo "$TARGET_REPO" --state open --label "$LABEL" \
+                  --json number --jq 'length')
+                echo "- \`$LABEL\`: $COUNT"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          HEAD=$(gh pr view "$PR" --repo "$TARGET_REPO" --json headRefName --jq .headRefName)
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "Selected PR: $PR"
+          echo "Selected pull request: #$PR" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout pull-request branch
         if: steps.select.outputs.pr != '0'
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.select.outputs.head }}
+          ref: refs/pull/${{ steps.select.outputs.pr }}/head
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout agent prompts
         if: steps.select.outputs.pr != '0'
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jirathip-k/agent-ops
-          ref: main
+          ref: v1
           path: .agent-ops-control
           sparse-checkout: prompts
           persist-credentials: false
@@ -98,7 +108,7 @@ jobs:
 
       - name: Review and mark release readiness
         if: steps.select.outputs.pr != '0'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         env:
           GH_TOKEN: ${{ github.token }}
         with:
@@ -113,6 +123,7 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model || 'fable' }}
             --max-turns 30
+            --setting-sources user
             --allowedTools
             "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"
 
