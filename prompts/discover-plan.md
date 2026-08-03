@@ -33,7 +33,9 @@ An issue may receive `agent:ready` only when all of these are true:
   requires a human.
 
 Keep `agent:needs-plan` when an issue still needs assessment or clarification.
-Use `agent:blocked` when human input or a prerequisite is required.
+When promoting an issue to `agent:ready`, remove `agent:needs-plan`; the two
+labels are mutually exclusive. Use `agent:blocked` when human input or a
+prerequisite is required.
 
 ## Issue shape
 
