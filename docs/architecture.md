@@ -44,14 +44,17 @@ contents.
 ### Implement
 
 This lane selects one oldest `agent:ready` issue and claims it. Claude Code
-Action prepares an `agent/issue-...` branch and commits the implementation.
-The deterministic workflow step opens a draft PR. The source branch is the
-remote equivalent of the old worktree isolation; the Actions runner itself
-is already an ephemeral checkout, so another local worktree adds nothing.
+Action runs in agent mode and only edits the working tree; it creates no
+branch and no commit. Deterministic workflow steps then stage the result on
+an `agent/issue-...` branch, gate it, commit, push, and open a draft PR. The
+source branch is the remote equivalent of the old worktree isolation; the
+Actions runner itself is already an ephemeral checkout, so another local
+worktree adds nothing.
 
 A custom GitHub App token is minted for only the target repository. Its
 identity allows the branch and PR events to start the target's normal CI.
-The lane rejects changes under `.github/workflows/` and never merges.
+The lane rejects changes under `.github/workflows/` and `.github/actions/`,
+and never merges.
 
 ### Review & Release
 
@@ -75,7 +78,9 @@ merge path. The workflow does not merge, deploy, or promote.
 
 The implementation agent receives edit tools and a bounded set of common
 project commands, but no general GitHub-write or git-history commands.
-Workflow-file changes are also rejected deterministically after the run.
+Changes under `.github/workflows/` and `.github/actions/` are rejected
+deterministically after the run and before anything is pushed, against both
+the staged tree and any commit a project command made on its own.
 The independent reviewer receives no file-editing tools.
 
 ## Provider boundary

@@ -147,16 +147,67 @@ jobs:
             --allowedTools
             "Read,Edit,Write,Grep,Glob,Bash(gh issue view:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
 
-      - name: Reject workflow-file changes
+      - name: Stage implementation changes
+        id: stage
+        if: steps.select.outputs.issue != '0'
+        env:
+          ISSUE: ${{ steps.select.outputs.issue }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "::error::Claude changed nothing."
+            exit 1
+          fi
+          BRANCH="agent/issue-$ISSUE-$RUN_ID-$RUN_ATTEMPT"
+          git switch -c "$BRANCH"
+          git config user.name "agent-ops[bot]"
+          git config user.email "agent-ops[bot]@users.noreply.github.com"
+          git add --all
+          STAGED=$(git diff --cached --name-only)
+          if printf '%s\n' "$STAGED" | grep -q '^\.agent-ops-control/'; then
+            echo "::error::Control-repository files were staged; refusing to publish."
+            exit 1
+          fi
+          echo "Staged for publication:"
+          printf '%s\n' "$STAGED"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Reject workflow and action changes
         if: steps.select.outputs.issue != '0'
         env:
           BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
         run: |
-          if git diff --name-only "origin/$BASE_BRANCH...HEAD" |
-            grep -q '^\.github/workflows/'; then
-            echo "::error::The implementation lane may not modify GitHub workflows."
+          # Fail closed: if the base ref is missing the comparison below would
+          # silently find nothing, so verify it before trusting the result.
+          git rev-parse --verify --quiet "origin/$BASE_BRANCH" > /dev/null
+
+          # Inspect both what will be committed and anything a project command
+          # committed on its own; either path would otherwise reach the remote.
+          CHANGED=$(
+            git diff --cached --name-only
+            git diff --name-only "origin/$BASE_BRANCH...HEAD"
+          )
+          REJECTED=$(printf '%s\n' "$CHANGED" |
+            grep -E '^\.github/(workflows|actions)/' || true)
+          if [ -n "$REJECTED" ]; then
+            echo "::error::The implementation lane may not modify GitHub workflows or actions."
+            printf '%s\n' "$REJECTED"
             exit 1
           fi
+
+      - name: Publish implementation branch
+        id: publish
+        if: steps.select.outputs.issue != '0'
+        env:
+          BRANCH: ${{ steps.stage.outputs.branch }}
+          ISSUE: ${{ steps.select.outputs.issue }}
+        run: |
+          # Target repositories may install commit hooks as a side effect of the
+          # validation commands Claude is asked to run; they must not gate the lane.
+          git commit --no-verify -m "agent: implement issue #$ISSUE"
+          git push --set-upstream origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Open a draft pull request
         id: pull_request
@@ -164,7 +215,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
-          BRANCH: ${{ steps.claude.outputs.branch_name }}
+          BRANCH: ${{ steps.publish.outputs.branch }}
           ISSUE: ${{ steps.select.outputs.issue }}
           TARGET_REPO: ${{ github.repository }}
         run: |
@@ -183,7 +234,10 @@ jobs:
           echo "Opened draft PR: $URL"
 
       - name: Mark failed work as blocked
-        if: failure() && steps.select.outputs.issue != '0' && steps.app_token.outcome == 'success'
+        if: >-
+          always() && (failure() || cancelled()) &&
+          steps.select.outputs.issue != '0' &&
+          steps.app_token.outcome == 'success'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
@@ -191,6 +245,8 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
         run: |
           gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
-            --remove-label "agent:implementing" --add-label "agent:blocked"
+            --remove-label "agent:implementing" --remove-label "agent:ready" \
+            --add-label "agent:blocked" ||
+            echo "::warning::Could not update labels on issue $ISSUE."
           gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
-            --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
