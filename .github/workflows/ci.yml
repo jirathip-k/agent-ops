@@ -18,7 +18,8 @@ jobs:
 
       - name: Validate workflow syntax
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          # Installer SHA corresponds to actionlint v1.7.12.
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
           ./actionlint -color -shellcheck= \
             .github/workflows/*.yml \
             templates/workflows/*.yml

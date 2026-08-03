@@ -51,6 +51,8 @@ jobs:
             --color "2cbe4e" --description "Agent review passed; human merge required"
           gh label create "agent:changes-requested" --repo "$TARGET_REPO" --force \
             --color "d93f0b" --description "Agent review found blocking changes"
+          gh label create "agent:blocked" --repo "$TARGET_REPO" --force \
+            --color "b60205" --description "Waiting for a human decision or prerequisite"
 
       - name: Select one pull request
         id: select
@@ -113,3 +115,32 @@ jobs:
             --max-turns 30
             --allowedTools
             "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"
+
+      - name: Mark failed review as blocked
+        if: >-
+          (failure() || cancelled()) &&
+          steps.select.outcome == 'success' &&
+          steps.select.outputs.pr != '0'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.select.outputs.pr }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          # The reviewer applies its own verdict labels. If it already did so and
+          # the run failed afterwards, parking the pull request would contradict
+          # a verdict that was actually reached.
+          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+            --jq '[.labels[].name] | join(" ")')
+          case " $LABELS " in
+            *" agent:review "*) ;;
+            *)
+              echo "Verdict already applied to pull request $PR; leaving labels alone."
+              exit 0
+              ;;
+          esac
+          gh pr edit "$PR" --repo "$TARGET_REPO" \
+            --remove-label "agent:review" --add-label "agent:blocked" ||
+            echo "::warning::Could not update labels on pull request $PR."
+          gh pr comment "$PR" --repo "$TARGET_REPO" \
+            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
