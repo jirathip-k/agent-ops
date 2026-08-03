@@ -15,6 +15,6 @@ jobs:
       checks: read
     uses: jirathip-k/agent-ops/.github/workflows/review-release.yml@v1
     with:
-      model: fable
+      model: opus
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
