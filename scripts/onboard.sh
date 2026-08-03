@@ -76,10 +76,11 @@ for repo in "${targets[@]}"; do
   echo "  default branch : $branch"
   echo "  private        : $private"
 
-  # Secrets: repository first, then the owner's organization if there is one.
-  owner=${repo%%/*}
+  # Secrets: the repository's own, plus the organization secrets this repository
+  # is actually allowed to use. Listing the organization's secrets directly would
+  # count ones scoped to selected repositories that exclude this one.
   repo_secrets=$(gh secret list --repo "$repo" --json name --jq '.[].name' 2>/dev/null || true)
-  org_secrets=$(gh secret list --org "$owner" --json name --jq '.[].name' 2>/dev/null || true)
+  org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
   missing=()
   for s in "${SECRETS[@]}"; do
     if ! printf '%s\n%s\n' "$repo_secrets" "$org_secrets" | grep -qx "$s"; then
