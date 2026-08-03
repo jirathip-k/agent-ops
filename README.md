@@ -122,6 +122,14 @@ is opened by an owner, member, or collaborator, it adds `agent:needs-plan`
 without invoking a model. The next scheduled or manual Discover & Plan run
 assesses the issue. Public contributors are not automatically queued.
 
+Repositories with an existing backlog opt in by labeling issues
+`agent:needs-plan`. Discover & Plan writes its plan as a comment and promotes
+an issue to `agent:ready` only when that plan meets the readiness bar. It
+never edits, closes, or relabels an issue it adopted this way; the prompt also
+forbids it from applying `agent:needs-plan` itself, so the opt-in stays a human
+decision. That last rule is prompt-level, not enforced by the workflow — audit
+the label's history if it matters to you.
+
 If review requests changes, it adds `agent:changes-requested`. After a human
 pushes a revision, that human restores `agent:review` to request a new
 independent pass.
