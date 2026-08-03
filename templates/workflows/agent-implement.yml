@@ -8,9 +8,8 @@ on:
 jobs:
   implement:
     permissions:
-      contents: write
+      contents: read
       issues: write
-      pull-requests: write
     uses: jirathip-k/agent-ops/.github/workflows/implement.yml@v1
     with:
       model: sonnet

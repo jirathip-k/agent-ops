@@ -51,10 +51,12 @@ source branch is the remote equivalent of the old worktree isolation; the
 Actions runner itself is already an ephemeral checkout, so another local
 worktree adds nothing.
 
-A custom GitHub App token is minted for only the target repository. Its
-identity allows deterministic workflow steps to create branches and PRs whose
-events start the target's normal CI. The lane rejects changes under
-`.github/workflows/` and `.github/actions/`, and never merges.
+Two custom GitHub App tokens are minted, each scoped to only the target
+repository. A write-scoped token lets deterministic workflow steps create
+branches and PRs whose events start the target's normal CI; a second token
+restricted to contents and metadata read is the only one the agent receives.
+The lane rejects changes under `.github/workflows/` and `.github/actions/`,
+and never merges.
 
 ### Review & Release
 
@@ -77,12 +79,15 @@ human still own the merge.
   The action places that token in the agent's environment for model
   authentication, so it cannot be withheld from the agent.
 - The workflow `GITHUB_TOKEN` handles issue and review metadata.
-- The custom GitHub App token handles implementation branches and PRs. It is
-  also reachable by the implementation agent: `claude-code-action` assigns its
-  `github_token` input to `GH_TOKEN` in the agent's own process environment,
-  and the checkout persists it in git credentials. Removing the token from the
-  workflow step's `env:` does not withhold it. The implementation runner is
-  therefore trusted with both tokens.
+- The implementation agent receives a separate GitHub App token restricted to
+  contents and metadata read. The write-scoped App token is available only to
+  deterministic workflow steps that do not run model output, and is not
+  persisted into the checkout.
+- The workflow `GITHUB_TOKEN` cannot be withheld from the agent either:
+  `claude-code-action` places it in the agent's environment as
+  `DEFAULT_WORKFLOW_TOKEN`. The implement job's `permissions:` block is
+  therefore the real boundary on it, and is scoped to `contents: read` and
+  `issues: write` — the agent can still write issue metadata.
 - The model never receives authority from issue, PR, comment, code, or CI-log
   text.
 - Branch protection and a human own the final merge.
@@ -92,7 +97,9 @@ The implementation agent receives edit tools and an allowlist of common
 project commands. Entries such as `npx`, `python`, and `make` are general
 shell escapes, so this allowlist is a guardrail against casual scope creep,
 not a security boundary. `gh` is not on the allowlist and the issue text is
-supplied as a file, but neither fact isolates the agent from the tokens above.
+supplied as a file, but neither fact isolates the agent from the Claude
+subscription token or the workflow `GITHUB_TOKEN`, both of which the action
+places in its environment.
 Changes under `.github/workflows/` and `.github/actions/` are rejected
 deterministically after the run and before anything is pushed, against both
 the staged tree and any commit a project command made on its own.
