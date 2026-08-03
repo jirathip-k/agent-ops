@@ -50,16 +50,16 @@ jobs:
       actions: read
     steps:
       - name: Checkout target repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 50
           persist-credentials: false
 
       - name: Checkout agent prompts
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jirathip-k/agent-ops
-          ref: main
+          ref: v1
           path: .agent-ops-control
           sparse-checkout: prompts
           persist-credentials: false
@@ -87,7 +87,7 @@ jobs:
 
       - name: Discover and plan
         id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         env:
           GH_TOKEN: ${{ github.token }}
         with:
@@ -119,3 +119,61 @@ jobs:
 
           echo "Final Claude execution result:"
           jq -s '[.[] | if type == "array" then .[] else . end | select(.type == "result")] | last' "$log_path"
+
+      - name: Report queue health
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          # agent:review, agent:approved, and agent:changes-requested are only
+          # ever applied to pull requests, and `gh issue list` excludes those —
+          # counting them as issues would report 0 forever.
+          issue_labels=(
+            "agent:needs-plan"
+            "agent:ready"
+            "agent:implementing"
+            "agent:blocked"
+          )
+          pr_labels=(
+            "agent:review"
+            "agent:approved"
+            "agent:changes-requested"
+          )
+
+          {
+            echo "## Agent queue health"
+            echo
+            echo "| Lifecycle label | Scope | Open |"
+            echo "| --- | --- | ---: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ready_count=0
+          blocked_count=0
+          for label in "${issue_labels[@]}"; do
+            count=$(gh issue list --repo "$TARGET_REPO" --state open \
+              --label "$label" --json number --jq 'length' || echo "?")
+            echo "| \`$label\` | issues | $count |" >> "$GITHUB_STEP_SUMMARY"
+
+            if [[ "$label" == "agent:ready" ]]; then
+              ready_count=$count
+            elif [[ "$label" == "agent:blocked" ]]; then
+              blocked_count=$count
+            fi
+          done
+
+          for label in "${pr_labels[@]}"; do
+            count=$(gh pr list --repo "$TARGET_REPO" --state open \
+              --label "$label" --json number --jq 'length' || echo "?")
+            echo "| \`$label\` | pull requests | $count |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          if [[ "$ready_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ ]] &&
+             (( ready_count == 0 && blocked_count > 0 )); then
+            {
+              echo
+              echo "> [!WARNING]"
+              echo "> Queue cannot drain: no issues are ready and $blocked_count are blocked."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
