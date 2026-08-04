@@ -155,6 +155,14 @@ The workflows create missing labels. Discover & Plan moves work toward
 `agent/issue-...` branch; Review & Release performs a fresh independent pass
 and takes an approved pull request out of draft. Only a human merges.
 
+That last step needs the App token: GitHub refuses
+`markPullRequestReadyForReview` to a workflow `GITHUB_TOKEN` even with
+`pull-requests: write`. A Review & Release caller that does not pass
+`AGENT_APP_ID` and `AGENT_APP_PRIVATE_KEY` still reviews and labels, but
+leaves approved pull requests drafted and says so in the run summary. Callers
+onboarded before this requirement need `scripts/onboard.sh --apply` re-run, or
+the two secrets added to the caller by hand.
+
 The Discover & Plan caller also performs deterministic intake. When an issue
 is opened by an owner, member, or collaborator, it adds `agent:needs-plan`
 without invoking a model. The next scheduled or manual Discover & Plan run
