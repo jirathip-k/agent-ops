@@ -209,6 +209,7 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model || 'sonnet' }}
             --max-turns 45
+            --setting-sources user
             --allowedTools
             "Read,Edit,Write,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
 
