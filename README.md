@@ -99,11 +99,11 @@ Then:
 
 ## Release
 
-The movable `v1` tag is what everything actually runs. That includes the
-caller workflows in every target repository, this control repository's own
-three lifecycle workflows (each checks out its prompts at `ref: v1`), and
-`scripts/onboard.sh`. A merge to `main` changes nothing anywhere, including
-this repository's own scheduled runs, until `v1` moves.
+The movable `v1` tag pins the reusable workflows and prompts used by every
+target repository. The onboarding script installs caller files that reference
+`@v1`, so nothing merged to `main` reaches a target until the tag moves. This
+repository's scheduled lanes are the partial exception: they run workflow
+files from `main` immediately, but each checks out its prompt at `ref: v1`.
 
 Before moving it, confirm CI is green on `main` and that the commits being
 released were human-reviewed, which the merge policy already guarantees.
@@ -114,15 +114,20 @@ git tag -f v1 <commit>
 git push --force origin v1
 ```
 
-No re-onboarding is needed; the next scheduled run in each target picks up
-the new tag on its own.
+The push requires credentials allowed to update `v1` by any tag protection
+rule. No re-onboarding is needed; the next scheduled run in each target picks
+up the new tag on its own.
 
-To roll back, point `v1` at the previous commit the same way:
+To roll back the tagged release, point `v1` at the previous commit the same
+way:
 
 ```sh
 git tag -f v1 <previous-commit>
 git push --force origin v1
 ```
+
+That restores target runs and this repository's pinned prompts. Workflow-file
+changes already merged to `main` require a revert on `main`.
 
 ## State
 
