@@ -102,11 +102,12 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model || 'fable' }}
             --max-turns 30
+            --setting-sources user
             --allowedTools
             "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(gh issue:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"
 
       - name: Print Claude execution result
-        if: failure() || cancelled()
+        if: always() && steps.claude.outcome != 'skipped'
         continue-on-error: true
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
