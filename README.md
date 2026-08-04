@@ -77,7 +77,9 @@ reports which of the three secrets are missing and refuses to apply until they
 exist, removes callers left over from an earlier agent-ops architecture,
 staggers the schedules so several targets do not open Claude sessions on the
 same minute, and opens a pull request when the default branch is protected or
-pushes directly when it is not.
+pushes directly when it is not. Your `gh` credential needs admin access on
+each target to verify its secrets; without it, the script reports that
+secrets cannot be verified rather than guessing at their state.
 
 To do it by hand instead, copy the three files in `templates/workflows/` into
 the target's `.github/workflows/`, and set `base_branch` in the implement

@@ -97,9 +97,15 @@ for repo in "${targets[@]}"; do
   # count ones scoped to selected repositories that exclude this one. GitHub's
   # repository endpoint does not account for Free-plan private repositories, so
   # discount organization secrets there explicitly.
-  repo_secrets=$(gh secret list --repo "$repo" --json name --jq '.[].name' 2>/dev/null || true)
+  #
+  # Listing either kind of secret requires admin access on the target, not just
+  # push access. A 403 or transient API error must not read as "no secrets" —
+  # that would tell an operator to re-create secrets that already exist.
+  repo_secrets_status=0
+  repo_secrets=$(gh secret list --repo "$repo" --json name --jq '.[].name' 2>/dev/null) || repo_secrets_status=$?
   org_secrets=""
   org_secret_note=""
+  org_secrets_status=0
   if [ "$owner_type" = "Organization" ]; then
     if [ "$private" = true ]; then
       org_plan=$(gh api "orgs/$owner" --jq '.plan.name // empty' 2>/dev/null || true)
@@ -108,21 +114,33 @@ for repo in "${targets[@]}"; do
       elif [ "$org_plan" = "free" ]; then
         org_secret_note="organization secrets do not reach private repositories on GitHub Free; set these as repository secrets"
       else
-        org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
+        org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null) || org_secrets_status=$?
       fi
     else
-      org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
+      org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null) || org_secrets_status=$?
     fi
   else
     org_secret_note="user-owned repositories have no organization secrets; set these as repository secrets"
   fi
+  if [ "$org_secrets_status" -ne 0 ]; then
+    org_secret_note="organization secrets could not be listed with this credential; listing requires admin access on $owner"
+  fi
+
+  secrets_unverified=false
+  if [ "$repo_secrets_status" -ne 0 ] || [ "$org_secrets_status" -ne 0 ]; then
+    secrets_unverified=true
+  fi
+
   missing=()
   for s in "${SECRETS[@]}"; do
     if ! printf '%s\n%s\n' "$repo_secrets" "$org_secrets" | grep -qx "$s"; then
       missing+=("$s")
     fi
   done
-  if [ ${#missing[@]} -eq 0 ]; then
+  if [ "$secrets_unverified" = true ]; then
+    echo "  secrets        : cannot verify with this credential — listing secrets requires admin access on $repo${org_secret_note:+ — $org_secret_note}"
+    status=1
+  elif [ ${#missing[@]} -eq 0 ]; then
     echo "  secrets        : all present"
   else
     echo "  secrets        : MISSING ${missing[*]}${org_secret_note:+ — $org_secret_note}"
@@ -162,6 +180,11 @@ for repo in "${targets[@]}"; do
 
   if [ "$apply" = false ]; then
     echo "  -> dry run; re-run with --apply to make these changes"
+    continue
+  fi
+
+  if [ "$secrets_unverified" = true ]; then
+    echo "  -> refusing to apply; secrets could not be verified"
     continue
   fi
 
