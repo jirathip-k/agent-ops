@@ -63,8 +63,9 @@ Two custom GitHub App tokens are minted, each scoped to only the target
 repository. A write-scoped token lets deterministic workflow steps create
 branches and PRs whose events start the target's normal CI; a second token
 restricted to contents and metadata read is the only one the agent receives.
-The lane rejects changes under `.github/workflows/` and `.github/actions/`,
-and never merges.
+The lane rejects changes under `.github/workflows/` and `.github/actions/`.
+When it runs against the agent-ops control repository, it also rejects changes
+under `prompts/` and `templates/`. It never merges.
 
 ### Review & Release
 
@@ -110,7 +111,10 @@ subscription token or the workflow `GITHUB_TOKEN`, both of which the action
 places in its environment.
 Changes under `.github/workflows/` and `.github/actions/` are rejected
 deterministically after the run and before anything is pushed, against both
-the staged tree and any commit a project command made on its own.
+the staged tree and any commit a project command made on its own. In the
+agent-ops control repository, the same rejection covers `prompts/` and
+`templates/`; target repositories remain free to edit their own directories
+with those names.
 The independent reviewer receives no file-editing tools.
 
 ## Provider boundary
