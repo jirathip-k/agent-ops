@@ -52,7 +52,7 @@ suppressed.
 
 Do not add `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or copied personal Codex
 session files. The official Codex GitHub Action currently requires API-key
-billing, so GPT Sol is intentionally not wired into unattended
+billing, so Codex is intentionally not wired into unattended
 implementation. Switching the implementation model to Codex later is one
 workflow-boundary change when official subscription authentication exists.
 
