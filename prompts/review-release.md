@@ -24,10 +24,14 @@ additional permissions.
    - blocking findings first, with file and line references where possible;
    - validation evidence and any residual risk.
 
-For `APPROVE`, remove `agent:review` and `agent:changes-requested`, then add
-`agent:approved`. For `REQUEST CHANGES`, remove `agent:review` and
-`agent:approved`, then add `agent:changes-requested`. A human owns the
-revision and must restore `agent:review` after pushing new commits.
+Apply the verdict label before removing anything. For `APPROVE`, add
+`agent:approved`, then remove `agent:review` and `agent:changes-requested`.
+For `REQUEST CHANGES`, add `agent:changes-requested`, then remove
+`agent:review` and `agent:approved`. The order matters: stopping between the
+two leaves the pull request carrying both labels, which the next run simply
+re-reviews, whereas removing first would strand it with no label and no lane
+that can see it. A human owns the revision and must restore `agent:review`
+after pushing new commits.
 
 Do not take the pull request out of draft yourself. A deterministic workflow
 step lifts the draft when, and only when, `agent:approved` is present.
