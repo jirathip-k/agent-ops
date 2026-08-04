@@ -25,7 +25,8 @@ branch protection + human merge
 
 Each target repository owns its schedule, secrets, permissions, issues,
 branches, pull requests, and CI. The public agent-ops repository supplies the
-called workflow and prompt.
+called workflow and prompt, pinned to the movable `v1` tag; see the README's
+Release section for how that tag moves and what depends on it.
 
 ## Lanes
 
