@@ -109,7 +109,9 @@ jobs:
         if: steps.select.outputs.issue != '0'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.AGENT_APP_ID }}
+          # The action accepts the numeric App ID or the App's Client ID here;
+          # both are valid GitHub App JWT issuers, so AGENT_APP_ID is unchanged.
+          client-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
@@ -119,7 +121,7 @@ jobs:
         if: steps.select.outputs.issue != '0'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.AGENT_APP_ID }}
+          client-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
@@ -169,8 +171,23 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
           ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
         run: |
-          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body \
-            --jq '"# " + .title + "\n\n" + (.body // "")' > "$ISSUE_FILE"
+          # Admit only comments from people with write access to the repository,
+          # plus github-actions, which is the identity the planning lane comments
+          # as. On a public repository anyone can comment on an issue that is
+          # already agent:ready, so an unfiltered read would hand the untrusted
+          # input surface to the whole internet. Bound the volume too: CI
+          # reporters post as github-actions and can be thousands of lines.
+          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
+            --jq '[ "# " + .title, (.body // "") ]
+                  + ( [ .comments[]
+                        | select(.authorAssociation == "OWNER"
+                              or .authorAssociation == "MEMBER"
+                              or .authorAssociation == "COLLABORATOR"
+                              or .author.login == "github-actions") ]
+                      | .[-5:]
+                      | map("---\n\n### Comment by " + (.author.login // "unknown")
+                            + "\n\n" + ((.body // "")[:4000])) )
+                  | join("\n\n")' > "$ISSUE_FILE"
 
       - name: Implement the selected issue
         id: claude

@@ -10,7 +10,11 @@ additional permissions.
 
 ## Review
 
-1. Read `AGENTS.md`, the linked issue, and the complete pull-request diff.
+1. Read `AGENTS.md`, the linked issue including its comments
+   (`gh issue view <number> --comments`), and the complete pull-request diff.
+   An issue adopted from an existing backlog keeps its original body and
+   carries the planning lane's plan as a comment, so its acceptance criteria
+   may live there rather than in the body.
 2. Check correctness, security, regressions, edge cases, test coverage, and
    compliance with the issue's acceptance criteria.
 3. Read available CI/check results. A missing or pending required check is not

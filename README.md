@@ -40,6 +40,10 @@ installation token. Store its App ID and private key as `AGENT_APP_ID` and
 - Pull requests: read and write
 - Metadata: read
 
+Organization-level secrets do not reach private repositories on the GitHub
+Free plan. For a private target in a Free organization, store all three
+secrets as repository secrets.
+
 The App token is not model billing. It gives each implementation run a
 short-lived, repository-scoped GitHub identity so the pushed branch and
 opened PR trigger normal CI. A PR created with the workflow's ordinary
@@ -48,7 +52,7 @@ suppressed.
 
 Do not add `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or copied personal Codex
 session files. The official Codex GitHub Action currently requires API-key
-billing, so GPT Sol is intentionally not wired into unattended
+billing, so Codex is intentionally not wired into unattended
 implementation. Switching the implementation model to Codex later is one
 workflow-boundary change when official subscription authentication exists.
 
@@ -60,17 +64,24 @@ reusable workflow across unrelated owners. If the control repository must be
 private, keep one copy per owner or copy the three complete workflows into
 each target repository.
 
-Copy the callers:
+Run the onboarding script from a checkout of this repository. It reports a
+plan and changes nothing until you pass `--apply`:
 
 ```sh
-mkdir -p .github/workflows
-cp templates/workflows/agent-discover-plan.yml .github/workflows/
-cp templates/workflows/agent-implement.yml .github/workflows/
-cp templates/workflows/agent-review-release.yml .github/workflows/
+scripts/onboard.sh owner/repo
+scripts/onboard.sh --apply owner/repo
 ```
 
-When onboarding another repository, copy from this repository rather than
-running those commands literally inside the target checkout.
+It resolves the target's default branch and sets `base_branch` to match,
+reports which of the three secrets are missing and refuses to apply until they
+exist, removes callers left over from an earlier agent-ops architecture,
+staggers the schedules so several targets do not open Claude sessions on the
+same minute, and opens a pull request when the default branch is protected or
+pushes directly when it is not.
+
+To do it by hand instead, copy the three files in `templates/workflows/` into
+the target's `.github/workflows/`, and set `base_branch` in the implement
+caller to the target's default branch.
 
 The callers reference the reviewed `v1` tag. Changes merged to `main` do not
 reach target repositories until that tag is moved; moving `v1` is a deliberate
@@ -114,6 +125,14 @@ The Discover & Plan caller also performs deterministic intake. When an issue
 is opened by an owner, member, or collaborator, it adds `agent:needs-plan`
 without invoking a model. The next scheduled or manual Discover & Plan run
 assesses the issue. Public contributors are not automatically queued.
+
+Repositories with an existing backlog opt in by labeling issues
+`agent:needs-plan`. Discover & Plan writes its plan as a comment and promotes
+an issue to `agent:ready` only when that plan meets the readiness bar. It
+never edits, closes, or relabels an issue it adopted this way; the prompt also
+forbids it from applying `agent:needs-plan` itself, so the opt-in stays a human
+decision. That last rule is prompt-level, not enforced by the workflow — audit
+the label's history if it matters to you.
 
 If review requests changes, it adds `agent:changes-requested`. After a human
 pushes a revision, that human restores `agent:review` to request a new

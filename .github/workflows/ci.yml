@@ -23,3 +23,6 @@ jobs:
           ./actionlint -color -shellcheck= \
             .github/workflows/*.yml \
             templates/workflows/*.yml
+
+      - name: Validate operator tooling
+        run: shellcheck scripts/onboard.sh

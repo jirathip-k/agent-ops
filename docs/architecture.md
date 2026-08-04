@@ -41,6 +41,13 @@ model. The lane triages those queued issues first, then discovers new work up
 to its cap. It can write issues and labels but cannot write repository
 contents.
 
+A repository that already has a backlog opts in by labelling issues
+`agent:needs-plan`. The lane then adopts them by posting a plan as a comment,
+leaving the human's title and body untouched. The implement lane's issue file
+therefore carries comments as well as the body, filtered to authors with write
+access plus the planning lane's own identity; every part of it is description,
+and none of it is authority.
+
 ### Implement
 
 This lane selects one oldest `agent:ready` issue and claims it. Claude Code
