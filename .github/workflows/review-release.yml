@@ -234,18 +234,63 @@ jobs:
         run: |
           # The reviewer applies its own verdict labels. If it already did so and
           # the run failed afterwards, parking the pull request would contradict
-          # a verdict that was actually reached.
+          # a verdict that was actually reached. Test for the verdict itself:
+          # the absence of agent:review does not prove one was recorded, and
+          # treating it as proof is what stranded pull requests with no label.
           LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
             --jq '[.labels[].name] | join(" ")')
           case " $LABELS " in
-            *" agent:review "*) ;;
-            *)
+            *" agent:approved "* | *" agent:changes-requested "*)
               echo "Verdict already applied to pull request $PR; leaving labels alone."
               exit 0
               ;;
           esac
-          gh pr edit "$PR" --repo "$TARGET_REPO" \
-            --remove-label "agent:review" --add-label "agent:blocked" ||
+          # agent:review may already be gone, so removing it is conditional;
+          # a single gh pr edit would fail on the missing label and skip the add.
+          case " $LABELS " in
+            *" agent:review "*)
+              gh pr edit "$PR" --repo "$TARGET_REPO" --remove-label "agent:review" ||
+                echo "::warning::Could not remove agent:review from pull request $PR."
+              ;;
+          esac
+          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
             echo "::warning::Could not update labels on pull request $PR."
           gh pr comment "$PR" --repo "$TARGET_REPO" \
             --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+
+      - name: Ensure the reviewed pull request keeps a lifecycle label
+        if: >-
+          always() &&
+          steps.select.outcome == 'success' &&
+          steps.select.outputs.pr != '0'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.select.outputs.pr }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          # Last resort, after every other handler. Selection only sees
+          # agent:review, so a pull request carrying no lifecycle label at all
+          # is invisible to this lane forever and absent from the queue-health
+          # summary. Restoring agent:review makes the next scheduled run
+          # re-review it, which converges; parking would need a human instead.
+          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+            --jq '[.labels[].name] | join(" ")')
+          case " $LABELS " in
+            *" agent:review "* | *" agent:approved "* | \
+            *" agent:changes-requested "* | *" agent:blocked "*)
+              exit 0
+              ;;
+          esac
+
+          echo "::warning::Pull request $PR ended the run with no lifecycle label; restoring agent:review."
+          {
+            echo "> [!WARNING]"
+            echo "> Pull request #$PR lost every lifecycle label during this run."
+            echo "> \`agent:review\` was restored so the next run re-reviews it."
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review" ||
+            echo "::warning::Could not restore agent:review on pull request $PR."
+          gh pr comment "$PR" --repo "$TARGET_REPO" \
+            --body "This pull request ended a review run with no lifecycle label, so no lane could see it. \`agent:review\` was restored automatically; the next scheduled run will review it again. Workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." ||
+            echo "::warning::Could not comment on pull request $PR."
