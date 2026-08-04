@@ -254,10 +254,16 @@ jobs:
             git diff --cached --name-only
             git diff --name-only "origin/$BASE_BRANCH...HEAD"
           )
+          REJECTED_PATTERN='^\.github/(workflows|actions)/'
+          REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows or actions.'
+          if [ "$GITHUB_REPOSITORY" = 'jirathip-k/agent-ops' ]; then
+            REJECTED_PATTERN='^(\.github/(workflows|actions)|prompts|templates)/'
+            REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows, actions, prompts, or templates in the control repository.'
+          fi
           REJECTED=$(printf '%s\n' "$CHANGED" |
-            grep -E '^\.github/(workflows|actions)/' || true)
+            grep -E "$REJECTED_PATTERN" || true)
           if [ -n "$REJECTED" ]; then
-            echo "::error::The implementation lane may not modify GitHub workflows or actions."
+            echo "::error::$REJECTION_MESSAGE"
             printf '%s\n' "$REJECTED"
             exit 1
           fi
