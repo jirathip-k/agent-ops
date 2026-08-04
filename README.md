@@ -182,10 +182,12 @@ docs/architecture.md state and trust boundaries
 
 ## Validation
 
-There is no build or dependency installation. Validate workflow syntax with:
+There is no build or dependency installation. Validate workflow syntax and the
+onboarding script with:
 
 ```sh
 actionlint -color -shellcheck= .github/workflows/*.yml templates/workflows/*.yml
+shellcheck scripts/onboard.sh
 ```
 
 Workflow and prompt changes affect unattended agents and must be reviewed by
