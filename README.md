@@ -40,6 +40,10 @@ installation token. Store its App ID and private key as `AGENT_APP_ID` and
 - Pull requests: read and write
 - Metadata: read
 
+Organization-level secrets do not reach private repositories on the GitHub
+Free plan. For a private target in a Free organization, store all three
+secrets as repository secrets.
+
 The App token is not model billing. It gives each implementation run a
 short-lived, repository-scoped GitHub identity so the pushed branch and
 opened PR trigger normal CI. A PR created with the workflow's ordinary
