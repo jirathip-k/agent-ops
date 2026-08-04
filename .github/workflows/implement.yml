@@ -209,6 +209,7 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model || 'sonnet' }}
             --max-turns 45
+            --setting-sources user
             --allowedTools
             "Read,Edit,Write,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(make:*),Bash(mise:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(bun:*),Bash(uv:*),Bash(pytest:*),Bash(python:*),Bash(python3:*),Bash(cargo:*),Bash(go:*),Bash(dotnet:*),Bash(mvn:*),Bash(gradle:*),Bash(swift:*),Bash(xcodebuild:*)"
 
@@ -253,10 +254,16 @@ jobs:
             git diff --cached --name-only
             git diff --name-only "origin/$BASE_BRANCH...HEAD"
           )
+          REJECTED_PATTERN='^\.github/(workflows|actions)/'
+          REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows or actions.'
+          if [ "$GITHUB_REPOSITORY" = 'jirathip-k/agent-ops' ]; then
+            REJECTED_PATTERN='^(\.github/(workflows|actions)|prompts|templates)/'
+            REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows, actions, prompts, or templates in the control repository.'
+          fi
           REJECTED=$(printf '%s\n' "$CHANGED" |
-            grep -E '^\.github/(workflows|actions)/' || true)
+            grep -E "$REJECTED_PATTERN" || true)
           if [ -n "$REJECTED" ]; then
-            echo "::error::The implementation lane may not modify GitHub workflows or actions."
+            echo "::error::$REJECTION_MESSAGE"
             printf '%s\n' "$REJECTED"
             exit 1
           fi
