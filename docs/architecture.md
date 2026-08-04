@@ -75,7 +75,10 @@ and applies either `agent:approved` or `agent:changes-requested`.
 
 A deterministic step then takes an approved pull request out of draft. It
 reads the label the reviewer applied rather than asking the model, so a
-`REQUEST CHANGES` verdict cannot lift the draft.
+`REQUEST CHANGES` verdict cannot lift the draft. The lift uses a token minted
+from the custom App and scoped to pull requests, because GitHub rejects
+`markPullRequestReadyForReview` from the workflow `GITHUB_TOKEN`. When that
+token is unavailable the lift is skipped and reported, never silently passed.
 
 “Release” means declaring readiness for the repository's existing protected
 merge path. Lifting the draft is part of declaring that readiness; the

@@ -25,6 +25,16 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      # Optional on purpose. The workflow GITHUB_TOKEN cannot call
+      # markPullRequestReadyForReview — GitHub rejects it as "Resource not
+      # accessible by integration" even with pull-requests: write — so the
+      # draft lift needs the custom App. Callers onboarded before this change
+      # do not pass these, and must keep working: without them the lane still
+      # reviews and labels, and only the lift is skipped, loudly.
+      AGENT_APP_ID:
+        required: false
+      AGENT_APP_PRIVATE_KEY:
+        required: false
 
 jobs:
   review-release:
@@ -127,11 +137,39 @@ jobs:
             --allowedTools
             "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"
 
+      # The secrets context cannot be read from a step-level `if:`, so presence
+      # is resolved into an output first.
+      - name: Detect App credentials for the draft lift
+        id: lift_creds
+        if: steps.select.outputs.pr != '0'
+        env:
+          APP_ID: ${{ secrets.AGENT_APP_ID }}
+          APP_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint a pull-request-scoped token for the draft lift
+        id: lift_token
+        if: steps.select.outputs.pr != '0' && steps.lift_creds.outputs.present == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+          permission-metadata: read
+
       - name: Mark an approved pull request ready for review
         if: steps.select.outputs.pr != '0'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.lift_token.outputs.token || github.token }}
+          LIFT_CREDS: ${{ steps.lift_creds.outputs.present }}
           PR: ${{ steps.select.outputs.pr }}
           TARGET_REPO: ${{ github.repository }}
         run: |
@@ -156,8 +194,32 @@ jobs:
               ;;
           esac
 
-          gh pr ready "$PR" --repo "$TARGET_REPO"
-          echo "Marked pull request $PR ready for review; a human owns the merge."
+          # A silently skipped or failed lift used to disappear into a green
+          # run, so the documented lifecycle claimed something that never
+          # happened. Every outcome below reaches the run summary.
+          if [ "$LIFT_CREDS" != "true" ]; then
+            echo "::warning::Approved pull request $PR was left as a draft: AGENT_APP_ID and AGENT_APP_PRIVATE_KEY are not passed to this lane."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR is approved but still a draft. The workflow"
+              echo "> token cannot lift it. Pass \`AGENT_APP_ID\` and"
+              echo "> \`AGENT_APP_PRIVATE_KEY\` to this lane's caller, then lift it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+            echo "Marked pull request $PR ready for review; a human owns the merge."
+            echo "Marked pull request #$PR ready for review; a human owns the merge." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Failed to lift pull request $PR out of draft; it stays approved and drafted."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR is approved but the draft lift failed."
+              echo "> Confirm the App is installed on this repository with"
+              echo "> Pull requests: read and write, then lift it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Mark failed review as blocked
         if: >-
