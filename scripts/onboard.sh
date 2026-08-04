@@ -83,21 +83,39 @@ for repo in "${targets[@]}"; do
     continue
   fi
 
-  if ! meta=$(gh api "repos/$repo" --jq '.default_branch + " " + (.private|tostring)' 2>/dev/null); then
+  if ! meta=$(gh api "repos/$repo" --jq '.default_branch + " " + (.private|tostring) + " " + .owner.type + " " + .owner.login' 2>/dev/null); then
     echo "  ERROR: cannot read $repo — check the name and your access"
     status=1
     continue
   fi
-  branch=${meta% *}
-  private=${meta#* }
+  read -r branch private owner_type owner <<<"$meta"
   echo "  default branch : $branch"
   echo "  private        : $private"
 
   # Secrets: the repository's own, plus the organization secrets this repository
   # is actually allowed to use. Listing the organization's secrets directly would
-  # count ones scoped to selected repositories that exclude this one.
+  # count ones scoped to selected repositories that exclude this one. GitHub's
+  # repository endpoint does not account for Free-plan private repositories, so
+  # discount organization secrets there explicitly.
   repo_secrets=$(gh secret list --repo "$repo" --json name --jq '.[].name' 2>/dev/null || true)
-  org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
+  org_secrets=""
+  org_secret_note=""
+  if [ "$owner_type" = "Organization" ]; then
+    if [ "$private" = true ]; then
+      org_plan=$(gh api "orgs/$owner" --jq '.plan.name // empty' 2>/dev/null || true)
+      if [ -z "$org_plan" ]; then
+        org_secret_note="organization plan is unreadable; treating organization secrets as unavailable for this private repository; set these as repository secrets"
+      elif [ "$org_plan" = "free" ]; then
+        org_secret_note="organization secrets do not reach private repositories on GitHub Free; set these as repository secrets"
+      else
+        org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
+      fi
+    else
+      org_secrets=$(gh api "repos/$repo/actions/organization-secrets" --jq '.secrets[].name' 2>/dev/null || true)
+    fi
+  else
+    org_secret_note="user-owned repositories have no organization secrets; set these as repository secrets"
+  fi
   missing=()
   for s in "${SECRETS[@]}"; do
     if ! printf '%s\n%s\n' "$repo_secrets" "$org_secrets" | grep -qx "$s"; then
@@ -107,7 +125,7 @@ for repo in "${targets[@]}"; do
   if [ ${#missing[@]} -eq 0 ]; then
     echo "  secrets        : all present"
   else
-    echo "  secrets        : MISSING ${missing[*]}"
+    echo "  secrets        : MISSING ${missing[*]}${org_secret_note:+ — $org_secret_note}"
     status=1
   fi
 

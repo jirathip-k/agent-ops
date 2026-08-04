@@ -1,12 +1,3 @@
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
-.ruff_cache/
-dist/
+actionlint
 .DS_Store
-.worktrees/
-.agent-runs/
-config/local/
-supabase/.temp/
 tmp/
