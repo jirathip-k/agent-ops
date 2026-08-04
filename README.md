@@ -141,9 +141,10 @@ independent pass.
 ## Repository map
 
 ```text
-.github/workflows/   three reusable lifecycle workflows
+.github/workflows/   three reusable lifecycle workflows and CI
 prompts/             one judgment prompt per lifecycle lane
 templates/workflows/ small scheduled callers for target repositories
+scripts/onboard.sh   operator tooling, run by hand, provisions target repositories
 docs/architecture.md state and trust boundaries
 ```
 
