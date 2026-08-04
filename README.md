@@ -97,6 +97,33 @@ Then:
 6. Inspect the first implementation draft PR before enabling its schedule.
 7. Enable Review & Release only after implementation behavior is trusted.
 
+## Release
+
+The movable `v1` tag is what everything actually runs. That includes the
+caller workflows in every target repository, this control repository's own
+three lifecycle workflows (each checks out its prompts at `ref: v1`), and
+`scripts/onboard.sh`. A merge to `main` changes nothing anywhere, including
+this repository's own scheduled runs, until `v1` moves.
+
+Before moving it, confirm CI is green on `main` and that the commits being
+released were human-reviewed, which the merge policy already guarantees.
+Then move the tag to that commit:
+
+```sh
+git tag -f v1 <commit>
+git push --force origin v1
+```
+
+No re-onboarding is needed; the next scheduled run in each target picks up
+the new tag on its own.
+
+To roll back, point `v1` at the previous commit the same way:
+
+```sh
+git tag -f v1 <previous-commit>
+git push --force origin v1
+```
+
 ## State
 
 The workflows use these labels, with explicit transitions that remove them:
