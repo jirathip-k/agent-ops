@@ -43,6 +43,23 @@ if [ ! -d "$TEMPLATES" ]; then
   exit 1
 fi
 
+literal_count() {
+  { grep -Fo -- "$2" "$1" || true; } | wc -l
+}
+
+# These are deliberately source-template pre-checks. sed reports success when a
+# pattern matches nothing (or more than once), so applying is unsafe unless each
+# hardcoded input literal occurs exactly once. Dry runs skip this invariant check
+# to preserve their existing output and read-only behavior.
+if [ "$apply" = true ] &&
+  { [ "$(literal_count "$TEMPLATES/agent-discover-plan.yml" 'cron: "17 */6 * * *"')" -ne 1 ] ||
+    [ "$(literal_count "$TEMPLATES/agent-implement.yml" 'cron: "37 * * * *"')" -ne 1 ] ||
+    [ "$(literal_count "$TEMPLATES/agent-implement.yml" 'base_branch: main')" -ne 1 ] ||
+    [ "$(literal_count "$TEMPLATES/agent-review-release.yml" 'cron: "7 * * * *"')" -ne 1 ]; }; then
+  echo "ERROR: a template's cron or base_branch literal does not occur exactly once; refusing to apply"
+  exit 1
+fi
+
 # Stagger schedules per repository so several targets do not open Claude
 # sessions on the same minute against one subscription. Derived from the
 # repository name so it is stable across runs.
@@ -135,7 +152,11 @@ for repo in "${targets[@]}"; do
     continue
   fi
 
-  work=$(mktemp -d)
+  if ! work=$(mktemp -d); then
+    echo "  ERROR: failed to create temporary worktree for $repo"
+    status=1
+    continue
+  fi
   trap 'rm -rf "$work"' EXIT
 
   if ! git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$work/repo"; then
@@ -146,61 +167,106 @@ for repo in "${targets[@]}"; do
     continue
   fi
 
-  # The rest of the apply for this repository runs as one subshell so that any
-  # failing step (a bad clone state, an unmatched sed pattern, a rejected push)
-  # exits that subshell instead of the whole script, and is caught below.
-  if ! (
-    cd "$work/repo"
-    git switch -qc ci/agent-ops-"$REF"
-    mkdir -p .github/workflows
-    for wf in "${drop[@]:-}"; do
-      [ -n "$wf" ] && git rm -q ".github/workflows/$wf"
-    done
+  # Temporarily disable the parent's errexit so it can collect the subshell's
+  # status. Every fallible apply step is guarded explicitly: Bash suppresses
+  # errexit for a compound command used directly as an if/! condition.
+  set +e
+  (
+    cd "$work/repo" || exit 1
 
-    # sed exits 0 whether or not it substituted anything, so a template whose
-    # literal cron or base_branch drifted from these patterns would otherwise
-    # render an unstaggered caller and report success. Verify the exact
-    # literals the sed patterns below expect are still present in the source
-    # templates before trusting the substitution.
-    if ! grep -qF 'cron: "17 */6 * * *"' "$TEMPLATES/agent-discover-plan.yml" ||
-      ! grep -qF 'cron: "37 * * * *"' "$TEMPLATES/agent-implement.yml" ||
-      ! grep -qF 'base_branch: main' "$TEMPLATES/agent-implement.yml" ||
-      ! grep -qF 'cron: "7 * * * *"' "$TEMPLATES/agent-review-release.yml"; then
-      echo "  ERROR: a template's cron or base_branch literal no longer matches onboard.sh's sed patterns; refusing to render an unstaggered caller" >&2
-      exit 1
+    apply_branch=ci/agent-ops-"$REF"
+    remote_apply_branch=false
+    if [ "$protected" = true ]; then
+      if git ls-remote --exit-code --heads origin "refs/heads/$apply_branch" >/dev/null; then
+        remote_apply_branch=true
+        git fetch -q --depth 1 origin \
+          "refs/heads/$apply_branch:refs/remotes/origin/$apply_branch" || exit 1
+        git switch -qc "$apply_branch" "origin/$apply_branch" || exit 1
+      else
+        remote_status=$?
+        if [ "$remote_status" -ne 2 ]; then
+          echo "  ERROR: failed to inspect the existing onboarding branch for $repo"
+          exit 1
+        fi
+        git switch -qc "$apply_branch" || exit 1
+      fi
+    else
+      git switch -qc "$apply_branch" || exit 1
     fi
+
+    mkdir -p .github/workflows || exit 1
+    for wf in "${drop[@]:-}"; do
+      if [ -n "$wf" ] && [ -e ".github/workflows/$wf" ]; then
+        git rm -q ".github/workflows/$wf" || exit 1
+      fi
+    done
 
     discover_cron="$(((base + 40) % 60)) */6 * * *"
     implement_cron="$base * * * *"
     review_cron="$(((base + 20) % 60)) * * * *"
+    branch_replacement=${branch//\\/\\\\}
+    branch_replacement=${branch_replacement//&/\\&}
+    branch_replacement=${branch_replacement//|/\\|}
 
     sed -e "s|cron: \"17 \\*/6 \\* \\* \\*\"|cron: \"$discover_cron\"|" \
-      "$TEMPLATES/agent-discover-plan.yml" > .github/workflows/agent-discover-plan.yml
+      "$TEMPLATES/agent-discover-plan.yml" > .github/workflows/agent-discover-plan.yml || exit 1
     sed -e "s|cron: \"37 \\* \\* \\* \\*\"|cron: \"$implement_cron\"|" \
-      -e "s|base_branch: main|base_branch: $branch|" \
-      "$TEMPLATES/agent-implement.yml" > .github/workflows/agent-implement.yml
+      -e "s|base_branch: main|base_branch: $branch_replacement|" \
+      "$TEMPLATES/agent-implement.yml" > .github/workflows/agent-implement.yml || exit 1
     sed -e "s|cron: \"7 \\* \\* \\* \\*\"|cron: \"$review_cron\"|" \
-      "$TEMPLATES/agent-review-release.yml" > .github/workflows/agent-review-release.yml
+      "$TEMPLATES/agent-review-release.yml" > .github/workflows/agent-review-release.yml || exit 1
 
-    git add .github/workflows
+    # Verify the rendered files as well as the source literals so substitution-
+    # side mistakes cannot be committed or pushed.
+    if [ "$(literal_count .github/workflows/agent-discover-plan.yml "cron: \"$discover_cron\"")" -ne 1 ] ||
+      [ "$(literal_count .github/workflows/agent-implement.yml "cron: \"$implement_cron\"")" -ne 1 ] ||
+      [ "$(literal_count .github/workflows/agent-implement.yml "base_branch: $branch")" -ne 1 ] ||
+      [ "$(literal_count .github/workflows/agent-review-release.yml "cron: \"$review_cron\"")" -ne 1 ]; then
+      echo "  ERROR: rendered callers do not contain exactly one expected cron and base_branch; refusing to apply"
+      exit 1
+    fi
+
+    git add .github/workflows || exit 1
 
     if git diff --cached --quiet; then
+      if [ "$protected" = true ] && [ "$remote_apply_branch" = true ]; then
+        existing_pr=$(gh pr list --repo "$repo" --base "$branch" --head "$apply_branch" \
+          --state open --json url --jq '.[0].url // empty') || exit 1
+        if [ -z "$existing_pr" ]; then
+          gh pr create --repo "$repo" --base "$branch" --head "$apply_branch" \
+            --title "ci: adopt the agent-ops $REF lifecycle lanes" \
+            --body "Adds the three agent-ops \`@$REF\` callers, targeting \`$branch\`. Opened as a pull request because \`$branch\` is protected." || exit 1
+        fi
+      fi
       echo "  -> already provisioned; no changes needed"
       exit 0
+    else
+      diff_status=$?
+      [ "$diff_status" -eq 1 ] || exit 1
     fi
 
-    git commit -q -m "ci: adopt the agent-ops $REF lifecycle lanes"
+    git commit -q -m "ci: adopt the agent-ops $REF lifecycle lanes" || exit 1
 
     if [ "$protected" = true ]; then
-      git push -q -u origin ci/agent-ops-"$REF"
-      gh pr create --repo "$repo" --base "$branch" --head ci/agent-ops-"$REF" \
-        --title "ci: adopt the agent-ops $REF lifecycle lanes" \
-        --body "Adds the three agent-ops \`@$REF\` callers, targeting \`$branch\`. Opened as a pull request because \`$branch\` is protected."
+      git push -q origin "HEAD:$apply_branch" || exit 1
+      existing_pr=$(gh pr list --repo "$repo" --base "$branch" --head "$apply_branch" \
+        --state open --json url --jq '.[0].url // empty') || exit 1
+      if [ -n "$existing_pr" ]; then
+        echo "  -> updated $existing_pr"
+      else
+        gh pr create --repo "$repo" --base "$branch" --head "$apply_branch" \
+          --title "ci: adopt the agent-ops $REF lifecycle lanes" \
+          --body "Adds the three agent-ops \`@$REF\` callers, targeting \`$branch\`. Opened as a pull request because \`$branch\` is protected." || exit 1
+      fi
     else
-      git push -q origin "HEAD:$branch"
+      git push -q origin "HEAD:$branch" || exit 1
       echo "  -> pushed directly to $branch"
     fi
-  ); then
+  )
+  apply_status=$?
+  set -e
+
+  if [ "$apply_status" -ne 0 ]; then
     echo "  ERROR: apply failed for $repo"
     status=1
   fi
