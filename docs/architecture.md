@@ -85,6 +85,11 @@ merge path. Lifting the draft is part of declaring that readiness; the
 workflow does not merge, deploy, or promote, and branch protection and a
 human still own the merge.
 
+A failed run only parks the pull request with `agent:blocked` if no verdict
+label was recorded first, and a last-resort step restores `agent:review`
+with an explanatory comment on any pull request that would otherwise end the
+run with no lifecycle label at all, so it re-enters the queue.
+
 ## Trust boundaries
 
 - The implementation runner is trusted with the Claude subscription token.

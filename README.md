@@ -142,13 +142,17 @@ The workflows use these labels, with explicit transitions that remove them:
 - `agent:implementing`: Implement removes it after opening the draft PR, or
   when the run fails.
 - `agent:review`: Review & Release removes it when recording a verdict, or
-  when a failed review moves the PR to `agent:blocked`.
+  when a failed review moves the PR to `agent:blocked` because no verdict
+  label was applied. A pull request that would otherwise end a review run
+  with no lifecycle label at all has `agent:review` restored automatically,
+  with an explanatory comment, so the next scheduled run re-reviews it.
 - `agent:approved`: Review & Release removes it when a later verdict requests
   changes.
 - `agent:changes-requested`: Review & Release removes it when a later verdict
   approves the revision.
-- `agent:blocked`: a human removes it when requeuing an issue with
-  `agent:ready` or retrying a PR with `agent:review`.
+- `agent:blocked`: Review & Release applies it to a pull request only when a
+  failed review leaves no verdict label; a human removes it when requeuing an
+  issue with `agent:ready` or retrying a PR with `agent:review`.
 
 The workflows create missing labels. Discover & Plan moves work toward
 `agent:ready`; Implement claims one issue and opens a draft PR from an
