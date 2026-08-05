@@ -82,9 +82,11 @@ jobs:
               echo "No pull request is waiting for review."
               echo
               echo "Open pull requests by lifecycle label:"
+              # An idle lane must stay green, so a transient API error here must
+              # not fail the step; report an unknown count instead.
               for LABEL in agent:review agent:approved agent:changes-requested agent:blocked; do
                 COUNT=$(gh pr list --repo "$TARGET_REPO" --state open --label "$LABEL" \
-                  --json number --jq 'length')
+                  --json number --jq 'length' || echo "?")
                 echo "- \`$LABEL\`: $COUNT"
               done
             } >> "$GITHUB_STEP_SUMMARY"
@@ -117,6 +119,7 @@ jobs:
         run: echo "/.agent-ops-control/" >> .git/info/exclude
 
       - name: Review and mark release readiness
+        id: review
         if: steps.select.outputs.pr != '0'
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         env:
@@ -134,8 +137,73 @@ jobs:
             --model ${{ inputs.model || 'opus' }}
             --max-turns 30
             --setting-sources user
+            --json-schema
+            '{"type":"object","additionalProperties":false,"required":["verdict","summary"],"properties":{"verdict":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"summary":{"type":"string"}}}'
             --allowedTools
-            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh run view:*)"
+            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh run view:*)"
+
+      - name: Apply the review verdict label
+        if: steps.select.outputs.pr != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.select.outputs.pr }}
+          TARGET_REPO: ${{ github.repository }}
+          VERDICT: ${{ fromJSON(steps.review.outputs.structured_output).verdict }}
+        run: |
+          # The reviewer no longer holds gh pr edit; this is the only place
+          # a verdict label gets written, derived from the model's typed
+          # structured_output rather than from prose it could stop mid-edit.
+          # Empty or malformed structured_output already fails this step
+          # during env evaluation, before the shell starts, because VERDICT
+          # is derived via fromJSON there. The default arm below only guards
+          # a conforming JSON value whose verdict field is neither of the
+          # two enum values the schema allows.
+          case "$VERDICT" in
+            APPROVE)
+              ADD_LABEL="agent:approved"
+              OTHER_VERDICT_LABEL="agent:changes-requested"
+              ;;
+            REQUEST_CHANGES)
+              ADD_LABEL="agent:changes-requested"
+              OTHER_VERDICT_LABEL="agent:approved"
+              ;;
+            *)
+              echo "::error::Pull request $PR: reviewer returned a conforming but unexpected structured verdict."
+              echo "Got: '$VERDICT'"
+              exit 1
+              ;;
+          esac
+
+          # agent:review may already be gone if a human removed it while the
+          # review was in flight, and the other verdict label is only present
+          # on a re-review after changes were requested, so both removals are
+          # built conditionally from the labels actually present rather than
+          # assumed. A transient read failure here must not discard the
+          # verdict the model already produced, so retry a few times before
+          # falling back to adding the verdict label alone.
+          LABELS=""
+          LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels --jq '[.labels[].name] | join(" ")'); then
+              LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LABELS_OK" != "true" ]; then
+            echo "::warning::Could not read labels on pull request $PR after retries; applying $ADD_LABEL without removing any other label."
+            gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "$ADD_LABEL"
+          else
+            EDIT_ARGS=(--add-label "$ADD_LABEL")
+            case " $LABELS " in
+              *" agent:review "*) EDIT_ARGS+=(--remove-label "agent:review") ;;
+            esac
+            case " $LABELS " in
+              *" $OTHER_VERDICT_LABEL "*) EDIT_ARGS+=(--remove-label "$OTHER_VERDICT_LABEL") ;;
+            esac
+            gh pr edit "$PR" --repo "$TARGET_REPO" "${EDIT_ARGS[@]}"
+          fi
 
       # The secrets context cannot be read from a step-level `if:`, so presence
       # is resolved into an output first.
@@ -232,11 +300,12 @@ jobs:
           PR: ${{ steps.select.outputs.pr }}
           TARGET_REPO: ${{ github.repository }}
         run: |
-          # The reviewer applies its own verdict labels. If it already did so and
-          # the run failed afterwards, parking the pull request would contradict
-          # a verdict that was actually reached. Test for the verdict itself:
-          # the absence of agent:review does not prove one was recorded, and
-          # treating it as proof is what stranded pull requests with no label.
+          # The "Apply the review verdict label" step may have already run
+          # before this failure. If it did, parking the pull request would
+          # contradict a verdict that was actually reached. Test for the
+          # verdict itself: the absence of agent:review does not prove one
+          # was recorded, and treating it as proof is what stranded pull
+          # requests with no label.
           LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
             --jq '[.labels[].name] | join(" ")')
           case " $LABELS " in
