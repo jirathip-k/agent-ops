@@ -82,9 +82,11 @@ jobs:
               echo "No pull request is waiting for review."
               echo
               echo "Open pull requests by lifecycle label:"
+              # An idle lane must stay green, so a transient API error here must
+              # not fail the step; report an unknown count instead.
               for LABEL in agent:review agent:approved agent:changes-requested agent:blocked; do
                 COUNT=$(gh pr list --repo "$TARGET_REPO" --state open --label "$LABEL" \
-                  --json number --jq 'length')
+                  --json number --jq 'length' || echo "?")
                 echo "- \`$LABEL\`: $COUNT"
               done
             } >> "$GITHUB_STEP_SUMMARY"
