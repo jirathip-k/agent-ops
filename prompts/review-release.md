@@ -20,18 +20,16 @@ additional permissions.
 3. Read available CI/check results. A missing or pending required check is not
    approval.
 4. Post one concise pull-request comment containing:
-   - the verdict: `APPROVE` or `REQUEST CHANGES`;
+   - the verdict: `APPROVE` or `REQUEST_CHANGES`;
    - blocking findings first, with file and line references where possible;
    - validation evidence and any residual risk.
 
-Apply the verdict label before removing anything. For `APPROVE`, add
-`agent:approved`, then remove `agent:review` and `agent:changes-requested`.
-For `REQUEST CHANGES`, add `agent:changes-requested`, then remove
-`agent:review` and `agent:approved`. The order matters: stopping between the
-two leaves the pull request carrying both labels, which the next run simply
-re-reviews, whereas removing first would strand it with no label and no lane
-that can see it. A human owns the revision and must restore `agent:review`
-after pushing new commits.
+The workflow applies the lifecycle label from your structured verdict output
+after this session ends; you do not add or remove labels yourself. Your
+structured output's `verdict` field must contain exactly one of `APPROVE` or
+`REQUEST_CHANGES` (underscore, no space) — the workflow parses that field
+verbatim to choose the lifecycle label. A human owns the revision and must
+restore `agent:review` after pushing new commits.
 
 Do not take the pull request out of draft yourself. A deterministic workflow
 step lifts the draft when, and only when, `agent:approved` is present.
