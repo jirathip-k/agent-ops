@@ -148,16 +148,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ steps.select.outputs.pr }}
           TARGET_REPO: ${{ github.repository }}
-          VERDICT: ${{ fromJSON(steps.review.outputs.structured_output).verdict }}
+          VERDICT: ${{ fromJSON(steps.review.outputs.structured_output || '{}').verdict }}
         run: |
           # The reviewer no longer holds gh pr edit; this is the only place
           # a verdict label gets written, derived from the model's typed
           # structured_output rather than from prose it could stop mid-edit.
-          # Empty or malformed structured_output already fails this step
-          # during env evaluation, before the shell starts, because VERDICT
-          # is derived via fromJSON there. The default arm below only guards
-          # a conforming JSON value whose verdict field is neither of the
-          # two enum values the schema allows.
+          # A step's env expressions are evaluated even when its if gate
+          # skips it, so on an idle run — reviewer skipped, output empty —
+          # a bare fromJSON('') is a template error that fails this step and
+          # reddens the whole run. Defaulting to '{}' leaves VERDICT empty
+          # instead, which the default arm below fails deliberately, from
+          # the shell, where the blocked handler can see it.
           case "$VERDICT" in
             APPROVE)
               ADD_LABEL="agent:approved"
@@ -168,7 +169,7 @@ jobs:
               OTHER_VERDICT_LABEL="agent:approved"
               ;;
             *)
-              echo "::error::Pull request $PR: reviewer returned a conforming but unexpected structured verdict."
+              echo "::error::Pull request $PR: reviewer returned no structured verdict, or one outside the schema's enum."
               echo "Got: '$VERDICT'"
               exit 1
               ;;
