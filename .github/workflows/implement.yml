@@ -241,18 +241,36 @@ jobs:
           git add --all
           # Inspect both what will be committed and anything a project command
           # committed on its own; either path would otherwise reach the remote.
-          STAGED=$(
-            git diff --cached --name-only
-            git diff --name-only "origin/$BASE_BRANCH...HEAD"
-          )
-          # Match the directory itself too: `git add -f .agent-ops-control` records
-          # a gitlink with no trailing slash, which a `/`-anchored pattern misses.
-          if printf '%s\n' "$STAGED" | grep -qE '^\.agent-ops-control(/|$)'; then
+          # Read NUL-delimited and match per record: `git diff --name-only`
+          # C-quotes any path with a non-ASCII byte, quote, backslash, or
+          # newline, which defeats a `^`-anchored match on its plain output.
+          # Collect to a temp file instead of `< <(...)`: process substitution
+          # discards the exit status of the commands feeding it, so under this
+          # step's `bash -e` a failing `git diff` (e.g. no merge base) would go
+          # unnoticed and the loop below would just read fewer records.
+          PATHS=$(mktemp)
+          { git diff --cached --no-renames --name-only -z;
+            git diff --no-renames --name-only -z "origin/$BASE_BRANCH...HEAD"; } > "$PATHS"
+          STAGED=()
+          CONTROL_HIT=0
+          while IFS= read -r -d '' path; do
+            STAGED+=("$path")
+            # Match the directory itself too: `git add -f .agent-ops-control`
+            # records a gitlink with no trailing slash, which a `/`-anchored
+            # pattern misses. Match with `case`, not `[[ =~ ]]`: a raw
+            # invalid-UTF-8 byte in path can make the regex engine fail the
+            # whole match (not just not-match) under a UTF-8 locale on some
+            # libc implementations, which would fail this guard open.
+            case "$path" in
+              .agent-ops-control | .agent-ops-control/*) CONTROL_HIT=1 ;;
+            esac
+          done < "$PATHS"
+          if [ "$CONTROL_HIT" -eq 1 ]; then
             echo "::error::Control-repository files were staged; refusing to publish."
             exit 1
           fi
           echo "Staged for publication:"
-          printf '%s\n' "$STAGED" | sort -u
+          printf '%s\n' "${STAGED[@]}" | LC_ALL=C sort -u
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Reject workflow and action changes
@@ -264,23 +282,41 @@ jobs:
           # silently find nothing, so verify it before trusting the result.
           git rev-parse --verify --quiet "origin/$BASE_BRANCH" > /dev/null
 
-          # Inspect both what will be committed and anything a project command
-          # committed on its own; either path would otherwise reach the remote.
-          CHANGED=$(
-            git diff --cached --name-only
-            git diff --name-only "origin/$BASE_BRANCH...HEAD"
-          )
-          REJECTED_PATTERN='^\.github/(workflows|actions)/'
+          IS_CONTROL_REPO=0
           REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows or actions.'
           if [ "$GITHUB_REPOSITORY" = 'jirathip-k/agent-ops' ]; then
-            REJECTED_PATTERN='^(\.github/(workflows|actions)|prompts|templates)/'
+            IS_CONTROL_REPO=1
             REJECTION_MESSAGE='The implementation lane may not modify GitHub workflows, actions, prompts, or templates in the control repository.'
           fi
-          REJECTED=$(printf '%s\n' "$CHANGED" |
-            grep -E "$REJECTED_PATTERN" || true)
-          if [ -n "$REJECTED" ]; then
+
+          # Inspect both what will be committed and anything a project command
+          # committed on its own; either path would otherwise reach the remote.
+          # Read NUL-delimited and match per record: `git diff --name-only`
+          # C-quotes any path with a non-ASCII byte, quote, backslash, or
+          # newline, which defeats a `^`-anchored match on its plain output.
+          # Collect to a temp file instead of `< <(...)`: process substitution
+          # discards the exit status of the commands feeding it, so under this
+          # step's `bash -e` a failing `git diff` (e.g. no merge base) would go
+          # unnoticed and the loop below would just read fewer records.
+          PATHS=$(mktemp)
+          { git diff --cached --no-renames --name-only -z;
+            git diff --no-renames --name-only -z "origin/$BASE_BRANCH...HEAD"; } > "$PATHS"
+          REJECTED=()
+          while IFS= read -r -d '' path; do
+            # Match with `case`, not `[[ =~ ]]`: a raw invalid-UTF-8 byte in
+            # path can make the regex engine fail the whole match (not just
+            # not-match) under a UTF-8 locale on some libc implementations,
+            # which would fail this guard open.
+            case "$path" in
+              .github/workflows | .github/workflows/* | .github/actions | .github/actions/*)
+                REJECTED+=("$path") ;;
+              prompts | prompts/* | templates | templates/*)
+                if [ "$IS_CONTROL_REPO" -eq 1 ]; then REJECTED+=("$path"); fi ;;
+            esac
+          done < "$PATHS"
+          if [ "${#REJECTED[@]}" -gt 0 ]; then
             echo "::error::$REJECTION_MESSAGE"
-            printf '%s\n' "$REJECTED"
+            printf '%s\n' "${REJECTED[@]}"
             exit 1
           fi
 
