@@ -167,10 +167,19 @@ for repo in "${targets[@]}"; do
     echo "  legacy callers : none"
   fi
 
+  # Classic branch protection and rulesets are separate systems with separate
+  # APIs; a branch protected only by a ruleset is invisible to the legacy
+  # endpoint. Check both, and treat a rules-endpoint failure (for example an
+  # older GHES without it) as no active rules rather than aborting the run.
   protected=false
   route="direct push"
   if gh api "repos/$repo/branches/$branch/protection" >/dev/null 2>&1; then
     protected=true
+  elif rules=$(gh api "repos/$repo/rules/branches/$branch" --jq 'length' 2>/dev/null) &&
+    [ "$rules" -gt 0 ] 2>/dev/null; then
+    protected=true
+  fi
+  if [ "$protected" = true ]; then
     route="pull request"
   fi
   echo "  protected      : $protected -> $route"
