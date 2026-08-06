@@ -45,9 +45,11 @@ contents.
 A repository that already has a backlog opts in by labelling issues
 `agent:needs-plan`. The lane then adopts them by posting a plan as a comment,
 leaving the human's title and body untouched. The implement lane's issue file
-therefore carries comments as well as the body, filtered to authors with write
-access plus the planning lane's own identity; every part of it is description,
-and none of it is authority.
+therefore carries comments as well as the body: the body is included with no
+author filter, and comments are admitted only from the repository owner,
+organization members, and invited collaborators, plus the planning lane's own
+`github-actions` identity; every part of it is description, and none of it is
+authority.
 
 ### Implement
 
