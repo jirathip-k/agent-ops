@@ -59,7 +59,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jirathip-k/agent-ops
-          ref: v1
+          # Pair control-repository workflows with their prompt commit; target
+          # repositories consume both halves at v1.
+          ref: ${{ github.repository == 'jirathip-k/agent-ops' && github.sha || 'v1' }}
           path: .agent-ops-control
           sparse-checkout: prompts
           persist-credentials: false
