@@ -128,8 +128,9 @@ git tag -f v1 <previous-commit>
 git push --force origin v1
 ```
 
-That restores target runs and this repository's pinned prompts. Workflow-file
-changes already merged to `main` require a revert on `main`.
+That restores target runs only. This repository pins neither half to the tag,
+so a bad prompt here needs the same remedy as a bad workflow file: a revert on
+`main`.
 
 ## State
 
