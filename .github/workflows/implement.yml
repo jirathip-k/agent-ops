@@ -188,7 +188,12 @@ jobs:
               COMMENT_OK=true
               break
             fi
-            sleep "$ATTEMPT"
+            # Guarded, unlike the label loop above: that one is allowed to abort
+            # the step, this one is not. agent:implementing has already landed
+            # by here, so exiting non-zero would park a healthy, claimed issue
+            # as blocked over a comment that is only provenance.
+            sleep "$ATTEMPT" ||
+              echo "::warning::Interrupted while waiting to retry the claim comment on issue $ISSUE."
           done
           if [ "$COMMENT_OK" != "true" ]; then
             echo "::warning::Could not comment on issue $ISSUE after retries; continuing."
@@ -486,8 +491,19 @@ jobs:
           # step runs during failure handling under continue-on-error, so the
           # lookup is guarded end to end and must never trip set -e.
           if [ -z "$PR_URL" ] && [ -n "$BRANCH" ]; then
+            # --head filters on the head ref NAME only, so it also matches pull
+            # requests opened from forks. The branch name is derived from the
+            # issue number, run id and attempt, all public the moment the job
+            # starts, so on a public repository anyone could open a fork pull
+            # request on that exact name in advance. Results come back newest
+            # first, so an unfiltered .[0] would hand agent:review — the review
+            # lane's only selection key — to a stranger's pull request and point
+            # the human at it, while the lane's own stayed stranded. Admit only
+            # a branch in this repository.
             FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
-              --json url --jq '.[0].url // ""' 2>/dev/null || echo "")
+              --json url,isCrossRepository \
+              --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""' \
+              || echo "")
             if [ -n "$FOUND_URL" ]; then
               PR_URL="$FOUND_URL"
             fi
