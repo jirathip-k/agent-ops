@@ -283,7 +283,21 @@ jobs:
               ;;
             *)
               echo "::error::Pull request $PR: reviewer returned no structured verdict, or one outside the schema's enum."
-              echo "Got: '$VERDICT'"
+              # $VERDICT is untrusted here precisely because it failed the
+              # schema's enum, so it can contain anything, including embedded
+              # newlines. A line `echo` emits starting with "::" is parsed by
+              # the runner as a workflow command (e.g. a forged `::error::` or
+              # `::add-mask::`), so fence this one echo behind stop-commands,
+              # keyed on a token generated fresh in this step that the
+              # untrusted value has no way to predict. `|| true` on the fenced
+              # echo guarantees the resume line still runs even if that echo
+              # somehow fails, so commands are never left disabled for the
+              # rest of the job. The `::error::` above stays outside the
+              # fenced region so the annotation still appears.
+              TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+              echo "::stop-commands::$TOKEN"
+              echo "Got: '$VERDICT'" || true
+              echo "::$TOKEN::"
               exit 1
               ;;
           esac
