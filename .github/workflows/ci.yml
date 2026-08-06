@@ -26,3 +26,36 @@ jobs:
 
       - name: Validate operator tooling
         run: shellcheck scripts/onboard.sh
+
+      - name: Check AGENTS.md references resolve
+        run: |
+          # Stale paths are the one kind of AGENTS.md drift that is
+          # mechanically verifiable, so they are checked rather than left to
+          # review. Every inline-code token that looks like a repository path
+          # must still exist. Tokens without a slash or a known extension
+          # (secret names, model names) are not paths and are skipped.
+          refs=$(grep -oE '`[^`]+`' AGENTS.md \
+            | tr -d '`' \
+            | grep -E '/|\.(yml|yaml|sh|md)$' \
+            | sort -u || true)
+
+          missing=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            case "$ref" in
+              */)
+                [ -d "${ref%/}" ] || { echo "missing directory: $ref"; missing=1; }
+                ;;
+              *)
+                [ -e "$ref" ] || { echo "missing path: $ref"; missing=1; }
+                ;;
+            esac
+          done <<EOF
+          $refs
+          EOF
+
+          if [ "$missing" -ne 0 ]; then
+            echo "AGENTS.md references paths that no longer exist." >&2
+            exit 1
+          fi
+          echo "all AGENTS.md path references resolve"
