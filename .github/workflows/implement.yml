@@ -420,7 +420,7 @@ jobs:
             echo "::warning::Could not update labels on issue $ISSUE."
           if [ -n "$PR_URL" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
-              --body "Implementation stopped after draft pull request $PR_URL was created. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
+              --body "Implementation stopped after draft pull request $PR_URL was created. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
           else
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
