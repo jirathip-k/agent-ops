@@ -70,10 +70,14 @@ When it runs against the agent-ops control repository, it also rejects changes
 under `prompts/` and `templates/`. It never merges.
 
 If a run fails after the draft pull request already exists, the failure
-handler leaves `agent:review` on that pull request and moves the issue to
-`agent:blocked` instead of back to `agent:ready`. The pull request and its
-issue then carry disagreeing lifecycle labels; that disagreement is
-deliberate, not corruption. The pull request already represents real,
+handler ensures `agent:review` is on that pull request — re-adding it if the
+publish step's own label add is what failed — and moves the issue to
+`agent:blocked` instead of back to `agent:ready`. That repair is a single
+best-effort attempt, so a run can still end with a pull request carrying no
+lifecycle label at all; the issue comment the handler posts says so and asks
+a human to add `agent:review` back by hand in that case. Otherwise the pull
+request and its issue carry disagreeing lifecycle labels; that disagreement
+is deliberate, not corruption. The pull request already represents real,
 reviewable work, so it stays in the review queue. The issue cannot be
 requeued without a human, because a scheduled run picking it up again would
 claim it, do the work a second time, and open a second draft pull request for

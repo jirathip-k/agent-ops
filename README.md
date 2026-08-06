@@ -156,10 +156,11 @@ The workflows use these labels, with explicit transitions that remove them:
   issue with `agent:ready` or retrying a PR with `agent:review`. When Implement
   fails after opening the draft PR, it says so on the issue and names the pull
   request: requeue there instead, because adding `agent:ready` back would open a
-  second pull request for the same issue. In that case the pull request keeps
-  `agent:review` while its issue carries `agent:blocked`; that mismatch is
-  expected, not a sign of a broken run — see [Implement](docs/architecture.md#implement)
-  for why.
+  second pull request for the same issue. In that case the failure handler
+  ensures the pull request carries `agent:review` while its issue carries
+  `agent:blocked`; that mismatch is expected, not a sign of a broken run — see
+  [Implement](docs/architecture.md#implement) for why, including the
+  best-effort case where the repair itself can fail.
 
 The workflows create missing labels. Discover & Plan moves work toward
 `agent:ready`; Implement claims one issue and opens a draft PR from an
