@@ -473,8 +473,25 @@ jobs:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           ISSUE: ${{ steps.select.outputs.issue }}
           PR_URL: ${{ steps.pull_request.outputs.url }}
+          BRANCH: ${{ steps.publish.outputs.branch }}
           TARGET_REPO: ${{ github.repository }}
         run: |
+          # Open a draft pull request can create the pull request server-side and
+          # then fail before recording its URL (a 502 or client-side timeout right
+          # after `gh pr create`, or the step being cancelled between the create
+          # and the echo). PR_URL is then empty even though a pull request exists,
+          # which would otherwise take the no-pull-request branch below and post
+          # the exact human-caused duplicate-requeue instruction #377 closed. Look
+          # the pull request up by branch first. This is best-effort only: this
+          # step runs during failure handling under continue-on-error, so the
+          # lookup is guarded end to end and must never trip set -e.
+          if [ -z "$PR_URL" ] && [ -n "$BRANCH" ]; then
+            FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
+              --json url --jq '.[0].url // ""' 2>/dev/null || echo "")
+            if [ -n "$FOUND_URL" ]; then
+              PR_URL="$FOUND_URL"
+            fi
+          fi
           if [ -n "$PR_URL" ]; then
             gh pr edit "$PR_URL" --repo "$TARGET_REPO" \
               --add-label "agent:review" ||
