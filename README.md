@@ -104,8 +104,8 @@ Then:
 The movable `v1` tag pins the reusable workflows and prompts used by every
 target repository. The onboarding script installs caller files that reference
 `@v1`, so nothing merged to `main` reaches a target until the tag moves. This
-repository's scheduled lanes are the partial exception: they run workflow
-files from `main` immediately, but each checks out its prompt at `ref: v1`.
+repository checks out each prompt at the running workflow's own commit, so its
+two halves cannot skew, while target repositories consume both at `v1`.
 
 Before moving it, confirm CI is green on `main` and that the commits being
 released were human-reviewed, which the merge policy already guarantees.
@@ -128,8 +128,9 @@ git tag -f v1 <previous-commit>
 git push --force origin v1
 ```
 
-That restores target runs and this repository's pinned prompts. Workflow-file
-changes already merged to `main` require a revert on `main`.
+That restores target runs only. This repository pins neither half to the tag,
+so a bad prompt here needs the same remedy as a bad workflow file: a revert on
+`main`.
 
 ## State
 

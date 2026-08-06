@@ -71,11 +71,14 @@ under `prompts/` and `templates/`. It never merges.
 
 This lane selects one PR labeled `agent:review` and starts a fresh read-only
 agent session. It reads the issue, diff, and CI results, posts one verdict,
-and applies either `agent:approved` or `agent:changes-requested`.
+and returns a schema-constrained structured verdict of `APPROVE` or
+`REQUEST_CHANGES`. A deterministic workflow step reads that field and applies
+either `agent:approved` or `agent:changes-requested`; the reviewer has no
+`gh pr edit` grant.
 
-A deterministic step then takes an approved pull request out of draft. It
-reads the label the reviewer applied rather than asking the model, so a
-`REQUEST CHANGES` verdict cannot lift the draft. The lift uses a token minted
+A separate deterministic step then takes an approved pull request out of draft.
+It reads the lifecycle label written from the structured verdict, so a
+`REQUEST_CHANGES` verdict cannot lift the draft. The lift uses a token minted
 from the custom App and scoped to pull requests, because GitHub rejects
 `markPullRequestReadyForReview` from the workflow `GITHUB_TOKEN`. When that
 token is unavailable the lift is skipped and reported, never silently passed.

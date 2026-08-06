@@ -59,7 +59,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jirathip-k/agent-ops
-          ref: v1
+          # Pair control-repository workflows with their prompt commit; target
+          # repositories consume both halves at v1.
+          ref: ${{ github.repository == 'jirathip-k/agent-ops' && github.sha || 'v1' }}
           path: .agent-ops-control
           sparse-checkout: prompts
           persist-credentials: false
@@ -154,7 +156,7 @@ jobs:
           blocked_count=0
           for label in "${issue_labels[@]}"; do
             count=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "$label" --json number --jq 'length' || echo "?")
+              --label "$label" --limit 200 --json number --jq 'length' || echo "?")
             echo "| \`$label\` | issues | $count |" >> "$GITHUB_STEP_SUMMARY"
 
             if [[ "$label" == "agent:ready" ]]; then
@@ -166,7 +168,7 @@ jobs:
 
           for label in "${pr_labels[@]}"; do
             count=$(gh pr list --repo "$TARGET_REPO" --state open \
-              --label "$label" --json number --jq 'length' || echo "?")
+              --label "$label" --limit 200 --json number --jq 'length' || echo "?")
             echo "| \`$label\` | pull requests | $count |" >> "$GITHUB_STEP_SUMMARY"
           done
 
