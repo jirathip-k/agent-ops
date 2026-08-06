@@ -161,9 +161,38 @@ jobs:
           ISSUE: ${{ steps.select.outputs.issue }}
           TARGET_REPO: ${{ github.repository }}
         run: |
-          gh issue edit "$ISSUE" --repo "$TARGET_REPO" --add-label "agent:implementing"
-          gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
-            --body "Implementation started in workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          # The label is the claim: fail closed on exhaustion, because an issue
+          # left unclaimed here could be re-selected by a concurrent or
+          # subsequent run.
+          CLAIM_LABEL_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue edit "$ISSUE" --repo "$TARGET_REPO" --add-label "agent:implementing"; then
+              CLAIM_LABEL_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$CLAIM_LABEL_OK" != "true" ]; then
+            echo "::error::Could not add agent:implementing to issue $ISSUE after retries."
+            exit 1
+          fi
+
+          # The comment is provenance only, not the claim: the label above already
+          # landed, so failing the step here would discard a claim that already
+          # succeeded and park a healthy issue as blocked. Warn and continue
+          # instead of exiting non-zero.
+          COMMENT_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation started in workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."; then
+              COMMENT_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$COMMENT_OK" != "true" ]; then
+            echo "::warning::Could not comment on issue $ISSUE after retries; continuing."
+          fi
 
       - name: Fetch the selected issue
         if: steps.select.outputs.issue != '0'
@@ -179,17 +208,37 @@ jobs:
           # already agent:ready, so an unfiltered read would hand the untrusted
           # input surface to the whole internet. Bound the volume too: CI
           # reporters post as github-actions and can be thousands of lines.
-          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
-            --jq '[ "# " + .title, (.body // "") ]
-                  + ( [ .comments[]
-                        | select(.authorAssociation == "OWNER"
-                              or .authorAssociation == "MEMBER"
-                              or .authorAssociation == "COLLABORATOR"
-                              or .author.login == "github-actions") ]
-                      | .[-5:]
-                      | map("---\n\n### Comment by " + (.author.login // "unknown")
-                            + "\n\n" + ((.body // "")[:4000])) )
-                  | join("\n\n")' > "$ISSUE_FILE"
+          #
+          # Write to a scratch file and only move it onto ISSUE_FILE once an
+          # attempt succeeds: `cmd > "$ISSUE_FILE"` truncates the destination
+          # before cmd runs, so retrying straight into ISSUE_FILE would leave a
+          # truncated file behind after a failed attempt, for either a later
+          # attempt or the implementation step to read.
+          FETCH_TMP=$(mktemp)
+          FETCH_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
+              --jq '[ "# " + .title, (.body // "") ]
+                    + ( [ .comments[]
+                          | select(.authorAssociation == "OWNER"
+                                or .authorAssociation == "MEMBER"
+                                or .authorAssociation == "COLLABORATOR"
+                                or .author.login == "github-actions") ]
+                        | .[-5:]
+                        | map("---\n\n### Comment by " + (.author.login // "unknown")
+                              + "\n\n" + ((.body // "")[:4000])) )
+                    | join("\n\n")' > "$FETCH_TMP"; then
+              FETCH_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$FETCH_OK" != "true" ]; then
+            rm -f "$FETCH_TMP"
+            echo "::error::Could not fetch issue $ISSUE after retries."
+            exit 1
+          fi
+          mv "$FETCH_TMP" "$ISSUE_FILE"
 
       - name: Implement the selected issue
         id: claude
