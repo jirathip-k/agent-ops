@@ -414,14 +414,39 @@ jobs:
               --add-label "agent:review" ||
               echo "::warning::Could not add agent:review to pull request $PR_URL."
           fi
-          gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
-            --remove-label "agent:implementing" --remove-label "agent:ready" \
-            --add-label "agent:blocked" ||
-            echo "::warning::Could not update labels on issue $ISSUE."
+          # gh issue edit applies adds and removes concurrently, so a combined
+          # call can strip every lifecycle label. Add the replacement first and
+          # only remove the old labels after the add succeeds.
+          BLOCKED_LABEL_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+              --add-label "agent:blocked"; then
+              BLOCKED_LABEL_OK=true
+              break
+            fi
+            # The other retry loops in this file sleep unguarded because they
+            # are allowed to abort their step. This one is not: an interrupted
+            # sleep must not trip set -e and skip the comment below, which is
+            # the only thing that tells a human what happened.
+            sleep "$ATTEMPT" ||
+              echo "::warning::Interrupted while waiting to retry agent:blocked on issue $ISSUE."
+          done
+          if [ "$BLOCKED_LABEL_OK" = "true" ]; then
+            gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+              --remove-label "agent:implementing" --remove-label "agent:ready" ||
+              echo "::warning::Could not remove implementation queue labels from issue $ISSUE."
+          else
+            echo "::warning::Could not add agent:blocked to issue $ISSUE after retries; keeping its existing labels."
+          fi
           if [ -n "$PR_URL" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped after draft pull request $PR_URL was created. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
-          else
+          elif [ "$BLOCKED_LABEL_OK" = "true" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
+          else
+            # agent:blocked never landed, so the usual requeue instruction
+            # names a label that is not there and leaves the one that is.
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped, and this issue could not be labelled agent:blocked. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. It still carries agent:implementing, which keeps it out of the queue: remove that label to requeue it."
           fi
