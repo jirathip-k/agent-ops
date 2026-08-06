@@ -109,10 +109,30 @@ jobs:
           # Restrict to this repository: the reference carries its owning repo,
           # and `Closes otherowner/otherrepo#42` would otherwise fetch whatever
           # this repository happens to number 42 and review against it.
-          REFS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json closingIssuesReferences \
-            --jq '[ .closingIssuesReferences[]
-                    | select((.repository.owner.login + "/" + .repository.name) == env.TARGET_REPO)
-                    | .number ] | join(" ")')
+          #
+          # A transient API error here is indistinguishable from a real one,
+          # so retry before failing closed. The value is captured inside the
+          # loop itself: testing the call and then re-running it would double
+          # the API cost and could observe different state between the check
+          # and the real read.
+          REFS=""
+          RESOLVE_OK=false
+          for ATTEMPT in 1 2 3; do
+            if REFS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json closingIssuesReferences \
+                --jq '[ .closingIssuesReferences[]
+                        | select((.repository.owner.login + "/" + .repository.name) == env.TARGET_REPO)
+                        | .number ] | join(" ")'); then
+              RESOLVE_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$RESOLVE_OK" != "true" ]; then
+            echo "::error::Pull request $PR: could not resolve the linked issue after retries."
+            exit 1
+          fi
+
           read -r -a REF_NUMBERS <<< "$REFS"
           ISSUE=${REF_NUMBERS[0]:-0}
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
@@ -150,17 +170,40 @@ jobs:
           # already agent:ready, so an unfiltered read would hand the untrusted
           # input surface to the whole internet. Bound the volume too: CI
           # reporters post as github-actions and can be thousands of lines.
-          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
-            --jq '[ "# " + .title, (.body // "") ]
-                  + ( [ .comments[]
-                        | select(.authorAssociation == "OWNER"
-                              or .authorAssociation == "MEMBER"
-                              or .authorAssociation == "COLLABORATOR"
-                              or .author.login == "github-actions") ]
-                      | .[-5:]
-                      | map("---\n\n### Comment by " + (.author.login // "unknown")
-                            + "\n\n" + ((.body // "")[:4000])) )
-                  | join("\n\n")' > "$ISSUE_FILE"
+          #
+          # `cmd > "$ISSUE_FILE"` truncates the destination before cmd runs, so
+          # retrying a failed attempt in place would risk leaving a truncated
+          # file for the review step to read. Write to a scratch file instead
+          # and only move it onto ISSUE_FILE once a full attempt succeeds; if
+          # every retry fails, the scratch file is discarded and the step
+          # fails closed without ever touching ISSUE_FILE.
+          ISSUE_SCRATCH="$ISSUE_FILE.tmp"
+          FETCH_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
+                --jq '[ "# " + .title, (.body // "") ]
+                      + ( [ .comments[]
+                            | select(.authorAssociation == "OWNER"
+                                  or .authorAssociation == "MEMBER"
+                                  or .authorAssociation == "COLLABORATOR"
+                                  or .author.login == "github-actions") ]
+                          | .[-5:]
+                          | map("---\n\n### Comment by " + (.author.login // "unknown")
+                                + "\n\n" + ((.body // "")[:4000])) )
+                      | join("\n\n")' > "$ISSUE_SCRATCH"; then
+              FETCH_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$FETCH_OK" != "true" ]; then
+            rm -f "$ISSUE_SCRATCH"
+            echo "::error::Could not fetch linked issue #$ISSUE after retries."
+            exit 1
+          fi
+
+          mv "$ISSUE_SCRATCH" "$ISSUE_FILE"
 
       - name: Checkout pull-request branch
         if: steps.select.outputs.pr != '0'
@@ -240,7 +283,32 @@ jobs:
               ;;
             *)
               echo "::error::Pull request $PR: reviewer returned no structured verdict, or one outside the schema's enum."
-              echo "Got: '$VERDICT'"
+              # $VERDICT is untrusted here precisely because it failed the
+              # schema's enum, so it can contain anything, including embedded
+              # newlines. A line `echo` emits starting with "::" is parsed by
+              # the runner as a workflow command (e.g. a forged `::error::` or
+              # `::add-mask::`), so fence this one echo behind stop-commands,
+              # keyed on a token generated fresh in this step that the
+              # untrusted value has no way to predict. `|| true` on the fenced
+              # echo guarantees the resume line still runs even if that echo
+              # somehow fails, so commands are never left disabled for the
+              # rest of the job. The `::error::` above stays outside the
+              # fenced region so the annotation still appears.
+              TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+              # tr exits 0 on empty input and there is no pipefail here, so a
+              # failing head or od would yield an empty TOKEN silently. The
+              # runner rejects an empty stop token and never establishes the
+              # fence, which would print the untrusted value unfenced — the
+              # fence would fail open, in the one step whose job is to close
+              # this vector. Assert the token before relying on it, and never
+              # echo the value if the assertion fails.
+              if [ "${#TOKEN}" -ne 32 ]; then
+                echo "::error::Could not generate a stop-commands token; withholding the reviewer's verdict value."
+                exit 1
+              fi
+              echo "::stop-commands::$TOKEN"
+              echo "Got: '$VERDICT'" || true
+              echo "::$TOKEN::"
               exit 1
               ;;
           esac
