@@ -367,9 +367,34 @@ jobs:
           URL=$(gh pr create --repo "$TARGET_REPO" --head "$BRANCH" --base "$BASE_BRANCH" \
             --draft --title "$TITLE" --body "$BODY")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
-          gh pr edit "$URL" --repo "$TARGET_REPO" --add-label "agent:review"
-          gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
-            --remove-label "agent:ready" --remove-label "agent:implementing"
+          # These three API calls are not atomic, so retry the transitions that
+          # could otherwise strand a pull request where no lane can see it.
+          PR_LABEL_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$URL" --repo "$TARGET_REPO" --add-label "agent:review"; then
+              PR_LABEL_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$PR_LABEL_OK" != "true" ]; then
+            echo "::error::Could not add agent:review to pull request $URL after retries."
+            exit 1
+          fi
+
+          ISSUE_LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+              --remove-label "agent:ready" --remove-label "agent:implementing"; then
+              ISSUE_LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ISSUE_LABELS_OK" != "true" ]; then
+            echo "::error::Could not remove implementation queue labels from issue $ISSUE after retries."
+            exit 1
+          fi
           echo "Opened draft PR: $URL"
 
       - name: Mark failed work as blocked
@@ -381,11 +406,22 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           ISSUE: ${{ steps.select.outputs.issue }}
+          PR_URL: ${{ steps.pull_request.outputs.url }}
           TARGET_REPO: ${{ github.repository }}
         run: |
+          if [ -n "$PR_URL" ]; then
+            gh pr edit "$PR_URL" --repo "$TARGET_REPO" \
+              --add-label "agent:review" ||
+              echo "::warning::Could not add agent:review to pull request $PR_URL."
+          fi
           gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
             --remove-label "agent:implementing" --remove-label "agent:ready" \
             --add-label "agent:blocked" ||
             echo "::warning::Could not update labels on issue $ISSUE."
-          gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
-            --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
+          if [ -n "$PR_URL" ]; then
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped after draft pull request $PR_URL was created. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
+          else
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
+          fi
