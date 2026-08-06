@@ -283,9 +283,16 @@ for repo in "${targets[@]}"; do
         existing_pr=$(gh pr list --repo "$repo" --base "$branch" --head "$apply_branch" \
           --state open --json url --jq '.[0].url // empty') || exit 1
         if [ -z "$existing_pr" ]; then
-          gh pr create --repo "$repo" --base "$branch" --head "$apply_branch" \
-            --title "ci: adopt the agent-ops $REF lifecycle lanes" \
-            --body "Adds the three agent-ops \`@$REF\` callers, targeting \`$branch\`. Opened as a pull request because \`$branch\` is protected." || exit 1
+          # The clone is shallow, so local ancestry is unreliable; ask the
+          # compare API whether the branch still has commits the base lacks.
+          # A merged (or since-fast-forwarded) branch compares 0 ahead, and
+          # GitHub refuses to open a pull request with no commits between refs.
+          ahead_by=$(gh api "repos/$repo/compare/$branch...$apply_branch" --jq .ahead_by) || exit 1
+          if [ "$ahead_by" -gt 0 ]; then
+            gh pr create --repo "$repo" --base "$branch" --head "$apply_branch" \
+              --title "ci: adopt the agent-ops $REF lifecycle lanes" \
+              --body "Adds the three agent-ops \`@$REF\` callers, targeting \`$branch\`. Opened as a pull request because \`$branch\` is protected." || exit 1
+          fi
         fi
       fi
       echo "  -> already provisioned; no changes needed"
