@@ -96,6 +96,72 @@ jobs:
           echo "Selected PR: $PR"
           echo "Selected pull request: #$PR" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Resolve the linked issue
+        id: issue
+        if: steps.select.outputs.pr != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.select.outputs.pr }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          # Use GitHub's own link resolution rather than a body regex, so prose
+          # that merely looks like a closing keyword cannot select an issue.
+          # Restrict to this repository: the reference carries its owning repo,
+          # and `Closes otherowner/otherrepo#42` would otherwise fetch whatever
+          # this repository happens to number 42 and review against it.
+          REFS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json closingIssuesReferences \
+            --jq '[ .closingIssuesReferences[]
+                    | select((.repository.owner.login + "/" + .repository.name) == env.TARGET_REPO)
+                    | .number ] | join(" ")')
+          read -r -a REF_NUMBERS <<< "$REFS"
+          ISSUE=${REF_NUMBERS[0]:-0}
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+
+          # Every other degradation in this lane is loud. A review with no
+          # acceptance criteria to check against must be too: it can still
+          # return APPROVE, and agent:approved is the only gate on the draft
+          # lift.
+          if [ "$ISSUE" = "0" ]; then
+            echo "::warning::Pull request $PR closes no issue in $TARGET_REPO; the reviewer has no acceptance criteria to check."
+            echo "Linked issue: none — reviewed without acceptance criteria." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Linked issue: #$ISSUE" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${#REF_NUMBERS[@]}" -gt 1 ]; then
+              echo "::warning::Pull request $PR closes ${#REF_NUMBERS[@]} issues; reviewing against #$ISSUE only."
+            fi
+          fi
+
+      - name: Fetch the linked issue
+        if: steps.select.outputs.pr != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.issue.outputs.issue }}
+          TARGET_REPO: ${{ github.repository }}
+          ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
+        run: |
+          if [ "$ISSUE" = "0" ]; then
+            echo "No linked issue was found for this pull request." > "$ISSUE_FILE"
+            exit 0
+          fi
+
+          # Admit only comments from people with write access to the repository,
+          # plus github-actions, which is the identity the planning lane comments
+          # as. On a public repository anyone can comment on an issue that is
+          # already agent:ready, so an unfiltered read would hand the untrusted
+          # input surface to the whole internet. Bound the volume too: CI
+          # reporters post as github-actions and can be thousands of lines.
+          gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
+            --jq '[ "# " + .title, (.body // "") ]
+                  + ( [ .comments[]
+                        | select(.authorAssociation == "OWNER"
+                              or .authorAssociation == "MEMBER"
+                              or .authorAssociation == "COLLABORATOR"
+                              or .author.login == "github-actions") ]
+                      | .[-5:]
+                      | map("---\n\n### Comment by " + (.author.login // "unknown")
+                            + "\n\n" + ((.body // "")[:4000])) )
+                  | join("\n\n")' > "$ISSUE_FILE"
+
       - name: Checkout pull-request branch
         if: steps.select.outputs.pr != '0'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,8 +198,10 @@ jobs:
           prompt: |
             REPOSITORY: ${{ github.repository }}
             PULL_REQUEST: ${{ steps.select.outputs.pr }}
+            ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
 
             Follow .agent-ops-control/prompts/review-release.md exactly.
+            Read the issue from the file at ISSUE_FILE.
             Work in the checked-out pull-request branch.
           claude_args: >-
             --model ${{ inputs.model || 'opus' }}
@@ -142,7 +210,7 @@ jobs:
             --json-schema
             '{"type":"object","additionalProperties":false,"required":["verdict","summary"],"properties":{"verdict":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"summary":{"type":"string"}}}'
             --allowedTools
-            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh run view:*)"
+            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh run view:*)"
 
       - name: Apply the review verdict label
         if: steps.select.outputs.pr != '0'
