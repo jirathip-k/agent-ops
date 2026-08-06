@@ -247,7 +247,7 @@ jobs:
           # Lifting the draft is a readiness signal, not a merge: branch
           # protection and a human still own that. Deriving it from the label
           # the reviewer applied keeps it out of the model's hands, so a
-          # REQUEST CHANGES verdict can never lift the draft.
+          # REQUEST_CHANGES verdict can never lift the draft.
           STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
             --jq '.isDraft, ([.labels[].name] | join(" "))')
           DRAFT=$(printf '%s\n' "$STATE" | head -1)
