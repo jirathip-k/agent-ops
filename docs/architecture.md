@@ -67,6 +67,18 @@ The lane rejects changes under `.github/workflows/` and `.github/actions/`.
 When it runs against the agent-ops control repository, it also rejects changes
 under `prompts/` and `templates/`. It never merges.
 
+If a run fails after the draft pull request already exists, the failure
+handler leaves `agent:review` on that pull request and moves the issue to
+`agent:blocked` instead of back to `agent:ready`. The pull request and its
+issue then carry disagreeing lifecycle labels; that disagreement is
+deliberate, not corruption. The pull request already represents real,
+reviewable work, so it stays in the review queue. The issue cannot be
+requeued without a human, because a scheduled run picking it up again would
+claim it, do the work a second time, and open a second draft pull request for
+work the first one already covers. A human resolves this by reviewing or
+closing the existing pull request, then clearing `agent:blocked` only if the
+issue still needs another attempt.
+
 ### Review & Release
 
 This lane selects one PR labeled `agent:review` and starts a fresh read-only
