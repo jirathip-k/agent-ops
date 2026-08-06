@@ -153,7 +153,10 @@ The workflows use these labels, with explicit transitions that remove them:
   approves the revision.
 - `agent:blocked`: Review & Release applies it to a pull request only when a
   failed review leaves no verdict label; a human removes it when requeuing an
-  issue with `agent:ready` or retrying a PR with `agent:review`.
+  issue with `agent:ready` or retrying a PR with `agent:review`. When Implement
+  fails after opening the draft PR, it says so on the issue and names the pull
+  request: requeue there instead, because adding `agent:ready` back would open a
+  second pull request for the same issue.
 
 The workflows create missing labels. Discover & Plan moves work toward
 `agent:ready`; Implement claims one issue and opens a draft PR from an
