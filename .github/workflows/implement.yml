@@ -414,10 +414,26 @@ jobs:
               --add-label "agent:review" ||
               echo "::warning::Could not add agent:review to pull request $PR_URL."
           fi
-          gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
-            --remove-label "agent:implementing" --remove-label "agent:ready" \
-            --add-label "agent:blocked" ||
-            echo "::warning::Could not update labels on issue $ISSUE."
+          # gh issue edit applies adds and removes concurrently, so a combined
+          # call can strip every lifecycle label. Add the replacement first and
+          # only remove the old labels after the add succeeds.
+          BLOCKED_LABEL_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+              --add-label "agent:blocked"; then
+              BLOCKED_LABEL_OK=true
+              break
+            fi
+            sleep "$ATTEMPT" ||
+              echo "::warning::Could not wait before retrying agent:blocked on issue $ISSUE."
+          done
+          if [ "$BLOCKED_LABEL_OK" = "true" ]; then
+            gh issue edit "$ISSUE" --repo "$TARGET_REPO" \
+              --remove-label "agent:implementing" --remove-label "agent:ready" ||
+              echo "::warning::Could not remove implementation queue labels from issue $ISSUE."
+          else
+            echo "::warning::Could not add agent:blocked to issue $ISSUE after retries; keeping its existing labels."
+          fi
           if [ -n "$PR_URL" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped after draft pull request $PR_URL was created. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
