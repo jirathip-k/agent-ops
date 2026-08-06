@@ -104,9 +104,32 @@ jobs:
           PR: ${{ steps.select.outputs.pr }}
           TARGET_REPO: ${{ github.repository }}
         run: |
-          ISSUE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json closingIssuesReferences \
-            --jq '[.closingIssuesReferences[].number] | .[0] // 0')
+          # Use GitHub's own link resolution rather than a body regex, so prose
+          # that merely looks like a closing keyword cannot select an issue.
+          # Restrict to this repository: the reference carries its owning repo,
+          # and `Closes otherowner/otherrepo#42` would otherwise fetch whatever
+          # this repository happens to number 42 and review against it.
+          REFS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json closingIssuesReferences \
+            --jq '[ .closingIssuesReferences[]
+                    | select((.repository.owner.login + "/" + .repository.name) == env.TARGET_REPO)
+                    | .number ] | join(" ")')
+          read -r -a REF_NUMBERS <<< "$REFS"
+          ISSUE=${REF_NUMBERS[0]:-0}
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+
+          # Every other degradation in this lane is loud. A review with no
+          # acceptance criteria to check against must be too: it can still
+          # return APPROVE, and agent:approved is the only gate on the draft
+          # lift.
+          if [ "$ISSUE" = "0" ]; then
+            echo "::warning::Pull request $PR closes no issue in $TARGET_REPO; the reviewer has no acceptance criteria to check."
+            echo "Linked issue: none — reviewed without acceptance criteria." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Linked issue: #$ISSUE" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${#REF_NUMBERS[@]}" -gt 1 ]; then
+              echo "::warning::Pull request $PR closes ${#REF_NUMBERS[@]} issues; reviewing against #$ISSUE only."
+            fi
+          fi
 
       - name: Fetch the linked issue
         if: steps.select.outputs.pr != '0'
