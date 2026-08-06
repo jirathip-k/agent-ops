@@ -87,13 +87,13 @@ jobs:
             # An idle lane must stay green, so a transient API error here must
             # not fail the step; report an unknown count instead.
             READY=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "agent:ready" --json number --jq 'length' || echo "?")
+              --label "agent:ready" --limit 200 --json number --jq 'length' || echo "?")
             IMPLEMENTING=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "agent:implementing" --json number --jq 'length' || echo "?")
+              --label "agent:implementing" --limit 200 --json number --jq 'length' || echo "?")
             BLOCKED=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "agent:blocked" --json number --jq 'length' || echo "?")
+              --label "agent:blocked" --limit 200 --json number --jq 'length' || echo "?")
             NEEDS_PLAN=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "agent:needs-plan" --json number --jq 'length' || echo "?")
+              --label "agent:needs-plan" --limit 200 --json number --jq 'length' || echo "?")
             {
               echo "No issue was selectable."
               echo ""

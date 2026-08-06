@@ -154,7 +154,7 @@ jobs:
           blocked_count=0
           for label in "${issue_labels[@]}"; do
             count=$(gh issue list --repo "$TARGET_REPO" --state open \
-              --label "$label" --json number --jq 'length' || echo "?")
+              --label "$label" --limit 200 --json number --jq 'length' || echo "?")
             echo "| \`$label\` | issues | $count |" >> "$GITHUB_STEP_SUMMARY"
 
             if [[ "$label" == "agent:ready" ]]; then
@@ -166,7 +166,7 @@ jobs:
 
           for label in "${pr_labels[@]}"; do
             count=$(gh pr list --repo "$TARGET_REPO" --state open \
-              --label "$label" --json number --jq 'length' || echo "?")
+              --label "$label" --limit 200 --json number --jq 'length' || echo "?")
             echo "| \`$label\` | pull requests | $count |" >> "$GITHUB_STEP_SUMMARY"
           done
 

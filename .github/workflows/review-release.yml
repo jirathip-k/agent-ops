@@ -86,7 +86,7 @@ jobs:
               # not fail the step; report an unknown count instead.
               for LABEL in agent:review agent:approved agent:changes-requested agent:blocked; do
                 COUNT=$(gh pr list --repo "$TARGET_REPO" --state open --label "$LABEL" \
-                  --json number --jq 'length' || echo "?")
+                  --limit 200 --json number --jq 'length' || echo "?")
                 echo "- \`$LABEL\`: $COUNT"
               done
             } >> "$GITHUB_STEP_SUMMARY"
