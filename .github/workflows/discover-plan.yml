@@ -582,7 +582,7 @@ jobs:
           if ! [[ "$orphan_count" =~ ^[0-9]+$ ]]; then
             orphan_count="?"
           fi
-          echo "| \`agent/issue-*\` (no open PR, issue open) | branches | $orphan_count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`agent/issue-*\` (no open or merged PR, issue open) | branches | $orphan_count |" >> "$GITHUB_STEP_SUMMARY"
 
           # A label count is not a selectability count: `agent:ready` and
           # `agent:blocked` are independent --label filters, so an issue
