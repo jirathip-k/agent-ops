@@ -153,7 +153,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           blocked_count=0
-          implementing_count=0
           for label in "${issue_labels[@]}"; do
             count=$(gh issue list --repo "$TARGET_REPO" --state open \
               --label "$label" --limit 200 --json number --jq 'length' || echo "?")
@@ -161,8 +160,6 @@ jobs:
 
             if [[ "$label" == "agent:blocked" ]]; then
               blocked_count=$count
-            elif [[ "$label" == "agent:implementing" ]]; then
-              implementing_count=$count
             fi
           done
 
@@ -192,9 +189,23 @@ jobs:
           # in-flight issue is deliberately not selectable, and warning on that
           # would cry wolf for the length of every implementation run. The queue
           # is stuck only when nothing is selectable AND nothing is in flight.
+          #
+          # agent:implementing together with agent:blocked is never a genuinely
+          # in-flight run, though: `Claim the issue` only ever labels an issue
+          # that is agent:ready and not blocked, so that pairing can only be the
+          # documented `Mark failed work as blocked` outcome — its 3x-retried add
+          # of agent:blocked succeeded, but the single unretried removal of
+          # agent:implementing and agent:ready afterward failed. Query in-flight
+          # the same way selectable_count is queried above, rather than trusting
+          # the raw agent:implementing label count.
+          in_flight_count=$(gh issue list --repo "$TARGET_REPO" --state open \
+            --label "agent:implementing" \
+            --search "-label:agent:blocked" \
+            --limit 200 --json number --jq 'length' || echo "?")
+
           if [[ "$selectable_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ &&
-                "$implementing_count" =~ ^[0-9]+$ ]] &&
-             (( selectable_count == 0 && implementing_count == 0 && blocked_count > 0 )); then
+                "$in_flight_count" =~ ^[0-9]+$ ]] &&
+             (( selectable_count == 0 && in_flight_count == 0 && blocked_count > 0 )); then
             {
               echo
               echo "> [!WARNING]"
