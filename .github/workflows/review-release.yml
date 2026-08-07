@@ -412,8 +412,35 @@ jobs:
           # protection and a human still own that. Deriving it from the label
           # the reviewer applied keeps it out of the model's hands, so a
           # REQUEST_CHANGES verdict can never lift the draft.
-          STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
-            --jq '.isDraft, ([.labels[].name] | join(" "))')
+          # This step is continue-on-error under bash -e, so an unretried
+          # read that fails here aborts above every loud path below and the
+          # run stays green with the lift silently skipped — exactly the
+          # outcome this step's rework exists to prevent. Retry the read,
+          # and if it still fails, say so loudly instead of dying quietly.
+          STATE=""
+          STATE_OK=false
+          for ATTEMPT in 1 2 3; do
+            if STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
+                --jq '.isDraft, ([.labels[].name] | join(" "))'); then
+              STATE_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$STATE_OK" != "true" ]; then
+            # Labels are unknown on this path, so the message must not claim
+            # the pull request is approved.
+            echo "::warning::Could not read state for pull request $PR after retries; the draft lift could not be evaluated."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's state could not be read, so the draft lift"
+              echo "> could not be evaluated. If it is approved and still a draft,"
+              echo "> lift it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           DRAFT=$(printf '%s\n' "$STATE" | head -1)
           LABELS=$(printf '%s\n' "$STATE" | tail -1)
 
