@@ -636,8 +636,13 @@ jobs:
           esac
           gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
             echo "::warning::Could not update labels on pull request $PR."
+          # By this point agent:blocked is already applied, so a failure here
+          # would otherwise leave the park with no explanation and no trace
+          # beyond a non-zero exit inside this continue-on-error step. Guard
+          # it like its sibling in the lifecycle-label safety net below.
           gh pr comment "$PR" --repo "$TARGET_REPO" \
-            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry." ||
+            echo "::warning::Could not comment on pull request $PR explaining the park."
 
       - name: Ensure the reviewed pull request keeps a lifecycle label
         if: >-
