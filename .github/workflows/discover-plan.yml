@@ -159,6 +159,7 @@ jobs:
 
           APPLIED=0
           REJECTED=0
+          FAILED=0
 
           while IFS= read -r TRANSITION; do
             [ -z "$TRANSITION" ] && continue
@@ -290,13 +291,30 @@ jobs:
               echo "| #$ISSUE | applied |" >> "$GITHUB_STEP_SUMMARY"
               APPLIED=$((APPLIED + 1))
             else
-              echo "::warning::Issue $ISSUE: a validated transition could not be fully applied after retries."
-              echo "| #$ISSUE | error: apply failed after retries |" >> "$GITHUB_STEP_SUMMARY"
-              REJECTED=$((REJECTED + 1))
+              # This is not a rejection: a validated transition had at least
+              # one gh issue edit call fail after retries, which can leave
+              # the issue in a half-applied state (e.g. agent:ready added,
+              # agent:needs-plan not removed) — the exact double-labelled
+              # shape #400 and #404 were filed over. Counting it as
+              # "rejected" would read as "nothing was written" when
+              # something was. Track it separately and fail the step below,
+              # matching the fail-closed posture implement.yml:465 and
+              # review-release.yml:370 already use for a failed label write.
+              echo "::error::Issue $ISSUE: a validated transition could not be fully applied after retries; it may now carry a partially-applied label change."
+              echo "| #$ISSUE | failed: partially applied after retries |" >> "$GITHUB_STEP_SUMMARY"
+              FAILED=$((FAILED + 1))
             fi
           done < "$TRANSITIONS_FILE"
 
-          echo "Applied: $APPLIED, rejected: $REJECTED." >> "$GITHUB_STEP_SUMMARY"
+          echo "Applied: $APPLIED, rejected: $REJECTED, failed: $FAILED." >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail after every transition has had its attempt and the summary
+          # is fully written, not inside the loop: best-effort per item stays
+          # intact, and the run still ends non-green so a human is pointed at
+          # the specific issue(s) above that may need a manual label fix.
+          if [ "$FAILED" -gt 0 ]; then
+            exit 1
+          fi
 
       - name: Print Claude execution result
         if: always() && steps.claude.outcome != 'skipped'
