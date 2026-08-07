@@ -446,6 +446,91 @@ jobs:
             --search "-label:agent:blocked" \
             --limit 200 --json number --jq 'length' || echo "?")
 
+          # `Mark failed work as blocked` in implement.yml has a second failure
+          # path (#429): when its 3x-retried --add-label agent:blocked fails
+          # outright, the else arm leaves the issue on agent:ready +
+          # agent:implementing with no agent:blocked at all — byte-identical
+          # to a healthy in-flight run. No label query can tell those apart,
+          # so in_flight_count above can be wrong in a way this step cannot
+          # self-correct from labels alone.
+          #
+          # Chosen independent signal: whether a run of the "Agent ·
+          # Implement" workflow is actually executing right now, via the
+          # actions:read this job already holds. Identified by display name,
+          # not by file path: in this control repository that workflow lives
+          # at .github/workflows/implement.yml and runs directly on its own
+          # schedule, so it produces first-class runs under that file. In an
+          # onboarded target repository the only copy present is the caller
+          # template at templates/workflows/agent-implement.yml, which calls
+          # this reusable workflow with `uses:` — the reusable workflow then
+          # runs as a job inside the caller's run and never produces a run
+          # under its own file name there, so a lookup by file name would
+          # 404 in every onboarded repo. Both the reusable workflow and the
+          # caller template declare `name: Agent · Implement`, so the
+          # display name is the one token identical in the control repo and
+          # every onboarded repo.
+          #
+          # That workflow's concurrency group allows at most one such run at
+          # a time per repo, and that run stays "in_progress" for its entire
+          # job duration — including the tail after `Open a draft pull
+          # request`, since the job keeps running failure-handling steps
+          # after that point. So this cannot reopen the false-alarm class
+          # #420 closed: a genuinely in-flight run is never mistaken for
+          # stale.
+          #
+          # Failure modes:
+          # - Not found: no workflow named "Agent · Implement" exists in
+          #   this repo at all. gh run list fails immediately with "could
+          #   not find any workflows named ..." — a permanent condition, not
+          #   the transient class the retry loop below exists for, so it is
+          #   detected and reported plainly without retrying rather than
+          #   burning three sleeps to reach the same answer and hiding a
+          #   naming bug behind an API-flakiness warning.
+          # - Name collision: a target repository that happens to already
+          #   own an unrelated workflow also named "Agent · Implement" would
+          #   have its run status read here instead — a false positive this
+          #   check has no way to detect.
+          # - Ambiguous count: this only proves the lane is busy, not which
+          #   issue it is working on, so if in_flight_count is more than one
+          #   and a run is in progress, a stale straggler mixed in with a
+          #   genuine one is not distinguished — the count is trusted as-is,
+          #   which stays on the safe (no false alarm) side.
+          # - Transport failure: if the check cannot be confirmed after 3
+          #   retries, this falls back to trusting the label-derived
+          #   in_flight_count unmodified, so a transient failure here cannot
+          #   manufacture a false alarm either; it can only leave this
+          #   particular stranding undetected for one more run.
+          if [[ "$in_flight_count" =~ ^[0-9]+$ && "$in_flight_count" -gt 0 ]]; then
+            live_run_count=""
+            live_run_ok=false
+            workflow_not_found=false
+            for ATTEMPT in 1 2 3; do
+              RUN_LIST_ERR=$(mktemp)
+              if live_run_count=$(gh run list --repo "$TARGET_REPO" \
+                  --workflow "Agent · Implement" --status in_progress \
+                  --limit 100 --json databaseId --jq 'length' 2>"$RUN_LIST_ERR"); then
+                live_run_ok=true
+                break
+              fi
+              if grep -q "could not find any workflows named" "$RUN_LIST_ERR"; then
+                workflow_not_found=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+
+            if [ "$workflow_not_found" = "true" ]; then
+              echo "::warning::Could not locate a workflow named \"Agent · Implement\" in $TARGET_REPO; trusting the label-derived in-flight count of $in_flight_count."
+            elif [[ "$live_run_ok" == "true" && "$live_run_count" =~ ^[0-9]+$ ]]; then
+              if [[ "$live_run_count" -eq 0 ]]; then
+                echo "::warning::$in_flight_count issue(s) carry agent:implementing with no live implement run behind them; no longer counting as in flight."
+                in_flight_count=0
+              fi
+            else
+              echo "::warning::Could not confirm whether an implement run is genuinely in flight after retries; trusting the label-derived in-flight count of $in_flight_count."
+            fi
+          fi
+
           if [[ "$selectable_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ &&
                 "$in_flight_count" =~ ^[0-9]+$ ]] &&
              (( selectable_count == 0 && in_flight_count == 0 && blocked_count > 0 )); then
