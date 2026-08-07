@@ -548,10 +548,31 @@ jobs:
             # lane's only selection key — to a stranger's pull request and point
             # the human at it, while the lane's own stayed stranded. Admit only
             # a branch in this repository.
-            FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
-              --json url,isCrossRepository \
-              --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""' \
-              || echo "")
+            #
+            # Retried like the label edits below: this lookup runs while the
+            # API is already flaky enough to have lost the pull-request url in
+            # the first place, and a single failed attempt here would wrongly
+            # tell the human no pull request exists when the lookup just
+            # failed to check, instead of the correct pull-request message
+            # below. Guarded like the agent:blocked loop below, not exited
+            # like the claim loop: this runs under continue-on-error and must
+            # never trip set -e.
+            FOUND_URL=""
+            FOUND_URL_OK=false
+            for ATTEMPT in 1 2 3; do
+              if FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
+                --json url,isCrossRepository \
+                --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""'); then
+                FOUND_URL_OK=true
+                break
+              fi
+              sleep "$ATTEMPT" ||
+                echo "::warning::Interrupted while waiting to retry the pull-request lookup for branch $BRANCH."
+            done
+            if [ "$FOUND_URL_OK" != "true" ]; then
+              echo "::warning::Could not look up an existing pull request for branch $BRANCH after retries."
+              FOUND_URL=""
+            fi
             if [ -n "$FOUND_URL" ]; then
               PR_URL="$FOUND_URL"
             fi
@@ -588,6 +609,23 @@ jobs:
           if [ -n "$PR_URL" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped after draft pull request $PR_URL was created. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
+          elif [ -n "$BRANCH" ] && [ "$BLOCKED_LABEL_OK" = "true" ]; then
+            # Publish implementation branch succeeded but no pull request was
+            # found for it, and the lookup above found none either. The work
+            # is not lost, only invisible to every lane; name the branch so a
+            # human can find it, since requeuing publishes a new one rather
+            # than reusing this one (#406). Review and Release selects on the
+            # agent:review label alone, so a pull request opened by hand from
+            # that branch is invisible to it too until labelled — say so, the
+            # same way the PR_URL branch above does.
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped after publishing branch $BRANCH, but no pull request was found for it. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The completed work is on that branch; open a pull request from it by hand if it should proceed, or delete the branch if it should not. If you open one, add agent:review to it so Review and Release picks it up. Requeuing this issue publishes a new branch rather than reusing this one, so only remove agent:blocked and add agent:ready if you want a fresh attempt instead."
+          elif [ -n "$BRANCH" ]; then
+            # agent:blocked never landed, so the usual requeue instruction
+            # names a label that is not there and leaves the one that is;
+            # still name the branch so the work is not lost track of.
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped, and this issue could not be labelled agent:blocked. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The completed work is on branch $BRANCH, with no pull request found for it; open one by hand if it should proceed, and add agent:review to it so Review and Release picks it up. This issue still carries agent:implementing, which keeps it out of the queue: remove that label to requeue it, noting that a requeue publishes a new branch rather than reusing this one."
           elif [ "$BLOCKED_LABEL_OK" = "true" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
