@@ -500,8 +500,30 @@ jobs:
           # verdict itself: the absence of agent:review does not prove one
           # was recorded, and treating it as proof is what stranded pull
           # requests with no label.
-          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
-            --jq '[.labels[].name] | join(" ")')
+          #
+          # This step's whole purpose is handling failure, and it is already
+          # continue-on-error, so an unretried read that fails here just
+          # vanishes: no park, no comment, agent:review stays, and an hourly
+          # rerun burns a review session with no human signal ever posted.
+          # Retry it, and if it still fails, say so instead of parking
+          # blind — with the labels unknown, adding agent:blocked could
+          # contradict a verdict that was already recorded.
+          LABELS=""
+          LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+                --jq '[.labels[].name] | join(" ")'); then
+              LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LABELS_OK" != "true" ]; then
+            echo "::warning::Could not read labels on pull request $PR after retries; it was neither parked nor commented, and may be re-reviewed next run."
+            exit 0
+          fi
+
           case " $LABELS " in
             *" agent:approved "* | *" agent:changes-requested "*)
               echo "Verdict already applied to pull request $PR; leaving labels alone."
