@@ -551,14 +551,34 @@ jobs:
             exit 0
           fi
 
-          if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+          # The gh pr ready write below was, until now, a single attempt. On
+          # the normal path through "Apply the review verdict label" (its
+          # label read succeeded), that step removes agent:review before
+          # this step runs, so a failed lift here is permanent: Select one
+          # pull request filters on agent:review and can never re-select
+          # this pull request to retry it. On that step's own fallback path
+          # (its label read exhausted retries), it adds the verdict label
+          # without removing agent:review, so agent:review is still present
+          # here and a failed lift in fact gets re-selected and retried on
+          # the next tick. The dominant path is genuinely permanent, so
+          # retry this write with the same house pattern regardless.
+          LIFT_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+              LIFT_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LIFT_OK" = "true" ]; then
             echo "Marked pull request $PR ready for review; a human owns the merge."
             echo "Marked pull request #$PR ready for review; a human owns the merge." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Failed to lift pull request $PR out of draft; it stays approved and drafted."
+            echo "::warning::Failed to lift pull request $PR out of draft after retries; it stays approved and drafted."
             {
               echo "> [!WARNING]"
-              echo "> Pull request #$PR is approved but the draft lift failed."
+              echo "> Pull request #$PR is approved but the draft lift failed after retries."
               echo "> Confirm the App is installed on this repository with"
               echo "> Pull requests: read and write, then lift it by hand."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -611,18 +631,98 @@ jobs:
               exit 0
               ;;
           esac
+
           # agent:review may already be gone, so removing it is conditional;
-          # a single gh pr edit would fail on the missing label and skip the add.
+          # a single gh pr edit would fail on the missing label and skip the
+          # add. A failed removal (even after retries) leaves agent:review in
+          # place: Select one pull request re-selects this pull request on
+          # the next tick and re-reviews it regardless of whether
+          # agent:blocked also lands below, and the lifecycle-label safety
+          # net sees agent:review present and deliberately does nothing —
+          # it does not clean up the resulting contradiction. Retry the
+          # removal like every other write here, and report the mixed
+          # outcome honestly below rather than calling it a park.
+          REMOVE_OK=true
           case " $LABELS " in
             *" agent:review "*)
-              gh pr edit "$PR" --repo "$TARGET_REPO" --remove-label "agent:review" ||
-                echo "::warning::Could not remove agent:review from pull request $PR."
+              REMOVE_OK=false
+              for ATTEMPT in 1 2 3; do
+                if gh pr edit "$PR" --repo "$TARGET_REPO" --remove-label "agent:review"; then
+                  REMOVE_OK=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+              if [ "$REMOVE_OK" != "true" ]; then
+                echo "::warning::Pull request $PR: could not remove agent:review after retries."
+              fi
               ;;
           esac
-          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
-            echo "::warning::Could not update labels on pull request $PR."
-          gh pr comment "$PR" --repo "$TARGET_REPO" \
-            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+
+          # Whether this add succeeded decides what the comment below can
+          # honestly say, so ADD_OK is read only after the retry loop
+          # settles it, and the comment is written after that — not
+          # asserted up front the way the single unretried attempt used to.
+          ADD_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked"; then
+              ADD_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ADD_OK" != "true" ]; then
+            echo "::error::Pull request $PR: could not apply agent:blocked after retries; it was NOT parked."
+          fi
+
+          # No combination of the two writes above can strand this pull
+          # request: either agent:review survived and the lane re-selects it
+          # directly, or every lifecycle label is gone and the always()
+          # safety net below restores agent:review. What differs across the
+          # four combinations is whether a stale agent:blocked is left
+          # behind, and whether the human is told the truth — so both the
+          # run summary and the comment are written from the combined
+          # REMOVE_OK/ADD_OK outcome, not from ADD_OK alone.
+          if [ "$REMOVE_OK" = "true" ] && [ "$ADD_OK" = "true" ]; then
+            echo "Parked pull request $PR as agent:blocked after a failed review."
+            echo "Parked pull request #$PR as \`agent:blocked\` after a failed review." >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+          elif [ "$REMOVE_OK" = "true" ] && [ "$ADD_OK" != "true" ]; then
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's review failed, but \`agent:blocked\` could not"
+              echo "> be applied after retries, so it was NOT parked. It now carries no"
+              echo "> lifecycle label; the lifecycle-label safety net will restore"
+              echo "> \`agent:review\` so it is re-reviewed automatically."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped, but the workflow could not apply agent:blocked after retries, so this pull request was NOT parked. It has no lifecycle label right now; agent:review will be restored automatically so it is re-reviewed. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID if this keeps happening."
+          elif [ "$REMOVE_OK" != "true" ] && [ "$ADD_OK" = "true" ]; then
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's review failed and \`agent:blocked\` was added,"
+              echo "> but \`agent:review\` could not be removed after retries. Both"
+              echo "> labels are now present — it was NOT parked. It will be"
+              echo "> re-reviewed automatically since \`agent:review\` remains; remove"
+              echo "> the stale \`agent:blocked\` by hand to avoid the contradiction."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped, but the workflow could not remove agent:review after retries, so this pull request now carries both agent:review and agent:blocked — it was NOT parked. It will be re-reviewed automatically since agent:review remains; remove the stale agent:blocked by hand to avoid the contradiction. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID if this keeps happening."
+          else
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's review failed, but neither removing"
+              echo "> \`agent:review\` nor adding \`agent:blocked\` succeeded after"
+              echo "> retries — it was NOT parked. \`agent:review\` is unchanged, so it"
+              echo "> will be re-reviewed automatically."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped, but the workflow could not update labels on this pull request after retries — it was NOT parked. agent:review is unchanged, so it will be re-reviewed automatically. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID if this keeps happening."
+          fi
+
+          # The label outcome above is already reported, so a failure here
+          # would otherwise leave it with no trace beyond a non-zero exit
+          # inside this continue-on-error step. Guard it like its sibling in
+          # the lifecycle-label safety net below.
+          gh pr comment "$PR" --repo "$TARGET_REPO" --body "$COMMENT_BODY" ||
+            echo "::warning::Could not comment on pull request $PR explaining the outcome."
 
       - name: Ensure the reviewed pull request keeps a lifecycle label
         if: >-
@@ -684,8 +784,25 @@ jobs:
             echo "> Pull request #$PR lost every lifecycle label during this run."
             echo "> \`agent:review\` was restored so the next run re-reviews it."
           } >> "$GITHUB_STEP_SUMMARY"
-          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review" ||
-            echo "::warning::Could not restore agent:review on pull request $PR."
+
+          # This is the last-resort handler: nothing runs after it, so a
+          # failure here is not merely unreported like elsewhere, it is
+          # unrecoverable until a human intervenes by hand. The read above
+          # that gates this step already retries; give the write that is the
+          # actual safety net the same treatment, and escalate exhaustion to
+          # ::error:: rather than ::warning:: since no later step can notice.
+          ADD_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review"; then
+              ADD_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ADD_OK" != "true" ]; then
+            echo "::error::Pull request $PR: could not restore agent:review after retries; it is left with no lifecycle label and nothing further will retry it. Add agent:review by hand."
+          fi
+
           gh pr comment "$PR" --repo "$TARGET_REPO" \
             --body "This pull request ended a review run with no lifecycle label, so no lane could see it. \`agent:review\` was restored automatically; the next scheduled run will review it again. Workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." ||
             echo "::warning::Could not comment on pull request $PR."
