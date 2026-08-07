@@ -502,20 +502,47 @@ jobs:
                   continue
                 fi
 
+                # A deleted or renumbered issue is a permanent condition, not
+                # the transient class the retry loop below exists for: `gh
+                # issue view` fails immediately with "Could not resolve to an
+                # issue" and would otherwise burn three retries every run,
+                # forever, for a branch that can never resolve. Detected and
+                # skipped without retrying, the same way the workflow lookup
+                # further below distinguishes "not found" from "transient".
+                #
+                # A transient failure, in contrast, is per-item like the
+                # sibling read in "Apply label transitions" above (:183): it
+                # skips only this one branch rather than aborting the whole
+                # orphan count to "?", so one bad branch cannot blind the row
+                # to every other orphan that round.
                 issue_state_ok=false
                 issue_state=""
+                issue_not_found=false
                 for ATTEMPT in 1 2 3; do
-                  if issue_state=$(gh issue view "$ISSUE" --repo "$TARGET_REPO" --json state --jq '.state'); then
+                  ISSUE_VIEW_ERR=$(mktemp)
+                  if issue_state=$(gh issue view "$ISSUE" --repo "$TARGET_REPO" \
+                      --json state --jq '.state' 2>"$ISSUE_VIEW_ERR"); then
                     issue_state_ok=true
+                    rm -f "$ISSUE_VIEW_ERR"
                     break
                   fi
+                  if grep -q "Could not resolve to an issue" "$ISSUE_VIEW_ERR"; then
+                    issue_not_found=true
+                    rm -f "$ISSUE_VIEW_ERR"
+                    break
+                  fi
+                  rm -f "$ISSUE_VIEW_ERR"
                   sleep "$ATTEMPT"
                 done
 
+                if [ "$issue_not_found" = "true" ]; then
+                  echo "::warning::Branch $BRANCH names issue $ISSUE, which no longer exists; skipped."
+                  continue
+                fi
+
                 if [ "$issue_state_ok" != "true" ]; then
                   echo "::warning::Could not read live state for issue $ISSUE after retries; branch $BRANCH's orphan status is unknown this run."
-                  orphan_count="?"
-                  break
+                  continue
                 fi
 
                 if [ "$issue_state" = "OPEN" ]; then
