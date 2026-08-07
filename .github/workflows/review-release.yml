@@ -164,12 +164,40 @@ jobs:
             exit 0
           fi
 
-          # Admit only comments from people with write access to the repository,
-          # plus github-actions, which is the identity the planning lane comments
-          # as. On a public repository anyone can comment on an issue that is
-          # already agent:ready, so an unfiltered read would hand the untrusted
-          # input surface to the whole internet. Bound the volume too: CI
-          # reporters post as github-actions and can be thousands of lines.
+          # Admit comments whose authorAssociation is OWNER, MEMBER, or
+          # COLLABORATOR, plus github-actions, which is the identity the
+          # planning lane comments as. That is "invited to the repository or
+          # affiliated with the owning org", not "has write access":
+          # COLLABORATOR includes read-only and triage invitees, and on a
+          # public repository MEMBER implies org membership with no
+          # repository permission at all. It still excludes NONE,
+          # CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, and MANNEQUIN,
+          # so the public still cannot reach it. On a public repository
+          # anyone can comment on an issue that is already agent:ready, so an
+          # unfiltered read would hand the untrusted input surface to the
+          # whole internet.
+          #
+          # github-actions is admitted by login, not by provenance: any
+          # workflow in this repository that comments with the default
+          # GITHUB_TOKEN posts as github-actions, so a CI reporter that
+          # echoes fork-authored text into a comment would be admitted too.
+          # Kept as a blanket exception deliberately, because CI reporters
+          # post as github-actions and can be thousands of lines; closing
+          # this properly would need a per-repository allowlist of trusted
+          # reporting workflows, judged not worth it yet.
+          #
+          # .body is passed through unfiltered and uncapped, unlike every
+          # comment. Kept that way deliberately: an adopted backlog issue
+          # opened by the public keeps its original body once a maintainer
+          # labels it agent:ready, and that human label is the intended
+          # gate, not the body's authorship. This makes the body the widest
+          # remaining public channel into this file, and the only unbounded
+          # one.
+          #
+          # gh fetches every comment before jq discards all but the last
+          # five; the filtering is client-side and cannot avoid paginating
+          # first. Harmless at this system's volume, worth knowing if this
+          # filter is ever reused somewhere with far more comment traffic.
           #
           # `cmd > "$ISSUE_FILE"` truncates the destination before cmd runs, so
           # retrying a failed attempt in place would risk leaving a truncated
