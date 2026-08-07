@@ -528,16 +528,23 @@ jobs:
 
             open_issues_ok=false
             open_issues_file=$(mktemp)
-            for ATTEMPT in 1 2 3; do
-              if gh api "repos/$TARGET_REPO/issues" --method GET --paginate \
-                  -f state=open -f per_page=100 \
-                  --jq '.[] | select(.pull_request == null) | .number' \
-                  > "$open_issues_file"; then
-                open_issues_ok=true
-                break
-              fi
-              sleep "$ATTEMPT"
-            done
+            # Only worth attempting if the pulls call above already
+            # succeeded: with pr_status_ok still false the row is already
+            # committed to "?" below, so retrying this query would burn up
+            # to three more calls and six seconds of sleeps for a result
+            # that can no longer change the outcome.
+            if [ "$pr_status_ok" = "true" ]; then
+              for ATTEMPT in 1 2 3; do
+                if gh api "repos/$TARGET_REPO/issues" --method GET --paginate \
+                    -f state=open -f per_page=100 \
+                    --jq '.[] | select(.pull_request == null) | .number' \
+                    > "$open_issues_file"; then
+                  open_issues_ok=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+            fi
 
             if [ "$pr_status_ok" != "true" ] || [ "$open_issues_ok" != "true" ]; then
               orphan_count="?"
