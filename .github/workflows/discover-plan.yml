@@ -446,6 +446,59 @@ jobs:
             --search "-label:agent:blocked" \
             --limit 200 --json number --jq 'length' || echo "?")
 
+          # `Mark failed work as blocked` in implement.yml has a second failure
+          # path (#429): when its 3x-retried --add-label agent:blocked fails
+          # outright, the else arm leaves the issue on agent:ready +
+          # agent:implementing with no agent:blocked at all — byte-identical
+          # to a healthy in-flight run. No label query can tell those apart,
+          # so in_flight_count above can be wrong in a way this step cannot
+          # self-correct from labels alone.
+          #
+          # Chosen independent signal: whether an implement.yml run is
+          # actually executing right now, via the actions:read this job
+          # already holds. implement.yml's own concurrency group
+          # (agent-implement-${{ github.repository }}, cancel-in-progress:
+          # false) allows at most one such run at a time repo-wide, and that
+          # run stays "in_progress" for its entire job duration — including
+          # the tail after `Open a draft pull request`, since the job keeps
+          # running failure-handling steps after that point. So this cannot
+          # reopen the false-alarm class #420 closed: a genuinely in-flight
+          # run is never mistaken for stale.
+          #
+          # Failure mode: this only proves the implement lane is busy, not
+          # which issue it is working on, so if in_flight_count is more than
+          # one and a run is in progress, a stale straggler mixed in with a
+          # genuine run is not distinguished — the count is trusted as-is
+          # rather than zeroed, which stays on the safe (no false alarm)
+          # side. And if the run-status check itself cannot be confirmed
+          # after retries (API flakiness), this falls back to trusting the
+          # label-derived in_flight_count unmodified, so a transient failure
+          # here cannot manufacture a false alarm either; it can only leave
+          # this particular stranding undetected for one more run.
+          if [[ "$in_flight_count" =~ ^[0-9]+$ && "$in_flight_count" -gt 0 ]]; then
+            live_run_count=""
+            live_run_ok=false
+            for ATTEMPT in 1 2 3; do
+              if live_run_count=$(gh run list --repo "$TARGET_REPO" \
+                  --workflow implement.yml --status in_progress \
+                  --limit 100 --json databaseId --jq 'length'); then
+                live_run_ok=true
+                break
+              fi
+              sleep "$ATTEMPT" ||
+                echo "::warning::Interrupted while waiting to retry the implement run-status check."
+            done
+
+            if [[ "$live_run_ok" == "true" && "$live_run_count" =~ ^[0-9]+$ ]]; then
+              if [[ "$live_run_count" -eq 0 ]]; then
+                echo "::warning::$in_flight_count issue(s) carry agent:implementing with no live implement run behind them; no longer counting as in flight."
+                in_flight_count=0
+              fi
+            else
+              echo "::warning::Could not confirm whether an implement run is genuinely in flight after retries; trusting the label-derived in-flight count of $in_flight_count."
+            fi
+          fi
+
           if [[ "$selectable_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ &&
                 "$in_flight_count" =~ ^[0-9]+$ ]] &&
              (( selectable_count == 0 && in_flight_count == 0 && blocked_count > 0 )); then
