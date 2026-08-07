@@ -149,19 +149,40 @@ for repo in "${targets[@]}"; do
 
   # Legacy callers: any workflow pointing at this control repo that is not one
   # of the three current lanes.
-  legacy=$(gh api "repos/$repo/contents/.github/workflows?ref=$branch" --jq '.[].name' 2>/dev/null || true)
+  #
+  # A failed listing or content fetch must not read as "no legacy callers" —
+  # that would leave stale lanes running duplicate schedules against the same
+  # subscription, the exact condition this check exists to prevent (the same
+  # fail-open pattern #355 fixed for the secrets check above). Only a genuine
+  # HTTP 404 (the target has no .github/workflows directory yet) is a real
+  # "none"; any other failure is unverifiable and must block apply.
+  legacy_unverified=false
+  if ! legacy=$(gh api "repos/$repo/contents/.github/workflows?ref=$branch" --jq '.[].name' 2>&1); then
+    if printf '%s\n' "$legacy" | grep -qE 'HTTP 404|Not Found'; then
+      legacy=""
+    else
+      legacy_unverified=true
+      legacy=""
+    fi
+  fi
   drop=()
   while IFS= read -r wf; do
     [ -n "$wf" ] || continue
     case "$wf" in agent-discover-plan.yml | agent-implement.yml | agent-review-release.yml) continue ;; esac
     # Match a reusable-workflow call specifically. A bare mention of the control
     # repository is not enough — workflows legitimately check prompts out of it.
-    if gh api "repos/$repo/contents/.github/workflows/$wf?ref=$branch" --jq '.content' 2>/dev/null |
-      base64 -d 2>/dev/null | grep -Eq "uses:[[:space:]]*$CONTROL_REPO/\.github/workflows/"; then
+    if ! wf_content=$(gh api "repos/$repo/contents/.github/workflows/$wf?ref=$branch" --jq '.content' 2>&1); then
+      legacy_unverified=true
+      continue
+    fi
+    if printf '%s' "$wf_content" | base64 -d 2>/dev/null | grep -Eq "uses:[[:space:]]*$CONTROL_REPO/\.github/workflows/"; then
       drop+=("$wf")
     fi
   done <<<"$legacy"
-  if [ ${#drop[@]} -gt 0 ]; then
+  if [ "$legacy_unverified" = true ]; then
+    echo "  legacy callers : cannot verify with this credential — listing or reading workflow files in $repo failed"
+    status=1
+  elif [ ${#drop[@]} -gt 0 ]; then
     echo "  legacy callers : ${drop[*]}"
   else
     echo "  legacy callers : none"
@@ -194,6 +215,11 @@ for repo in "${targets[@]}"; do
 
   if [ "$secrets_unverified" = true ]; then
     echo "  -> refusing to apply; secrets could not be verified"
+    continue
+  fi
+
+  if [ "$legacy_unverified" = true ]; then
+    echo "  -> refusing to apply; legacy callers could not be verified"
     continue
   fi
 
