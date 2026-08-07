@@ -330,9 +330,26 @@ jobs:
             sleep "$ATTEMPT"
           done
 
+          # By the time either write below runs, the model's work is done and
+          # only the recording remains — the write is the more valuable half
+          # of this step. Retry it like the read above, and keep the same
+          # fail-closed posture: if it still fails after retries, fail the
+          # step so "Mark failed review as blocked" runs and a human is told,
+          # rather than silently discarding a completed review.
           if [ "$LABELS_OK" != "true" ]; then
             echo "::warning::Could not read labels on pull request $PR after retries; applying $ADD_LABEL without removing any other label."
-            gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "$ADD_LABEL"
+            ADD_OK=false
+            for ATTEMPT in 1 2 3; do
+              if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "$ADD_LABEL"; then
+                ADD_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+            if [ "$ADD_OK" != "true" ]; then
+              echo "::error::Pull request $PR: could not apply $ADD_LABEL after retries."
+              exit 1
+            fi
           else
             EDIT_ARGS=(--add-label "$ADD_LABEL")
             case " $LABELS " in
@@ -341,7 +358,18 @@ jobs:
             case " $LABELS " in
               *" $OTHER_VERDICT_LABEL "*) EDIT_ARGS+=(--remove-label "$OTHER_VERDICT_LABEL") ;;
             esac
-            gh pr edit "$PR" --repo "$TARGET_REPO" "${EDIT_ARGS[@]}"
+            EDIT_OK=false
+            for ATTEMPT in 1 2 3; do
+              if gh pr edit "$PR" --repo "$TARGET_REPO" "${EDIT_ARGS[@]}"; then
+                EDIT_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+            if [ "$EDIT_OK" != "true" ]; then
+              echo "::error::Pull request $PR: could not apply verdict labels after retries."
+              exit 1
+            fi
           fi
 
       # The secrets context cannot be read from a step-level `if:`, so presence
@@ -384,8 +412,35 @@ jobs:
           # protection and a human still own that. Deriving it from the label
           # the reviewer applied keeps it out of the model's hands, so a
           # REQUEST_CHANGES verdict can never lift the draft.
-          STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
-            --jq '.isDraft, ([.labels[].name] | join(" "))')
+          # This step is continue-on-error under bash -e, so an unretried
+          # read that fails here aborts above every loud path below and the
+          # run stays green with the lift silently skipped — exactly the
+          # outcome this step's rework exists to prevent. Retry the read,
+          # and if it still fails, say so loudly instead of dying quietly.
+          STATE=""
+          STATE_OK=false
+          for ATTEMPT in 1 2 3; do
+            if STATE=$(gh pr view "$PR" --repo "$TARGET_REPO" --json isDraft,labels \
+                --jq '.isDraft, ([.labels[].name] | join(" "))'); then
+              STATE_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$STATE_OK" != "true" ]; then
+            # Labels are unknown on this path, so the message must not claim
+            # the pull request is approved.
+            echo "::warning::Could not read state for pull request $PR after retries; the draft lift could not be evaluated."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's state could not be read, so the draft lift"
+              echo "> could not be evaluated. If it is approved and still a draft,"
+              echo "> lift it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           DRAFT=$(printf '%s\n' "$STATE" | head -1)
           LABELS=$(printf '%s\n' "$STATE" | tail -1)
 
@@ -445,8 +500,30 @@ jobs:
           # verdict itself: the absence of agent:review does not prove one
           # was recorded, and treating it as proof is what stranded pull
           # requests with no label.
-          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
-            --jq '[.labels[].name] | join(" ")')
+          #
+          # This step's whole purpose is handling failure, and it is already
+          # continue-on-error, so an unretried read that fails here just
+          # vanishes: no park, no comment, agent:review stays, and an hourly
+          # rerun burns a review session with no human signal ever posted.
+          # Retry it, and if it still fails, say so instead of parking
+          # blind — with the labels unknown, adding agent:blocked could
+          # contradict a verdict that was already recorded.
+          LABELS=""
+          LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+                --jq '[.labels[].name] | join(" ")'); then
+              LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LABELS_OK" != "true" ]; then
+            echo "::warning::Could not read labels on pull request $PR after retries; it was neither parked nor commented, and may be re-reviewed next run."
+            exit 0
+          fi
+
           case " $LABELS " in
             *" agent:approved "* | *" agent:changes-requested "*)
               echo "Verdict already applied to pull request $PR; leaving labels alone."
@@ -482,8 +559,37 @@ jobs:
           # is invisible to this lane forever and absent from the queue-health
           # summary. Restoring agent:review makes the next scheduled run
           # re-review it, which converges; parking would need a human instead.
-          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
-            --jq '[.labels[].name] | join(" ")')
+          #
+          # This is the final line of defense in the job, and it is already
+          # continue-on-error, so an unretried read that fails here means the
+          # safety net silently does nothing — if the pull request genuinely
+          # ended the run label-less, it becomes permanently invisible, with
+          # nothing reaching the run summary. Retry the read, and on
+          # exhaustion warn loudly rather than blindly re-adding
+          # agent:review, which would cost a redundant review session on
+          # every exhausted transient even when the pull request in fact
+          # still holds a lifecycle label.
+          LABELS=""
+          LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+                --jq '[.labels[].name] | join(" ")'); then
+              LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LABELS_OK" != "true" ]; then
+            echo "::warning::Could not read labels on pull request $PR after retries; the lifecycle-label safety net could not run."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's labels could not be read, so the"
+              echo "> lifecycle-label safety net could not run. Inspect it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           case " $LABELS " in
             *" agent:review "* | *" agent:approved "* | \
             *" agent:changes-requested "* | *" agent:blocked "*)
