@@ -412,6 +412,191 @@ jobs:
             echo "| \`$label\` | pull requests | $count |" >> "$GITHUB_STEP_SUMMARY"
           done
 
+          # Orphan branches: a runner that dies mid-implementation (VM loss,
+          # force-cancel, infrastructure kill) after "Stage implementation
+          # changes" pushes a branch but never reaches "Open a draft pull
+          # request" — no in-run handler executes for that, `Mark failed work
+          # as blocked` only runs under failure()/cancelled(), which a runner
+          # loss does not reach either. No lane inspects branches, so that
+          # branch and its stuck agent:implementing issue are invisible
+          # everywhere. This block makes them visible only; nothing here
+          # comments, relabels, closes, or deletes anything.
+          #
+          # implement.yml's "Stage implementation changes" names every branch
+          # it pushes agent/issue-$ISSUE-$RUN_ID-$RUN_ATTEMPT (implement.yml
+          # around line 341), so the linked issue number is recoverable
+          # straight from the branch name — no need to search pull request
+          # bodies for a "Closes #N" match the way "Apply label transitions"
+          # above has to.
+          #
+          # The rule: a branch counts as orphaned when (a) it has no pull
+          # request at all, or its only pull request was closed without
+          # merging, AND (b) its linked issue is still open.
+          #
+          #   - An OPEN pull request excludes the branch outright (in flight
+          #     or in review; already visible via the pull-request rows
+          #     above).
+          #   - A MERGED pull request excludes the branch outright too,
+          #     regardless of the linked issue's state. This deliberately
+          #     does not use "the issue closed" as the merged signal, even
+          #     though implement.yml's pull request body carries "Closes #N":
+          #     that phrase only auto-closes the issue when the pull request
+          #     merges into the repository's *default* branch, and
+          #     templates/workflows/agent-implement.yml hardcodes
+          #     `base_branch: main`. An onboarded repository whose default
+          #     branch is not `main` would never see the auto-close fire, and
+          #     every ordinary merged branch would then read as a permanent
+          #     orphan — the exact noise this row exists to avoid, and the
+          #     same target-repo-vs-control-repo trap the workflow
+          #     display-name lookup further below already had to route
+          #     around. Treating "merged" as resolved by the pull request's
+          #     own state, not by a downstream side effect that depends on
+          #     repository configuration, keeps this correct regardless of
+          #     default branch. The tradeoff: the rare case where a merge
+          #     truly does not close its issue (a reopen, a body edited after
+          #     merge) goes unflagged. That is an acceptable miss in exchange
+          #     for never manufacturing false positives across every
+          #     onboarded repo whose default branch is not main.
+          #   - A branch with no pull request, or with only a CLOSED (not
+          #     merged) one, is not resolved by definition — GitHub never
+          #     auto-closes an issue on a non-merge close, so this half of
+          #     the rule was never dependent on the default branch either.
+          #     Counting it only while the linked issue is still open is what
+          #     keeps a closed-and-abandoned branch whose issue a human
+          #     already resolved out of the count too.
+          #
+          # All three queries below are scoped by repository (`gh api
+          # repos/$TARGET_REPO/branches`, `.../pulls`, `.../issues`), never by
+          # workflow file path, so this is exactly as correct in an onboarded
+          # target repository as it is here — unlike the file-path workflow
+          # lookup #430 had to replace with a display-name lookup earlier in
+          # this same step, there is no reusable-vs-caller split to trip
+          # over: branches, pull requests, and issues belong to the
+          # repository itself, not to whichever workflow file happens to run
+          # in it. All three are fully paginated with --paginate rather than
+          # a fixed --limit: branches are already enumerated exhaustively,
+          # and capping the open-pull-request side at a fixed limit would
+          # silently drop head refs past the cap in a busy repo, misreporting
+          # genuinely in-flight branches as orphans — an over-count, which is
+          # exactly the kind of noise this row exists to avoid.
+          #
+          # `--method GET` is REQUIRED on every `gh api` call below that
+          # passes `-f` fields: per `gh api --help`, "the default HTTP
+          # request method is GET normally and POST if any parameters were
+          # added" — a bare `gh api repos/$TARGET_REPO/pulls -f state=all`
+          # silently issues a POST, which for the /issues path is the
+          # create-issue endpoint. This job holds `issues: write`, so only
+          # GitHub rejecting the payload for a missing `title` stands between
+          # that and a real write — a scope violation this row must never
+          # risk, since #431 chose "counts them and acts on nothing." Do not
+          # add a new `-f`/`-F` field to any call in this block without also
+          # confirming `--method GET` is still present.
+          orphan_count=0
+          branches_ok=false
+          branches_file=$(mktemp)
+          for ATTEMPT in 1 2 3; do
+            if gh api "repos/$TARGET_REPO/branches" --method GET --paginate \
+                -f per_page=100 \
+                --jq '.[].name' > "$branches_file"; then
+              branches_ok=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$branches_ok" != "true" ]; then
+            orphan_count="?"
+          else
+            agent_branches_file=$(mktemp)
+            grep '^agent/issue-' "$branches_file" > "$agent_branches_file" || true
+
+            # state=all in one paginated call, rather than a separate
+            # state=open lookup: this needs to tell open, merged, and
+            # closed-without-merging apart per branch (see "The rule" above),
+            # not just whether a pull request is currently open.
+            pr_status_ok=false
+            pr_status_file=$(mktemp)
+            for ATTEMPT in 1 2 3; do
+              if gh api "repos/$TARGET_REPO/pulls" --method GET --paginate \
+                  -f state=all -f per_page=100 \
+                  --jq '.[] | [.head.ref, (if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end)] | @tsv' \
+                  > "$pr_status_file"; then
+                pr_status_ok=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+
+            open_issues_ok=false
+            open_issues_file=$(mktemp)
+            # Only worth attempting if the pulls call above already
+            # succeeded: with pr_status_ok still false the row is already
+            # committed to "?" below, so retrying this query would burn up
+            # to three more calls and six seconds of sleeps for a result
+            # that can no longer change the outcome.
+            if [ "$pr_status_ok" = "true" ]; then
+              for ATTEMPT in 1 2 3; do
+                if gh api "repos/$TARGET_REPO/issues" --method GET --paginate \
+                    -f state=open -f per_page=100 \
+                    --jq '.[] | select(.pull_request == null) | .number' \
+                    > "$open_issues_file"; then
+                  open_issues_ok=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+            fi
+
+            if [ "$pr_status_ok" != "true" ] || [ "$open_issues_ok" != "true" ]; then
+              orphan_count="?"
+            else
+              # One issue-list call up front, tested by membership below,
+              # instead of one `gh issue view` per branch: branch deletion is
+              # deliberately out of scope, so agent/issue-* branches only
+              # accumulate over time, and a per-branch lookup would become a
+              # meaningful share of the 1000-requests/hour GITHUB_TOKEN
+              # budget on a repo with a few hundred of them, run four times a
+              # day, with continue-on-error: true silently swallowing the
+              # resulting throttling. This also sidesteps the deleted-issue
+              # class entirely: a branch naming an issue that no longer
+              # exists simply has no match in this set and is not counted,
+              # rather than repeatedly retrying a permanent 404.
+              while IFS= read -r BRANCH; do
+                [ -z "$BRANCH" ] && continue
+
+                if [[ "$BRANCH" =~ ^agent/issue-([0-9]+)- ]]; then
+                  ISSUE="${BASH_REMATCH[1]}"
+                else
+                  echo "::warning::Branch $BRANCH matches agent/issue-* but no issue number could be parsed from it; skipped."
+                  continue
+                fi
+
+                # implement.yml itself creates at most one pull request per
+                # branch, but a human can still open a second one from the
+                # same head after the first is closed, so more than one line
+                # for a branch is possible here. Taking the first match is
+                # still correct: the pulls endpoint defaults to
+                # sort=created, direction=desc, so pr_status_file lists each
+                # branch's most recently created pull request first, and it
+                # is that newest pull request's status that should decide
+                # whether the branch is currently resolved.
+                STATUS=$(awk -F'\t' -v b="$BRANCH" '$1 == b { print $2; exit }' "$pr_status_file")
+                if [ "$STATUS" = "open" ] || [ "$STATUS" = "merged" ]; then
+                  continue
+                fi
+
+                if grep -qxF "$ISSUE" "$open_issues_file"; then
+                  orphan_count=$((orphan_count + 1))
+                fi
+              done < "$agent_branches_file"
+            fi
+          fi
+
+          if ! [[ "$orphan_count" =~ ^[0-9]+$ ]]; then
+            orphan_count="?"
+          fi
+          echo "| \`agent/issue-*\` (no open or merged PR, issue open) | branches | $orphan_count |" >> "$GITHUB_STEP_SUMMARY"
+
           # A label count is not a selectability count: `agent:ready` and
           # `agent:blocked` are independent --label filters, so an issue
           # carrying both is counted once in each. That state is reachable —
