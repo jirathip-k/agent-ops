@@ -22,6 +22,10 @@ for arg in "$@"; do
   case "$arg" in
     --apply) apply=true ;;
     -h | --help)
+      if [ "$#" -ne 1 ]; then
+        echo "unknown option: $arg" >&2
+        exit 2
+      fi
       sed -n '3,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
