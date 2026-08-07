@@ -570,10 +570,15 @@ jobs:
                   continue
                 fi
 
-                # At most one pull request is ever created per branch (branch
-                # names embed the run id, so a run never reuses a branch, and
-                # "Open a draft pull request" creates exactly one); the first
-                # match is the only one that can exist in practice.
+                # implement.yml itself creates at most one pull request per
+                # branch, but a human can still open a second one from the
+                # same head after the first is closed, so more than one line
+                # for a branch is possible here. Taking the first match is
+                # still correct: the pulls endpoint defaults to
+                # sort=created, direction=desc, so pr_status_file lists each
+                # branch's most recently created pull request first, and it
+                # is that newest pull request's status that should decide
+                # whether the branch is currently resolved.
                 STATUS=$(awk -F'\t' -v b="$BRANCH" '$1 == b { print $2; exit }' "$pr_status_file")
                 if [ "$STATUS" = "open" ] || [ "$STATUS" = "merged" ]; then
                   continue
