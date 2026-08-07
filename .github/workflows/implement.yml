@@ -241,7 +241,13 @@ jobs:
           # github-actions and a single issue's CI traffic can run to
           # thousands of lines across many comments, and the login clause
           # admits all of it regardless of association. These two caps are
-          # what keeps that path bounded.
+          # what keeps that path bounded. That bounding is applied to the
+          # combined admitted set, after select, with no separate quota per
+          # authorAssociation, so github-actions volume can evict the
+          # trusted path too: measured, one OWNER comment followed by six
+          # github-actions comments admits five github-actions comments and
+          # drops the OWNER comment — the maintainer's instruction is gone
+          # entirely.
           #
           # .body is passed through unfiltered and uncapped, unlike every
           # comment. An adopted backlog issue opened by the public keeps
