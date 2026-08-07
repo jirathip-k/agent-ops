@@ -631,16 +631,42 @@ jobs:
               exit 0
               ;;
           esac
+
           # agent:review may already be gone, so removing it is conditional;
-          # a single gh pr edit would fail on the missing label and skip the add.
+          # a single gh pr edit would fail on the missing label and skip the
+          # add. Its failure is bounded even after retries are exhausted: the
+          # pull request ends label-less and the lifecycle-label safety net
+          # below restores agent:review, converging on a re-review rather
+          # than a stuck park. So it is retried and warned about, but does
+          # not change what the comment below is allowed to claim.
           case " $LABELS " in
             *" agent:review "*)
-              gh pr edit "$PR" --repo "$TARGET_REPO" --remove-label "agent:review" ||
-                echo "::warning::Could not remove agent:review from pull request $PR."
+              REMOVE_OK=false
+              for ATTEMPT in 1 2 3; do
+                if gh pr edit "$PR" --repo "$TARGET_REPO" --remove-label "agent:review"; then
+                  REMOVE_OK=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+              if [ "$REMOVE_OK" != "true" ]; then
+                echo "::warning::Pull request $PR: could not remove agent:review after retries."
+              fi
               ;;
           esac
-          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
-            echo "::warning::Could not update labels on pull request $PR."
+
+          ADD_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked"; then
+              ADD_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ADD_OK" != "true" ]; then
+            echo "::warning::Pull request $PR: could not apply agent:blocked after retries."
+          fi
+
           # By this point agent:blocked has already been attempted (it may
           # have failed above, warned, and continued), so a failure here
           # would otherwise leave the park with no explanation and no trace
