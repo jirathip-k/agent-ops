@@ -105,8 +105,194 @@ jobs:
             --model ${{ inputs.model || 'fable' }}
             --max-turns 30
             --setting-sources user
+            --json-schema
+            '{"type":"object","additionalProperties":false,"required":["transitions"],"properties":{"transitions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["issue","add","remove"],"properties":{"issue":{"type":"integer"},"add":{"type":"array","items":{"type":"string","enum":["agent:needs-plan","agent:ready","agent:blocked"]}},"remove":{"type":"array","items":{"type":"string","enum":["agent:needs-plan","agent:ready","agent:blocked"]}}}}}}}'
             --allowedTools
-            "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"
+            "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"
+
+      - name: Apply label transitions
+        id: transitions
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          # Label transitions are the model's structured output, not a tool
+          # call, and that output is untrusted data: it is validated against
+          # live issue state and a fixed label vocabulary before anything is
+          # written. #370 dropped Bash(gh issue edit:*) from the lane's
+          # allowlist for exactly this reason — this step is now the only
+          # place a lifecycle label changes on an existing issue.
+          #
+          # An empty STRUCTURED_OUTPUT means --json-schema never produced a
+          # conforming terminating call — most likely --max-turns exhausted
+          # first (see #374, which cost five hours of reddened idle runs to
+          # the same failure mode). That must fail loudly, not apply nothing
+          # and pass as a quiet idle run.
+          if [ -z "$STRUCTURED_OUTPUT" ]; then
+            echo "::error::Discover and plan produced no structured output; no label transitions could be validated."
+            exit 1
+          fi
+
+          OUTPUT_FILE=$(mktemp)
+          printf '%s' "$STRUCTURED_OUTPUT" > "$OUTPUT_FILE"
+
+          if ! jq -e '(.transitions // []) | type == "array"' "$OUTPUT_FILE" > /dev/null 2>&1; then
+            echo "::error::Discover and plan's structured output did not conform to the expected schema."
+            exit 1
+          fi
+
+          TRANSITIONS_FILE=$(mktemp)
+          jq -c '.transitions // [] | .[]' "$OUTPUT_FILE" > "$TRANSITIONS_FILE"
+
+          {
+            echo "## Label transitions"
+            echo
+            echo "| Issue | Outcome |"
+            echo "| ---: | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          APPLIED=0
+          REJECTED=0
+
+          while IFS= read -r TRANSITION; do
+            [ -z "$TRANSITION" ] && continue
+
+            # Only a digit string is ever interpolated into a gh command or
+            # printed below; a non-numeric value is rejected before it
+            # touches anything else.
+            ISSUE=$(printf '%s' "$TRANSITION" | jq -r '.issue // empty')
+            if ! [[ "$ISSUE" =~ ^[0-9]+$ ]]; then
+              echo "::warning::Discover and plan proposed a transition with a non-numeric issue number; rejected."
+              echo "| ? | rejected: non-numeric issue number |" >> "$GITHUB_STEP_SUMMARY"
+              REJECTED=$((REJECTED + 1))
+              continue
+            fi
+
+            # A transient read failure here must not silently drop a proposed
+            # transition; retry before rejecting it as unvalidatable.
+            CURRENT=""
+            CURRENT_OK=false
+            for ATTEMPT in 1 2 3; do
+              if CURRENT=$(gh issue view "$ISSUE" --repo "$TARGET_REPO" --json state,labels,author); then
+                CURRENT_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+
+            if [ "$CURRENT_OK" != "true" ]; then
+              echo "::warning::Could not read live state for issue $ISSUE after retries; its proposed transition was rejected."
+              echo "| #$ISSUE | rejected: could not read live issue state |" >> "$GITHUB_STEP_SUMMARY"
+              REJECTED=$((REJECTED + 1))
+              continue
+            fi
+
+            # Every invariant lives in jq, never in bash string comparisons,
+            # so an add/remove value that somehow escaped the schema's enum
+            # is only ever compared inside jq and is never interpolated into
+            # a command or echoed unfenced.
+            REASON=$(jq -nr \
+              --argjson t "$TRANSITION" \
+              --argjson cur "$CURRENT" \
+              --argjson known '["agent:needs-plan","agent:ready","agent:blocked"]' \
+              --arg lane_author "app/github-actions" \
+              '
+              ($t.add // []) as $add
+              | ($t.remove // []) as $remove
+              | ($cur.labels | map(.name)) as $current
+              | if (($add + $remove) | any(. as $l | ($known | index($l)) == null)) then
+                  "unknown label"
+                elif ($add | any(. as $l | ($remove | index($l)) != null)) then
+                  "same label in add and remove"
+                elif ($cur.state != "OPEN") then
+                  "issue is not open"
+                elif (($current | index("agent:implementing")) != null) then
+                  "issue is agent:implementing"
+                elif (($current | index("agent:review")) != null) then
+                  "issue is agent:review"
+                elif ((($current - $remove) + $add) as $result
+                      | (($result | index("agent:needs-plan")) != null)
+                        and (($result | index("agent:ready")) != null)) then
+                  "would leave agent:needs-plan and agent:ready both set"
+                elif ((($add | index("agent:needs-plan")) != null)
+                      and ($cur.author.login != $lane_author)) then
+                  "agent:needs-plan may only be added to an issue this lane created"
+                else
+                  "ok"
+                end
+              ')
+
+            if [ "$REASON" != "ok" ]; then
+              echo "::warning::Issue $ISSUE: transition rejected ($REASON)."
+              echo "| #$ISSUE | rejected: $REASON |" >> "$GITHUB_STEP_SUMMARY"
+              REJECTED=$((REJECTED + 1))
+              continue
+            fi
+
+            # A temp file, not `< <(process substitution)`: substitution
+            # discards the feeding pipeline's exit status, so a failing jq
+            # here would go unnoticed under this step's implicit `bash -e`
+            # and silently yield an empty label list instead of a hard stop.
+            ADD_FILE=$(mktemp)
+            printf '%s' "$TRANSITION" | jq -r '.add // [] | .[]' > "$ADD_FILE"
+            ADD_ARGS=()
+            while IFS= read -r LABEL; do
+              [ -z "$LABEL" ] && continue
+              ADD_ARGS+=(--add-label "$LABEL")
+            done < "$ADD_FILE"
+
+            REMOVE_FILE=$(mktemp)
+            printf '%s' "$TRANSITION" | jq -r '.remove // [] | .[]' > "$REMOVE_FILE"
+            REMOVE_ARGS=()
+            while IFS= read -r LABEL; do
+              [ -z "$LABEL" ] && continue
+              REMOVE_ARGS+=(--remove-label "$LABEL")
+            done < "$REMOVE_FILE"
+
+            # gh issue edit applies adds and removes concurrently (see the
+            # same note in implement.yml's "Mark failed work as blocked"),
+            # so a combined call that fails partway can strip more labels
+            # than intended. Apply the addition first: a failure after that
+            # point leaves the issue with an extra label, never with none.
+            APPLY_OK=true
+            if [ "${#ADD_ARGS[@]}" -gt 0 ]; then
+              ADD_DONE=false
+              for ATTEMPT in 1 2 3; do
+                if gh issue edit "$ISSUE" --repo "$TARGET_REPO" "${ADD_ARGS[@]}"; then
+                  ADD_DONE=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+              [ "$ADD_DONE" = "true" ] || APPLY_OK=false
+            fi
+
+            if [ "$APPLY_OK" = "true" ] && [ "${#REMOVE_ARGS[@]}" -gt 0 ]; then
+              REMOVE_DONE=false
+              for ATTEMPT in 1 2 3; do
+                if gh issue edit "$ISSUE" --repo "$TARGET_REPO" "${REMOVE_ARGS[@]}"; then
+                  REMOVE_DONE=true
+                  break
+                fi
+                sleep "$ATTEMPT"
+              done
+              [ "$REMOVE_DONE" = "true" ] || APPLY_OK=false
+            fi
+
+            if [ "$APPLY_OK" = "true" ]; then
+              echo "Applied transition for issue $ISSUE."
+              echo "| #$ISSUE | applied |" >> "$GITHUB_STEP_SUMMARY"
+              APPLIED=$((APPLIED + 1))
+            else
+              echo "::warning::Issue $ISSUE: a validated transition could not be fully applied after retries."
+              echo "| #$ISSUE | error: apply failed after retries |" >> "$GITHUB_STEP_SUMMARY"
+              REJECTED=$((REJECTED + 1))
+            fi
+          done < "$TRANSITIONS_FILE"
+
+          echo "Applied: $APPLIED, rejected: $REJECTED." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Print Claude execution result
         if: always() && steps.claude.outcome != 'skipped'
