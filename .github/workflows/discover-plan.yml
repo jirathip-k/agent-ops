@@ -132,7 +132,12 @@ jobs:
         run: |
           # agent:review, agent:approved, and agent:changes-requested are only
           # ever applied to pull requests, and `gh issue list` excludes those —
-          # counting them as issues would report 0 forever.
+          # counting them as issues would report 0 forever. agent:blocked is
+          # the one lifecycle label applied to both kinds of work — `Mark
+          # failed work as blocked` in implement.yml labels issues, `Mark
+          # failed review as blocked` in review-release.yml labels pull
+          # requests — so it appears in both lists below and gets a row for
+          # each scope.
           issue_labels=(
             "agent:needs-plan"
             "agent:ready"
@@ -143,6 +148,7 @@ jobs:
             "agent:review"
             "agent:approved"
             "agent:changes-requested"
+            "agent:blocked"
           )
 
           {
