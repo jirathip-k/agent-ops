@@ -445,13 +445,19 @@ jobs:
           # abandoned the work) — either way a human needs to look.
           #
           # Both queries below are scoped by repository (`gh api
-          # repos/$TARGET_REPO/branches`, `gh pr list --repo $TARGET_REPO`),
+          # repos/$TARGET_REPO/branches`, `gh api repos/$TARGET_REPO/pulls`),
           # never by workflow file path, so this is exactly as correct in an
           # onboarded target repository as it is here — unlike the file-path
           # workflow lookup #430 had to replace with a display-name lookup
           # earlier in this same step, there is no reusable-vs-caller split
           # to trip over: branches and pull requests belong to the repository
           # itself, not to whichever workflow file happens to run in it.
+          # Both are fully paginated with --paginate rather than a fixed
+          # --limit: branches are already enumerated exhaustively, and capping
+          # the open-pull-request side at a fixed limit would silently drop
+          # head refs past the cap in a busy repo, misreporting genuinely
+          # in-flight branches as orphans — an over-count, which is exactly
+          # the kind of noise this row exists to avoid.
           orphan_count=0
           branches_ok=false
           branches_file=$(mktemp)
@@ -473,8 +479,9 @@ jobs:
             open_pr_heads_ok=false
             open_pr_heads_file=$(mktemp)
             for ATTEMPT in 1 2 3; do
-              if gh pr list --repo "$TARGET_REPO" --state open --limit 200 \
-                  --json headRefName --jq '.[].headRefName' > "$open_pr_heads_file"; then
+              if gh api "repos/$TARGET_REPO/pulls" --paginate \
+                  -f state=open -f per_page=100 \
+                  --jq '.[].head.ref' > "$open_pr_heads_file"; then
                 open_pr_heads_ok=true
                 break
               fi
