@@ -551,14 +551,29 @@ jobs:
             exit 0
           fi
 
-          if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+          # The state read above is retried because a blip there is
+          # permanent: Select one pull request filters on agent:review, which
+          # the verdict step has already removed by this point, so a pull
+          # request skipped here is never re-selected. The lift itself is the
+          # write that actually matters and was left as a single attempt;
+          # give it the same treatment.
+          LIFT_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+              LIFT_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LIFT_OK" = "true" ]; then
             echo "Marked pull request $PR ready for review; a human owns the merge."
             echo "Marked pull request #$PR ready for review; a human owns the merge." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Failed to lift pull request $PR out of draft; it stays approved and drafted."
+            echo "::warning::Failed to lift pull request $PR out of draft after retries; it stays approved and drafted."
             {
               echo "> [!WARNING]"
-              echo "> Pull request #$PR is approved but the draft lift failed."
+              echo "> Pull request #$PR is approved but the draft lift failed after retries."
               echo "> Confirm the App is installed on this repository with"
               echo "> Pull requests: read and write, then lift it by hand."
             } >> "$GITHUB_STEP_SUMMARY"
