@@ -22,10 +22,11 @@ for arg in "$@"; do
   case "$arg" in
     --apply) apply=true ;;
     -h | --help)
-      # Relies on the loop above never shifting "$@", so $# stays the total
-      # argument count for the whole invocation, not just what's left to scan.
+      # Relies on the enclosing loop never shifting "$@" and on staying at
+      # script top level, so $# stays the total argument count for the whole
+      # invocation, not just what's left to scan.
       if [ "$#" -ne 1 ]; then
-        echo "--help takes no other arguments" >&2
+        echo "$arg takes no other arguments" >&2
         exit 2
       fi
       sed -n '3,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
