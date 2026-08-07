@@ -551,12 +551,17 @@ jobs:
             exit 0
           fi
 
-          # The state read above is retried because a blip there is
-          # permanent: Select one pull request filters on agent:review, which
-          # the verdict step has already removed by this point, so a pull
-          # request skipped here is never re-selected. The lift itself is the
-          # write that actually matters and was left as a single attempt;
-          # give it the same treatment.
+          # The gh pr ready write below was, until now, a single attempt. On
+          # the normal path through "Apply the review verdict label" (its
+          # label read succeeded), that step removes agent:review before
+          # this step runs, so a failed lift here is permanent: Select one
+          # pull request filters on agent:review and can never re-select
+          # this pull request to retry it. On that step's own fallback path
+          # (its label read exhausted retries), it adds the verdict label
+          # without removing agent:review, so agent:review is still present
+          # here and a failed lift in fact gets re-selected and retried on
+          # the next tick. The dominant path is genuinely permanent, so
+          # retry this write with the same house pattern regardless.
           LIFT_OK=false
           for ATTEMPT in 1 2 3; do
             if gh pr ready "$PR" --repo "$TARGET_REPO"; then
@@ -636,7 +641,8 @@ jobs:
           esac
           gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
             echo "::warning::Could not update labels on pull request $PR."
-          # By this point agent:blocked is already applied, so a failure here
+          # By this point agent:blocked has already been attempted (it may
+          # have failed above, warned, and continued), so a failure here
           # would otherwise leave the park with no explanation and no trace
           # beyond a non-zero exit inside this continue-on-error step. Guard
           # it like its sibling in the lifecycle-label safety net below.
