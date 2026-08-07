@@ -157,11 +157,13 @@ for repo in "${targets[@]}"; do
   # HTTP 404 (the target has no .github/workflows directory yet) is a real
   # "none"; any other failure is unverifiable and must block apply.
   legacy_unverified=false
-  if ! legacy=$(gh api "repos/$repo/contents/.github/workflows?ref=$branch" --jq '.[].name' 2>&1); then
+  legacy_error=""
+  if ! legacy=$(gh api "repos/$repo/contents/.github/workflows?ref=$branch" --jq '.[] | select(.type == "file") | .name' 2>&1); then
     if printf '%s\n' "$legacy" | grep -qE 'HTTP 404|Not Found'; then
       legacy=""
     else
       legacy_unverified=true
+      legacy_error="$legacy"
       legacy=""
     fi
   fi
@@ -173,6 +175,7 @@ for repo in "${targets[@]}"; do
     # repository is not enough — workflows legitimately check prompts out of it.
     if ! wf_content=$(gh api "repos/$repo/contents/.github/workflows/$wf?ref=$branch" --jq '.content' 2>&1); then
       legacy_unverified=true
+      legacy_error="$wf_content"
       continue
     fi
     if printf '%s' "$wf_content" | base64 -d 2>/dev/null | grep -Eq "uses:[[:space:]]*$CONTROL_REPO/\.github/workflows/"; then
@@ -180,7 +183,10 @@ for repo in "${targets[@]}"; do
     fi
   done <<<"$legacy"
   if [ "$legacy_unverified" = true ]; then
-    echo "  legacy callers : cannot verify with this credential — listing or reading workflow files in $repo failed"
+    echo "  legacy callers : cannot verify with this credential — $legacy_error"
+    if [ ${#drop[@]} -gt 0 ]; then
+      echo "  legacy callers : ${drop[*]} (identified before the failure above; there may be more)"
+    fi
     status=1
   elif [ ${#drop[@]} -gt 0 ]; then
     echo "  legacy callers : ${drop[*]}"
