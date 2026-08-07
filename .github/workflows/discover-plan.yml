@@ -479,6 +479,18 @@ jobs:
           # silently drop head refs past the cap in a busy repo, misreporting
           # genuinely in-flight branches as orphans — an over-count, which is
           # exactly the kind of noise this row exists to avoid.
+          #
+          # `--method GET` is REQUIRED on every `gh api` call below that
+          # passes `-f` fields: per `gh api --help`, "the default HTTP
+          # request method is GET normally and POST if any parameters were
+          # added" — a bare `gh api repos/$TARGET_REPO/pulls -f state=all`
+          # silently issues a POST, which for the /issues path is the
+          # create-issue endpoint. This job holds `issues: write`, so only
+          # GitHub rejecting the payload for a missing `title` stands between
+          # that and a real write — a scope violation this row must never
+          # risk, since #431 chose "counts them and acts on nothing." Do not
+          # add a new `-f`/`-F` field to any call in this block without also
+          # confirming `--method GET` is still present.
           orphan_count=0
           branches_ok=false
           branches_file=$(mktemp)
@@ -504,7 +516,7 @@ jobs:
             pr_status_ok=false
             pr_status_file=$(mktemp)
             for ATTEMPT in 1 2 3; do
-              if gh api "repos/$TARGET_REPO/pulls" --paginate \
+              if gh api "repos/$TARGET_REPO/pulls" --method GET --paginate \
                   -f state=all -f per_page=100 \
                   --jq '.[] | [.head.ref, (if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end)] | @tsv' \
                   > "$pr_status_file"; then
@@ -517,7 +529,7 @@ jobs:
             open_issues_ok=false
             open_issues_file=$(mktemp)
             for ATTEMPT in 1 2 3; do
-              if gh api "repos/$TARGET_REPO/issues" --paginate \
+              if gh api "repos/$TARGET_REPO/issues" --method GET --paginate \
                   -f state=open -f per_page=100 \
                   --jq '.[] | select(.pull_request == null) | .number' \
                   > "$open_issues_file"; then
