@@ -330,9 +330,26 @@ jobs:
             sleep "$ATTEMPT"
           done
 
+          # By the time either write below runs, the model's work is done and
+          # only the recording remains — the write is the more valuable half
+          # of this step. Retry it like the read above, and keep the same
+          # fail-closed posture: if it still fails after retries, fail the
+          # step so "Mark failed review as blocked" runs and a human is told,
+          # rather than silently discarding a completed review.
           if [ "$LABELS_OK" != "true" ]; then
             echo "::warning::Could not read labels on pull request $PR after retries; applying $ADD_LABEL without removing any other label."
-            gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "$ADD_LABEL"
+            ADD_OK=false
+            for ATTEMPT in 1 2 3; do
+              if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "$ADD_LABEL"; then
+                ADD_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+            if [ "$ADD_OK" != "true" ]; then
+              echo "::error::Pull request $PR: could not apply $ADD_LABEL after retries."
+              exit 1
+            fi
           else
             EDIT_ARGS=(--add-label "$ADD_LABEL")
             case " $LABELS " in
@@ -341,7 +358,18 @@ jobs:
             case " $LABELS " in
               *" $OTHER_VERDICT_LABEL "*) EDIT_ARGS+=(--remove-label "$OTHER_VERDICT_LABEL") ;;
             esac
-            gh pr edit "$PR" --repo "$TARGET_REPO" "${EDIT_ARGS[@]}"
+            EDIT_OK=false
+            for ATTEMPT in 1 2 3; do
+              if gh pr edit "$PR" --repo "$TARGET_REPO" "${EDIT_ARGS[@]}"; then
+                EDIT_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+            if [ "$EDIT_OK" != "true" ]; then
+              echo "::error::Pull request $PR: could not apply verdict labels after retries."
+              exit 1
+            fi
           fi
 
       # The secrets context cannot be read from a step-level `if:`, so presence
