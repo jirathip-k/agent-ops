@@ -25,15 +25,45 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          gh label create "agent:needs-plan" \
-            --repo "$TARGET_REPO" \
-            --color "d4c5f9" \
-            --description "Awaiting triage and a complete plan" \
-            --force
+          # This job fires once, on `issues: opened`. Unlike the scheduled
+          # lanes, there is no next tick to repair a miss: the planning
+          # prompt forbids the scheduled lane from adding agent:needs-plan to
+          # an issue it did not create, so a transient failure here leaves
+          # the issue permanently outside the queue with nothing pointing a
+          # human at it. Exhaust the house retry, then fail as loudly as
+          # possible on both calls so the red run is the human's signal to
+          # label the issue by hand.
+          LABEL_CREATE_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh label create "agent:needs-plan" \
+              --repo "$TARGET_REPO" \
+              --color "d4c5f9" \
+              --description "Awaiting triage and a complete plan" \
+              --force; then
+              LABEL_CREATE_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$LABEL_CREATE_OK" != "true" ]; then
+            echo "::error::Could not create/ensure label agent:needs-plan on $TARGET_REPO after retries; issue #$ISSUE_NUMBER was not queued."
+            exit 1
+          fi
 
-          gh issue edit "$ISSUE_NUMBER" \
-            --repo "$TARGET_REPO" \
-            --add-label "agent:needs-plan"
+          ISSUE_LABEL_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh issue edit "$ISSUE_NUMBER" \
+              --repo "$TARGET_REPO" \
+              --add-label "agent:needs-plan"; then
+              ISSUE_LABEL_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ISSUE_LABEL_OK" != "true" ]; then
+            echo "::error::Could not add agent:needs-plan to issue #$ISSUE_NUMBER after retries; this fire-once intake has no next tick to recover, so the issue is now invisible to the queue until a human labels it by hand."
+            exit 1
+          fi
 
   discover-plan:
     if: github.event_name != 'issues'
