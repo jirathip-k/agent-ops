@@ -551,14 +551,34 @@ jobs:
             exit 0
           fi
 
-          if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+          # The gh pr ready write below was, until now, a single attempt. On
+          # the normal path through "Apply the review verdict label" (its
+          # label read succeeded), that step removes agent:review before
+          # this step runs, so a failed lift here is permanent: Select one
+          # pull request filters on agent:review and can never re-select
+          # this pull request to retry it. On that step's own fallback path
+          # (its label read exhausted retries), it adds the verdict label
+          # without removing agent:review, so agent:review is still present
+          # here and a failed lift in fact gets re-selected and retried on
+          # the next tick. The dominant path is genuinely permanent, so
+          # retry this write with the same house pattern regardless.
+          LIFT_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr ready "$PR" --repo "$TARGET_REPO"; then
+              LIFT_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LIFT_OK" = "true" ]; then
             echo "Marked pull request $PR ready for review; a human owns the merge."
             echo "Marked pull request #$PR ready for review; a human owns the merge." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Failed to lift pull request $PR out of draft; it stays approved and drafted."
+            echo "::warning::Failed to lift pull request $PR out of draft after retries; it stays approved and drafted."
             {
               echo "> [!WARNING]"
-              echo "> Pull request #$PR is approved but the draft lift failed."
+              echo "> Pull request #$PR is approved but the draft lift failed after retries."
               echo "> Confirm the App is installed on this repository with"
               echo "> Pull requests: read and write, then lift it by hand."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -621,8 +641,14 @@ jobs:
           esac
           gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked" ||
             echo "::warning::Could not update labels on pull request $PR."
+          # By this point agent:blocked has already been attempted (it may
+          # have failed above, warned, and continued), so a failure here
+          # would otherwise leave the park with no explanation and no trace
+          # beyond a non-zero exit inside this continue-on-error step. Guard
+          # it like its sibling in the lifecycle-label safety net below.
           gh pr comment "$PR" --repo "$TARGET_REPO" \
-            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry." ||
+            echo "::warning::Could not comment on pull request $PR explaining the park."
 
       - name: Ensure the reviewed pull request keeps a lifecycle label
         if: >-
@@ -684,8 +710,25 @@ jobs:
             echo "> Pull request #$PR lost every lifecycle label during this run."
             echo "> \`agent:review\` was restored so the next run re-reviews it."
           } >> "$GITHUB_STEP_SUMMARY"
-          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review" ||
-            echo "::warning::Could not restore agent:review on pull request $PR."
+
+          # This is the last-resort handler: nothing runs after it, so a
+          # failure here is not merely unreported like elsewhere, it is
+          # unrecoverable until a human intervenes by hand. The read above
+          # that gates this step already retries; give the write that is the
+          # actual safety net the same treatment, and escalate exhaustion to
+          # ::error:: rather than ::warning:: since no later step can notice.
+          ADD_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review"; then
+              ADD_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ADD_OK" != "true" ]; then
+            echo "::error::Pull request $PR: could not restore agent:review after retries; it is left with no lifecycle label and nothing further will retry it. Add agent:review by hand."
+          fi
+
           gh pr comment "$PR" --repo "$TARGET_REPO" \
             --body "This pull request ended a review run with no lifecycle label, so no lane could see it. \`agent:review\` was restored automatically; the next scheduled run will review it again. Workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." ||
             echo "::warning::Could not comment on pull request $PR."
