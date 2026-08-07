@@ -429,20 +429,41 @@ jobs:
           # bodies for a "Closes #N" match the way "Apply label transitions"
           # above has to.
           #
-          # The rule: a branch counts as orphaned when it has no OPEN pull
-          # request AND its linked issue is still OPEN. "No open PR" alone is
-          # not enough — every ordinary branch reaches that state the moment
-          # its PR merges or is closed, which is the common case, not an
-          # orphan. Gating on the issue also being open is what keeps those
-          # post-merge branches from inflating this count into permanent
-          # noise: a merge normally closes the linked issue via the "Closes
-          # #N" the PR body carries, so a merged/closed-PR branch whose issue
-          # is already closed is expected and excluded. The remaining two
-          # shapes are both genuinely stuck and both counted: a branch with no
-          # PR at all (the runner-death case above) and a branch whose PR was
-          # merged or closed without the issue closing (a reopen, a "Closes
-          # #N" that didn't fire, or a closed-without-merging PR that
-          # abandoned the work) — either way a human needs to look.
+          # The rule: a branch counts as orphaned when (a) it has no pull
+          # request at all, or its only pull request was closed without
+          # merging, AND (b) its linked issue is still open.
+          #
+          #   - An OPEN pull request excludes the branch outright (in flight
+          #     or in review; already visible via the pull-request rows
+          #     above).
+          #   - A MERGED pull request excludes the branch outright too,
+          #     regardless of the linked issue's state. This deliberately
+          #     does not use "the issue closed" as the merged signal, even
+          #     though implement.yml's pull request body carries "Closes #N":
+          #     that phrase only auto-closes the issue when the pull request
+          #     merges into the repository's *default* branch, and
+          #     templates/workflows/agent-implement.yml hardcodes
+          #     `base_branch: main`. An onboarded repository whose default
+          #     branch is not `main` would never see the auto-close fire, and
+          #     every ordinary merged branch would then read as a permanent
+          #     orphan — the exact noise this row exists to avoid, and the
+          #     same target-repo-vs-control-repo trap the workflow
+          #     display-name lookup further below already had to route
+          #     around. Treating "merged" as resolved by the pull request's
+          #     own state, not by a downstream side effect that depends on
+          #     repository configuration, keeps this correct regardless of
+          #     default branch. The tradeoff: the rare case where a merge
+          #     truly does not close its issue (a reopen, a body edited after
+          #     merge) goes unflagged. That is an acceptable miss in exchange
+          #     for never manufacturing false positives across every
+          #     onboarded repo whose default branch is not main.
+          #   - A branch with no pull request, or with only a CLOSED (not
+          #     merged) one, is not resolved by definition — GitHub never
+          #     auto-closes an issue on a non-merge close, so this half of
+          #     the rule was never dependent on the default branch either.
+          #     Counting it only while the linked issue is still open is what
+          #     keeps a closed-and-abandoned branch whose issue a human
+          #     already resolved out of the count too.
           #
           # All three queries below are scoped by repository (`gh api
           # repos/$TARGET_REPO/branches`, `.../pulls`, `.../issues`), never by
@@ -476,13 +497,18 @@ jobs:
             agent_branches_file=$(mktemp)
             grep '^agent/issue-' "$branches_file" > "$agent_branches_file" || true
 
-            open_pr_heads_ok=false
-            open_pr_heads_file=$(mktemp)
+            # state=all in one paginated call, rather than a separate
+            # state=open lookup: this needs to tell open, merged, and
+            # closed-without-merging apart per branch (see "The rule" above),
+            # not just whether a pull request is currently open.
+            pr_status_ok=false
+            pr_status_file=$(mktemp)
             for ATTEMPT in 1 2 3; do
               if gh api "repos/$TARGET_REPO/pulls" --paginate \
-                  -f state=open -f per_page=100 \
-                  --jq '.[].head.ref' > "$open_pr_heads_file"; then
-                open_pr_heads_ok=true
+                  -f state=all -f per_page=100 \
+                  --jq '.[] | [.head.ref, (if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end)] | @tsv' \
+                  > "$pr_status_file"; then
+                pr_status_ok=true
                 break
               fi
               sleep "$ATTEMPT"
@@ -501,7 +527,7 @@ jobs:
               sleep "$ATTEMPT"
             done
 
-            if [ "$open_pr_heads_ok" != "true" ] || [ "$open_issues_ok" != "true" ]; then
+            if [ "$pr_status_ok" != "true" ] || [ "$open_issues_ok" != "true" ]; then
               orphan_count="?"
             else
               # One issue-list call up front, tested by membership below,
@@ -517,12 +543,20 @@ jobs:
               # rather than repeatedly retrying a permanent 404.
               while IFS= read -r BRANCH; do
                 [ -z "$BRANCH" ] && continue
-                grep -qxF "$BRANCH" "$open_pr_heads_file" && continue
 
                 if [[ "$BRANCH" =~ ^agent/issue-([0-9]+)- ]]; then
                   ISSUE="${BASH_REMATCH[1]}"
                 else
                   echo "::warning::Branch $BRANCH matches agent/issue-* but no issue number could be parsed from it; skipped."
+                  continue
+                fi
+
+                # At most one pull request is ever created per branch (branch
+                # names embed the run id, so a run never reuses a branch, and
+                # "Open a draft pull request" creates exactly one); the first
+                # match is the only one that can exist in practice.
+                STATUS=$(awk -F'\t' -v b="$BRANCH" '$1 == b { print $2; exit }' "$pr_status_file")
+                if [ "$STATUS" = "open" ] || [ "$STATUS" = "merged" ]; then
                   continue
                 fi
 
