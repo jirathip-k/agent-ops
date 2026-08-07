@@ -699,8 +699,25 @@ jobs:
             echo "> Pull request #$PR lost every lifecycle label during this run."
             echo "> \`agent:review\` was restored so the next run re-reviews it."
           } >> "$GITHUB_STEP_SUMMARY"
-          gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review" ||
-            echo "::warning::Could not restore agent:review on pull request $PR."
+
+          # This is the last-resort handler: nothing runs after it, so a
+          # failure here is not merely unreported like elsewhere, it is
+          # unrecoverable until a human intervenes by hand. The read above
+          # that gates this step already retries; give the write that is the
+          # actual safety net the same treatment, and escalate exhaustion to
+          # ::error:: rather than ::warning:: since no later step can notice.
+          ADD_OK=false
+          for ATTEMPT in 1 2 3; do
+            if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:review"; then
+              ADD_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+          if [ "$ADD_OK" != "true" ]; then
+            echo "::error::Pull request $PR: could not restore agent:review after retries; it is left with no lifecycle label and nothing further will retry it. Add agent:review by hand."
+          fi
+
           gh pr comment "$PR" --repo "$TARGET_REPO" \
             --body "This pull request ended a review run with no lifecycle label, so no lane could see it. \`agent:review\` was restored automatically; the next scheduled run will review it again. Workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." ||
             echo "::warning::Could not comment on pull request $PR."
