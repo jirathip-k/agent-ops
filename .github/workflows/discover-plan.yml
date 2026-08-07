@@ -194,6 +194,32 @@ jobs:
               continue
             fi
 
+            # implement.yml's "Open a draft pull request" removes both
+            # agent:ready and agent:implementing the instant a draft PR
+            # opens, so an in-flight issue can be OPEN with no lifecycle
+            # label at all and still clear every check above. gh issue view
+            # exposes no linked-PR field, so search PRs for the literal
+            # `Closes #<n>` body implement.yml writes when it opens one, the
+            # same way this transient-failure guard treats any other live
+            # read: retry before rejecting the transition as unvalidatable.
+            OPEN_PR_COUNT=""
+            OPEN_PR_OK=false
+            for ATTEMPT in 1 2 3; do
+              if OPEN_PR_COUNT=$(gh pr list --repo "$TARGET_REPO" --state open \
+                  --search "$ISSUE in:body" --json number --jq 'length'); then
+                OPEN_PR_OK=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+
+            if [ "$OPEN_PR_OK" != "true" ]; then
+              echo "::warning::Could not check issue $ISSUE for an open pull request after retries; its proposed transition was rejected."
+              echo "| #$ISSUE | rejected: could not check for an open pull request |" >> "$GITHUB_STEP_SUMMARY"
+              REJECTED=$((REJECTED + 1))
+              continue
+            fi
+
             # Every invariant lives in jq, never in bash string comparisons,
             # so an add/remove value that somehow escaped the schema's enum
             # is only ever compared inside jq and is never interpolated into
@@ -202,6 +228,7 @@ jobs:
               --argjson t "$TRANSITION" \
               --argjson cur "$CURRENT" \
               --argjson known '["agent:needs-plan","agent:ready","agent:blocked"]' \
+              --argjson open_pr_count "$OPEN_PR_COUNT" \
               --arg lane_author "app/github-actions" \
               '
               ($t.add // []) as $add
@@ -217,6 +244,8 @@ jobs:
                   "issue is agent:implementing"
                 elif (($current | index("agent:review")) != null) then
                   "issue is agent:review"
+                elif ($open_pr_count > 0) then
+                  "issue has an open pull request"
                 elif ((($current - $remove) + $add) as $result
                       | (($result | index("agent:needs-plan")) != null)
                         and (($result | index("agent:ready")) != null)) then

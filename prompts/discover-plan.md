@@ -90,9 +90,10 @@ workflow validates against live issue state and applies deterministically:
   `"transitions": []` when you propose no label change.
 - The workflow rejects, and reports in the run summary, a transition that
   would leave both `agent:needs-plan` and `agent:ready` set, that targets an
-  issue already `agent:implementing` or `agent:review`, or that adds
-  `agent:needs-plan` to an issue you did not create. Get it right the first
-  time — a rejection spends the run's capacity on that issue for nothing.
+  issue already `agent:implementing` or `agent:review` or represented by an
+  open pull request, or that adds `agent:needs-plan` to an issue you did not
+  create. Get it right the first time — a rejection spends the run's
+  capacity on that issue for nothing.
 
 If you have already posted a plan comment on an issue and nothing relevant has
 changed since, leave it alone and spend the run's capacity elsewhere. Do not
