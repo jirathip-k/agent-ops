@@ -444,20 +444,20 @@ jobs:
           # #N" that didn't fire, or a closed-without-merging PR that
           # abandoned the work) — either way a human needs to look.
           #
-          # Both queries below are scoped by repository (`gh api
-          # repos/$TARGET_REPO/branches`, `gh api repos/$TARGET_REPO/pulls`),
-          # never by workflow file path, so this is exactly as correct in an
-          # onboarded target repository as it is here — unlike the file-path
-          # workflow lookup #430 had to replace with a display-name lookup
-          # earlier in this same step, there is no reusable-vs-caller split
-          # to trip over: branches and pull requests belong to the repository
-          # itself, not to whichever workflow file happens to run in it.
-          # Both are fully paginated with --paginate rather than a fixed
-          # --limit: branches are already enumerated exhaustively, and capping
-          # the open-pull-request side at a fixed limit would silently drop
-          # head refs past the cap in a busy repo, misreporting genuinely
-          # in-flight branches as orphans — an over-count, which is exactly
-          # the kind of noise this row exists to avoid.
+          # All three queries below are scoped by repository (`gh api
+          # repos/$TARGET_REPO/branches`, `.../pulls`, `.../issues`), never by
+          # workflow file path, so this is exactly as correct in an onboarded
+          # target repository as it is here — unlike the file-path workflow
+          # lookup #430 had to replace with a display-name lookup earlier in
+          # this same step, there is no reusable-vs-caller split to trip
+          # over: branches, pull requests, and issues belong to the
+          # repository itself, not to whichever workflow file happens to run
+          # in it. All three are fully paginated with --paginate rather than
+          # a fixed --limit: branches are already enumerated exhaustively,
+          # and capping the open-pull-request side at a fixed limit would
+          # silently drop head refs past the cap in a busy repo, misreporting
+          # genuinely in-flight branches as orphans — an over-count, which is
+          # exactly the kind of noise this row exists to avoid.
           orphan_count=0
           branches_ok=false
           branches_file=$(mktemp)
@@ -488,9 +488,33 @@ jobs:
               sleep "$ATTEMPT"
             done
 
-            if [ "$open_pr_heads_ok" != "true" ]; then
+            open_issues_ok=false
+            open_issues_file=$(mktemp)
+            for ATTEMPT in 1 2 3; do
+              if gh api "repos/$TARGET_REPO/issues" --paginate \
+                  -f state=open -f per_page=100 \
+                  --jq '.[] | select(.pull_request == null) | .number' \
+                  > "$open_issues_file"; then
+                open_issues_ok=true
+                break
+              fi
+              sleep "$ATTEMPT"
+            done
+
+            if [ "$open_pr_heads_ok" != "true" ] || [ "$open_issues_ok" != "true" ]; then
               orphan_count="?"
             else
+              # One issue-list call up front, tested by membership below,
+              # instead of one `gh issue view` per branch: branch deletion is
+              # deliberately out of scope, so agent/issue-* branches only
+              # accumulate over time, and a per-branch lookup would become a
+              # meaningful share of the 1000-requests/hour GITHUB_TOKEN
+              # budget on a repo with a few hundred of them, run four times a
+              # day, with continue-on-error: true silently swallowing the
+              # resulting throttling. This also sidesteps the deleted-issue
+              # class entirely: a branch naming an issue that no longer
+              # exists simply has no match in this set and is not counted,
+              # rather than repeatedly retrying a permanent 404.
               while IFS= read -r BRANCH; do
                 [ -z "$BRANCH" ] && continue
                 grep -qxF "$BRANCH" "$open_pr_heads_file" && continue
@@ -502,50 +526,7 @@ jobs:
                   continue
                 fi
 
-                # A deleted or renumbered issue is a permanent condition, not
-                # the transient class the retry loop below exists for: `gh
-                # issue view` fails immediately with "Could not resolve to an
-                # issue" and would otherwise burn three retries every run,
-                # forever, for a branch that can never resolve. Detected and
-                # skipped without retrying, the same way the workflow lookup
-                # further below distinguishes "not found" from "transient".
-                #
-                # A transient failure, in contrast, is per-item like the
-                # sibling read in "Apply label transitions" above (:183): it
-                # skips only this one branch rather than aborting the whole
-                # orphan count to "?", so one bad branch cannot blind the row
-                # to every other orphan that round.
-                issue_state_ok=false
-                issue_state=""
-                issue_not_found=false
-                for ATTEMPT in 1 2 3; do
-                  ISSUE_VIEW_ERR=$(mktemp)
-                  if issue_state=$(gh issue view "$ISSUE" --repo "$TARGET_REPO" \
-                      --json state --jq '.state' 2>"$ISSUE_VIEW_ERR"); then
-                    issue_state_ok=true
-                    rm -f "$ISSUE_VIEW_ERR"
-                    break
-                  fi
-                  if grep -q "Could not resolve to an issue" "$ISSUE_VIEW_ERR"; then
-                    issue_not_found=true
-                    rm -f "$ISSUE_VIEW_ERR"
-                    break
-                  fi
-                  rm -f "$ISSUE_VIEW_ERR"
-                  sleep "$ATTEMPT"
-                done
-
-                if [ "$issue_not_found" = "true" ]; then
-                  echo "::warning::Branch $BRANCH names issue $ISSUE, which no longer exists; skipped."
-                  continue
-                fi
-
-                if [ "$issue_state_ok" != "true" ]; then
-                  echo "::warning::Could not read live state for issue $ISSUE after retries; branch $BRANCH's orphan status is unknown this run."
-                  continue
-                fi
-
-                if [ "$issue_state" = "OPEN" ]; then
+                if grep -qxF "$ISSUE" "$open_issues_file"; then
                   orphan_count=$((orphan_count + 1))
                 fi
               done < "$agent_branches_file"
