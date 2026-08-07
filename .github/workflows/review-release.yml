@@ -655,6 +655,10 @@ jobs:
               ;;
           esac
 
+          # Whether this add succeeded decides what the comment below can
+          # honestly say, so ADD_OK is read only after the retry loop
+          # settles it, and the comment is written after that — not
+          # asserted up front the way the single unretried attempt used to.
           ADD_OK=false
           for ATTEMPT in 1 2 3; do
             if gh pr edit "$PR" --repo "$TARGET_REPO" --add-label "agent:blocked"; then
@@ -663,18 +667,29 @@ jobs:
             fi
             sleep "$ATTEMPT"
           done
-          if [ "$ADD_OK" != "true" ]; then
-            echo "::warning::Pull request $PR: could not apply agent:blocked after retries."
+
+          if [ "$ADD_OK" = "true" ]; then
+            echo "Parked pull request $PR as agent:blocked after a failed review."
+            echo "Parked pull request #$PR as \`agent:blocked\` after a failed review." >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry."
+          else
+            echo "::error::Pull request $PR: could not apply agent:blocked after retries; it was NOT parked."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's review failed, but the workflow could not"
+              echo "> apply \`agent:blocked\` after retries, so it was NOT parked."
+              echo "> Inspect it by hand and add \`agent:blocked\` yourself, or restore"
+              echo "> \`agent:review\` to retry."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COMMENT_BODY="Review stopped, but the workflow could not apply the agent:blocked label after retries, so this pull request was NOT parked. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then add agent:blocked by hand (or restore agent:review to retry)."
           fi
 
-          # By this point agent:blocked has already been attempted (it may
-          # have failed above, warned, and continued), so a failure here
-          # would otherwise leave the park with no explanation and no trace
-          # beyond a non-zero exit inside this continue-on-error step. Guard
-          # it like its sibling in the lifecycle-label safety net below.
-          gh pr comment "$PR" --repo "$TARGET_REPO" \
-            --body "Review stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID, then remove agent:blocked and restore agent:review to retry." ||
-            echo "::warning::Could not comment on pull request $PR explaining the park."
+          # The label outcome above is already reported, so a failure here
+          # would otherwise leave it with no trace beyond a non-zero exit
+          # inside this continue-on-error step. Guard it like its sibling in
+          # the lifecycle-label safety net below.
+          gh pr comment "$PR" --repo "$TARGET_REPO" --body "$COMMENT_BODY" ||
+            echo "::warning::Could not comment on pull request $PR explaining the outcome."
 
       - name: Ensure the reviewed pull request keeps a lifecycle label
         if: >-
