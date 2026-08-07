@@ -559,8 +559,37 @@ jobs:
           # is invisible to this lane forever and absent from the queue-health
           # summary. Restoring agent:review makes the next scheduled run
           # re-review it, which converges; parking would need a human instead.
-          LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
-            --jq '[.labels[].name] | join(" ")')
+          #
+          # This is the final line of defense in the job, and it is already
+          # continue-on-error, so an unretried read that fails here means the
+          # safety net silently does nothing — if the pull request genuinely
+          # ended the run label-less, it becomes permanently invisible, with
+          # nothing reaching the run summary. Retry the read, and on
+          # exhaustion warn loudly rather than blindly re-adding
+          # agent:review, which would cost a redundant review session on
+          # every exhausted transient even when the pull request in fact
+          # still holds a lifecycle label.
+          LABELS=""
+          LABELS_OK=false
+          for ATTEMPT in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --repo "$TARGET_REPO" --json labels \
+                --jq '[.labels[].name] | join(" ")'); then
+              LABELS_OK=true
+              break
+            fi
+            sleep "$ATTEMPT"
+          done
+
+          if [ "$LABELS_OK" != "true" ]; then
+            echo "::warning::Could not read labels on pull request $PR after retries; the lifecycle-label safety net could not run."
+            {
+              echo "> [!WARNING]"
+              echo "> Pull request #$PR's labels could not be read, so the"
+              echo "> lifecycle-label safety net could not run. Inspect it by hand."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           case " $LABELS " in
             *" agent:review "* | *" agent:approved "* | \
             *" agent:changes-requested "* | *" agent:blocked "*)
