@@ -500,10 +500,30 @@ jobs:
             # lane's only selection key — to a stranger's pull request and point
             # the human at it, while the lane's own stayed stranded. Admit only
             # a branch in this repository.
-            FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
-              --json url,isCrossRepository \
-              --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""' \
-              || echo "")
+            #
+            # Retried like the label edits below: this lookup runs while the
+            # API is already flaky enough to have lost the pull-request url in
+            # the first place, and a single failed attempt here would fall
+            # through to the no-pull-request path and post the exact
+            # duplicate-requeue instruction #377 closed. Guarded like the
+            # agent:blocked loop below, not exited like the claim loop: this
+            # runs under continue-on-error and must never trip set -e.
+            FOUND_URL=""
+            FOUND_URL_OK=false
+            for ATTEMPT in 1 2 3; do
+              if FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
+                --json url,isCrossRepository \
+                --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""'); then
+                FOUND_URL_OK=true
+                break
+              fi
+              sleep "$ATTEMPT" ||
+                echo "::warning::Interrupted while waiting to retry the pull-request lookup for branch $BRANCH."
+            done
+            if [ "$FOUND_URL_OK" != "true" ]; then
+              echo "::warning::Could not look up an existing pull request for branch $BRANCH after retries."
+              FOUND_URL=""
+            fi
             if [ -n "$FOUND_URL" ]; then
               PR_URL="$FOUND_URL"
             fi
