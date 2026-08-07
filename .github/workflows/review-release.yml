@@ -262,6 +262,7 @@ jobs:
           PR: ${{ steps.select.outputs.pr }}
           TARGET_REPO: ${{ github.repository }}
           VERDICT: ${{ fromJSON(steps.review.outputs.structured_output || '{}').verdict }}
+          SUMMARY: ${{ fromJSON(steps.review.outputs.structured_output || '{}').summary }}
         run: |
           # The reviewer no longer holds gh pr edit; this is the only place
           # a verdict label gets written, derived from the model's typed
@@ -312,6 +313,37 @@ jobs:
               exit 1
               ;;
           esac
+
+          # The model's structured summary is the only place its reasoning
+          # survives if the PR comment it also posts never lands (transient
+          # gh failure, or the session hits its turn limit first). Record it
+          # here so a verdict never lands with nothing saying why.
+          #
+          # GITHUB_STEP_SUMMARY is rendered as Markdown but, unlike stdout,
+          # is never parsed for workflow commands, so the stop-commands fence
+          # above doesn't apply here. What untrusted Markdown can still do is
+          # render as if it were ours: a fake "## ..." heading claiming a
+          # different verdict, raw HTML, a link. Put it in its own fenced
+          # code block instead, where it renders as inert text, and bound its
+          # length like the issue-comment fetch above. Widen the fence past
+          # any backtick run already in the summary first, so embedded
+          # backticks can't close it early and let the rest render live.
+          BOUNDED_SUMMARY="${SUMMARY:0:4000}"
+          FENCE='```'
+          while :; do
+            case "$BOUNDED_SUMMARY" in
+              *"$FENCE"*) FENCE="${FENCE}\`" ;;
+              *) break ;;
+            esac
+          done
+          {
+            echo
+            echo "### Reviewer verdict: $VERDICT"
+            echo
+            echo "$FENCE"
+            printf '%s\n' "$BOUNDED_SUMMARY"
+            echo "$FENCE"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # agent:review may already be gone if a human removed it while the
           # review was in flight, and the other verdict label is only present
