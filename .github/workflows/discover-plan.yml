@@ -132,7 +132,12 @@ jobs:
         run: |
           # agent:review, agent:approved, and agent:changes-requested are only
           # ever applied to pull requests, and `gh issue list` excludes those —
-          # counting them as issues would report 0 forever.
+          # counting them as issues would report 0 forever. agent:blocked is
+          # the one lifecycle label applied to both kinds of work — `Mark
+          # failed work as blocked` in implement.yml labels issues, `Mark
+          # failed review as blocked` in review-release.yml labels pull
+          # requests — so it appears in both lists below and gets a row for
+          # each scope.
           issue_labels=(
             "agent:needs-plan"
             "agent:ready"
@@ -143,6 +148,7 @@ jobs:
             "agent:review"
             "agent:approved"
             "agent:changes-requested"
+            "agent:blocked"
           )
 
           {
@@ -152,16 +158,13 @@ jobs:
             echo "| --- | --- | ---: |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          ready_count=0
           blocked_count=0
           for label in "${issue_labels[@]}"; do
             count=$(gh issue list --repo "$TARGET_REPO" --state open \
               --label "$label" --limit 200 --json number --jq 'length' || echo "?")
             echo "| \`$label\` | issues | $count |" >> "$GITHUB_STEP_SUMMARY"
 
-            if [[ "$label" == "agent:ready" ]]; then
-              ready_count=$count
-            elif [[ "$label" == "agent:blocked" ]]; then
+            if [[ "$label" == "agent:blocked" ]]; then
               blocked_count=$count
             fi
           done
@@ -172,11 +175,46 @@ jobs:
             echo "| \`$label\` | pull requests | $count |" >> "$GITHUB_STEP_SUMMARY"
           done
 
-          if [[ "$ready_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ ]] &&
-             (( ready_count == 0 && blocked_count > 0 )); then
+          # A label count is not a selectability count: `agent:ready` and
+          # `agent:blocked` are independent --label filters, so an issue
+          # carrying both is counted once in each. That state is reachable —
+          # `Mark failed work as blocked` in implement.yml adds agent:blocked
+          # and only then removes agent:ready and agent:implementing as
+          # separate calls, so a failure between the add and the removes
+          # leaves an issue with all three labels. Query selectability the
+          # same way `Select one ready issue` in implement.yml does, rather
+          # than inferring it from the per-label counts above.
+          selectable_count=$(gh issue list --repo "$TARGET_REPO" --state open \
+            --label "agent:ready" \
+            --search "-label:agent:implementing -label:agent:blocked" \
+            --limit 200 --json number --jq 'length' || echo "?")
+
+          # An issue keeps agent:ready while it is being implemented — `Claim the
+          # issue` adds agent:implementing without removing agent:ready, and both
+          # go only when the pull request opens or the run is parked. So an
+          # in-flight issue is deliberately not selectable, and warning on that
+          # would cry wolf for the length of every implementation run. The queue
+          # is stuck only when nothing is selectable AND nothing is in flight.
+          #
+          # agent:implementing together with agent:blocked is never a genuinely
+          # in-flight run, though: `Claim the issue` only ever labels an issue
+          # that is agent:ready and not blocked, so that pairing can only be the
+          # documented `Mark failed work as blocked` outcome — its 3x-retried add
+          # of agent:blocked succeeded, but the single unretried removal of
+          # agent:implementing and agent:ready afterward failed. Query in-flight
+          # the same way selectable_count is queried above, rather than trusting
+          # the raw agent:implementing label count.
+          in_flight_count=$(gh issue list --repo "$TARGET_REPO" --state open \
+            --label "agent:implementing" \
+            --search "-label:agent:blocked" \
+            --limit 200 --json number --jq 'length' || echo "?")
+
+          if [[ "$selectable_count" =~ ^[0-9]+$ && "$blocked_count" =~ ^[0-9]+$ &&
+                "$in_flight_count" =~ ^[0-9]+$ ]] &&
+             (( selectable_count == 0 && in_flight_count == 0 && blocked_count > 0 )); then
             {
               echo
               echo "> [!WARNING]"
-              echo "> Queue cannot drain: no issues are ready and $blocked_count are blocked."
+              echo "> Queue cannot drain: nothing is selectable, nothing is in flight, and $blocked_count are blocked."
             } >> "$GITHUB_STEP_SUMMARY"
           fi

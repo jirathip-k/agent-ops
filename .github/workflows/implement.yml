@@ -207,12 +207,60 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
           ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
         run: |
-          # Admit only comments from people with write access to the repository,
-          # plus github-actions, which is the identity the planning lane comments
-          # as. On a public repository anyone can comment on an issue that is
-          # already agent:ready, so an unfiltered read would hand the untrusted
-          # input surface to the whole internet. Bound the volume too: CI
-          # reporters post as github-actions and can be thousands of lines.
+          # The select admits two independent things: comments whose
+          # authorAssociation is OWNER, MEMBER, or COLLABORATOR, and,
+          # regardless of association, any comment authored by the
+          # github-actions login. The association clause alone is "invited
+          # to the repository or affiliated with the owning org", not "has
+          # write access": COLLABORATOR includes read-only and triage
+          # invitees, and on a public repository MEMBER means org
+          # membership, which does not by itself imply any repository
+          # permission. By association alone the filter excludes NONE,
+          # CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, and
+          # MANNEQUIN — but that exclusion does not hold for the filter as
+          # a whole. The github-actions login clause bypasses association
+          # entirely, and github-actions itself carries authorAssociation
+          # CONTRIBUTOR in this repository: it is how the planning lane's
+          # own comments are admitted. So CONTRIBUTOR is not excluded in
+          # general, only a CONTRIBUTOR comment from a login other than
+          # github-actions is. On a public repository anyone can comment on
+          # an issue that is already agent:ready, so an unfiltered read
+          # would hand the untrusted input surface to the whole internet.
+          #
+          # github-actions is admitted by login, not by provenance: any
+          # workflow in the target repository that comments with the
+          # default GITHUB_TOKEN posts as github-actions, so a CI reporter
+          # that echoes fork-authored text into a comment would be
+          # admitted too, indistinguishable from genuine CI output or the
+          # planning lane's own comments. A per-repository allowlist of
+          # trusted reporting workflows would close that gap; this filter
+          # does not have one.
+          #
+          # .[-5:] and [:4000] bound the volume the github-actions login
+          # can put through this filter: CI reporters post as
+          # github-actions and a single issue's CI traffic can run to
+          # thousands of lines across many comments, and the login clause
+          # admits all of it regardless of association. These two caps are
+          # what keeps that path bounded. That bounding is applied to the
+          # combined admitted set, after select, with no separate quota per
+          # authorAssociation, so github-actions volume can evict the
+          # trusted path too: measured, one OWNER comment followed by six
+          # github-actions comments admits five github-actions comments and
+          # drops the OWNER comment — the maintainer's instruction is gone
+          # entirely.
+          #
+          # .body is passed through unfiltered and uncapped, unlike every
+          # comment. An adopted backlog issue opened by the public keeps
+          # its original body once a maintainer labels it agent:ready;
+          # that human label is currently the only gate on the body's
+          # authorship, and narrowing this further has not been
+          # revisited. This makes the body the widest remaining public
+          # channel into this file, and the only unbounded one.
+          #
+          # gh fetches every comment before jq discards all but the last
+          # five; the filtering is client-side and cannot avoid paginating
+          # first. Harmless at this system's volume, worth knowing if this
+          # filter is ever reused somewhere with far more comment traffic.
           #
           # Write to a scratch file and only move it onto ISSUE_FILE once an
           # attempt succeeds: `cmd > "$ISSUE_FILE"` truncates the destination
@@ -500,10 +548,31 @@ jobs:
             # lane's only selection key — to a stranger's pull request and point
             # the human at it, while the lane's own stayed stranded. Admit only
             # a branch in this repository.
-            FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
-              --json url,isCrossRepository \
-              --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""' \
-              || echo "")
+            #
+            # Retried like the label edits below: this lookup runs while the
+            # API is already flaky enough to have lost the pull-request url in
+            # the first place, and a single failed attempt here would wrongly
+            # tell the human no pull request exists when the lookup just
+            # failed to check, instead of the correct pull-request message
+            # below. Guarded like the agent:blocked loop below, not exited
+            # like the claim loop: this runs under continue-on-error and must
+            # never trip set -e.
+            FOUND_URL=""
+            FOUND_URL_OK=false
+            for ATTEMPT in 1 2 3; do
+              if FOUND_URL=$(gh pr list --repo "$TARGET_REPO" --head "$BRANCH" --state open \
+                --json url,isCrossRepository \
+                --jq 'map(select(.isCrossRepository == false)) | .[0].url // ""'); then
+                FOUND_URL_OK=true
+                break
+              fi
+              sleep "$ATTEMPT" ||
+                echo "::warning::Interrupted while waiting to retry the pull-request lookup for branch $BRANCH."
+            done
+            if [ "$FOUND_URL_OK" != "true" ]; then
+              echo "::warning::Could not look up an existing pull request for branch $BRANCH after retries."
+              FOUND_URL=""
+            fi
             if [ -n "$FOUND_URL" ]; then
               PR_URL="$FOUND_URL"
             fi
@@ -540,6 +609,23 @@ jobs:
           if [ -n "$PR_URL" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped after draft pull request $PR_URL was created. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Requeuing would open a second pull request. Review or close $PR_URL instead. If it is missing agent:review, add that label to return it to the review queue."
+          elif [ -n "$BRANCH" ] && [ "$BLOCKED_LABEL_OK" = "true" ]; then
+            # Publish implementation branch succeeded but no pull request was
+            # found for it, and the lookup above found none either. The work
+            # is not lost, only invisible to every lane; name the branch so a
+            # human can find it, since requeuing publishes a new one rather
+            # than reusing this one (#406). Review and Release selects on the
+            # agent:review label alone, so a pull request opened by hand from
+            # that branch is invisible to it too until labelled — say so, the
+            # same way the PR_URL branch above does.
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped after publishing branch $BRANCH, but no pull request was found for it. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The completed work is on that branch; open a pull request from it by hand if it should proceed, or delete the branch if it should not. If you open one, add agent:review to it so Review and Release picks it up. Requeuing this issue publishes a new branch rather than reusing this one, so only remove agent:blocked and add agent:ready if you want a fresh attempt instead."
+          elif [ -n "$BRANCH" ]; then
+            # agent:blocked never landed, so the usual requeue instruction
+            # names a label that is not there and leaves the one that is;
+            # still name the branch so the work is not lost track of.
+            gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
+              --body "Implementation stopped, and this issue could not be labelled agent:blocked. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The completed work is on branch $BRANCH, with no pull request found for it; open one by hand if it should proceed, and add agent:review to it so Review and Release picks it up. This issue still carries agent:implementing, which keeps it out of the queue: remove that label to requeue it, noting that a requeue publishes a new branch rather than reusing this one."
           elif [ "$BLOCKED_LABEL_OK" = "true" ]; then
             gh issue comment "$ISSUE" --repo "$TARGET_REPO" \
               --body "Implementation stopped. Inspect workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. To requeue, remove agent:blocked and add agent:ready."
