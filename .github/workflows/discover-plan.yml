@@ -495,7 +495,8 @@ jobs:
           branches_ok=false
           branches_file=$(mktemp)
           for ATTEMPT in 1 2 3; do
-            if gh api "repos/$TARGET_REPO/branches" --paginate \
+            if gh api "repos/$TARGET_REPO/branches" --method GET --paginate \
+                -f per_page=100 \
                 --jq '.[].name' > "$branches_file"; then
               branches_ok=true
               break
