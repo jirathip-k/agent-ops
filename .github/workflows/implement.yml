@@ -236,18 +236,26 @@ jobs:
           # trusted reporting workflows would close that gap; this filter
           # does not have one.
           #
-          # .[-5:] and [:4000] bound the volume the github-actions login
-          # can put through this filter: CI reporters post as
+          # [:4000] and a tail slice bound the volume the github-actions
+          # login can put through this filter: CI reporters post as
           # github-actions and a single issue's CI traffic can run to
           # thousands of lines across many comments, and the login clause
-          # admits all of it regardless of association. These two caps are
-          # what keeps that path bounded. That bounding is applied to the
-          # combined admitted set, after select, with no separate quota per
-          # authorAssociation, so github-actions volume can evict the
-          # trusted path too: measured, one OWNER comment followed by six
-          # github-actions comments admits five github-actions comments and
-          # drops the OWNER comment — the maintainer's instruction is gone
-          # entirely.
+          # admits all of it regardless of association. The tail slice is
+          # taken independently per author class — OWNER/MEMBER/COLLABORATOR
+          # comments sliced to their last 5, github-actions comments sliced
+          # to its last 5, the two tails combined and put back in
+          # chronological order — rather than on the combined admitted set,
+          # so github-actions volume can no longer evict the trusted class:
+          # measured, one OWNER comment followed by six github-actions
+          # comments now admits the OWNER comment plus the five most recent
+          # github-actions comments, six total, not five with the OWNER
+          # comment dropped. This costs more of the untrusted path than the
+          # single shared slice did: worst case is now 5 trusted plus 5
+          # github-actions comments, up to 10 admitted instead of 5, each
+          # still capped at 4000 characters, so up to roughly 40,000
+          # characters of comment body instead of 20,000. Still bounded, by
+          # a fixed constant independent of how many comments the issue
+          # actually has, just twice the prior constant.
           #
           # .body is passed through unfiltered and uncapped, unlike every
           # comment. An adopted backlog issue opened by the public keeps
@@ -257,10 +265,11 @@ jobs:
           # revisited. This makes the body the widest remaining public
           # channel into this file, and the only unbounded one.
           #
-          # gh fetches every comment before jq discards all but the last
-          # five; the filtering is client-side and cannot avoid paginating
-          # first. Harmless at this system's volume, worth knowing if this
-          # filter is ever reused somewhere with far more comment traffic.
+          # gh fetches every comment before jq discards all but the two
+          # per-class tails; the filtering is client-side and cannot avoid
+          # paginating first. Harmless at this system's volume, worth
+          # knowing if this filter is ever reused somewhere with far more
+          # comment traffic.
           #
           # Write to a scratch file and only move it onto ISSUE_FILE once an
           # attempt succeeds: `cmd > "$ISSUE_FILE"` truncates the destination
@@ -272,12 +281,14 @@ jobs:
           for ATTEMPT in 1 2 3; do
             if gh issue view "$ISSUE" --repo "$TARGET_REPO" --json title,body,comments \
               --jq '[ "# " + .title, (.body // "") ]
-                    + ( [ .comments[]
-                          | select(.authorAssociation == "OWNER"
-                                or .authorAssociation == "MEMBER"
-                                or .authorAssociation == "COLLABORATOR"
-                                or .author.login == "github-actions") ]
-                        | .[-5:]
+                    + ( ( [ .comments[]
+                            | select(.authorAssociation == "OWNER"
+                                  or .authorAssociation == "MEMBER"
+                                  or .authorAssociation == "COLLABORATOR") ]
+                          | .[-5:] )
+                        + ( [ .comments[] | select(.author.login == "github-actions") ]
+                            | .[-5:] )
+                        | sort_by(.createdAt)
                         | map("---\n\n### Comment by " + (.author.login // "unknown")
                               + "\n\n" + ((.body // "")[:4000])) )
                     | join("\n\n")' > "$FETCH_TMP"; then
