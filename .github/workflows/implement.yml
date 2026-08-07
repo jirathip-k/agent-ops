@@ -207,12 +207,60 @@ jobs:
           TARGET_REPO: ${{ github.repository }}
           ISSUE_FILE: ${{ runner.temp }}/agent-issue.md
         run: |
-          # Admit only comments from people with write access to the repository,
-          # plus github-actions, which is the identity the planning lane comments
-          # as. On a public repository anyone can comment on an issue that is
-          # already agent:ready, so an unfiltered read would hand the untrusted
-          # input surface to the whole internet. Bound the volume too: CI
-          # reporters post as github-actions and can be thousands of lines.
+          # The select admits two independent things: comments whose
+          # authorAssociation is OWNER, MEMBER, or COLLABORATOR, and,
+          # regardless of association, any comment authored by the
+          # github-actions login. The association clause alone is "invited
+          # to the repository or affiliated with the owning org", not "has
+          # write access": COLLABORATOR includes read-only and triage
+          # invitees, and on a public repository MEMBER means org
+          # membership, which does not by itself imply any repository
+          # permission. By association alone the filter excludes NONE,
+          # CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, and
+          # MANNEQUIN — but that exclusion does not hold for the filter as
+          # a whole. The github-actions login clause bypasses association
+          # entirely, and github-actions itself carries authorAssociation
+          # CONTRIBUTOR in this repository: it is how the planning lane's
+          # own comments are admitted. So CONTRIBUTOR is not excluded in
+          # general, only a CONTRIBUTOR comment from a login other than
+          # github-actions is. On a public repository anyone can comment on
+          # an issue that is already agent:ready, so an unfiltered read
+          # would hand the untrusted input surface to the whole internet.
+          #
+          # github-actions is admitted by login, not by provenance: any
+          # workflow in the target repository that comments with the
+          # default GITHUB_TOKEN posts as github-actions, so a CI reporter
+          # that echoes fork-authored text into a comment would be
+          # admitted too, indistinguishable from genuine CI output or the
+          # planning lane's own comments. A per-repository allowlist of
+          # trusted reporting workflows would close that gap; this filter
+          # does not have one.
+          #
+          # .[-5:] and [:4000] bound the volume the github-actions login
+          # can put through this filter: CI reporters post as
+          # github-actions and a single issue's CI traffic can run to
+          # thousands of lines across many comments, and the login clause
+          # admits all of it regardless of association. These two caps are
+          # what keeps that path bounded. That bounding is applied to the
+          # combined admitted set, after select, with no separate quota per
+          # authorAssociation, so github-actions volume can evict the
+          # trusted path too: measured, one OWNER comment followed by six
+          # github-actions comments admits five github-actions comments and
+          # drops the OWNER comment — the maintainer's instruction is gone
+          # entirely.
+          #
+          # .body is passed through unfiltered and uncapped, unlike every
+          # comment. An adopted backlog issue opened by the public keeps
+          # its original body once a maintainer labels it agent:ready;
+          # that human label is currently the only gate on the body's
+          # authorship, and narrowing this further has not been
+          # revisited. This makes the body the widest remaining public
+          # channel into this file, and the only unbounded one.
+          #
+          # gh fetches every comment before jq discards all but the last
+          # five; the filtering is client-side and cannot avoid paginating
+          # first. Harmless at this system's volume, worth knowing if this
+          # filter is ever reused somewhere with far more comment traffic.
           #
           # Write to a scratch file and only move it onto ISSUE_FILE once an
           # attempt succeeds: `cmd > "$ISSUE_FILE"` truncates the destination
