@@ -138,13 +138,17 @@ jobs:
           OUTPUT_FILE=$(mktemp)
           printf '%s' "$STRUCTURED_OUTPUT" > "$OUTPUT_FILE"
 
-          if ! jq -e '(.transitions // []) | type == "array"' "$OUTPUT_FILE" > /dev/null 2>&1; then
+          # A bare `// []` default here would turn a missing or renamed
+          # `transitions` key into "zero transitions" — indistinguishable
+          # from a genuine idle run — so an object missing the required key
+          # entirely must fail this check, not fall through it.
+          if ! jq -e 'type == "object" and has("transitions") and (.transitions | type == "array")' "$OUTPUT_FILE" > /dev/null 2>&1; then
             echo "::error::Discover and plan's structured output did not conform to the expected schema."
             exit 1
           fi
 
           TRANSITIONS_FILE=$(mktemp)
-          jq -c '.transitions // [] | .[]' "$OUTPUT_FILE" > "$TRANSITIONS_FILE"
+          jq -c '.transitions | .[]' "$OUTPUT_FILE" > "$TRANSITIONS_FILE"
 
           {
             echo "## Label transitions"
